@@ -3,11 +3,11 @@
 ![Arnika](img/ARNIKA-logo_128_2x.png)
 -->
 
-<div style="text-align: center;">
+<div align="center">
     <img src="img/ARNIKA-logo_128_2x.png">
+    <h1> Arnika - Quantum secure VPN</h1>
 </div>
 
-<h1 style="text-align: center;"> Arnika - Quantum secure VPN</h1>
 
 **Arnika** is a compact, **lightweight external extension for Wireguard VPN**, engineered to incorporate symmetric keys as Pre-Shared Keys (**PSK**) into Wireguard. This integration ensures the establishment of a quantum-secure VPN (safeguarding against compromise of session keys).
 
