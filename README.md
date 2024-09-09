@@ -4,7 +4,7 @@
 -->
 
 <div align="center">
-    <img src="img/ARNIKA-logo_128_2x.png">
+    <img src="img/ARNIKA_banner.png">
     <h1> Arnika - Quantum secure VPN</h1>
 </div>
 
