@@ -73,6 +73,7 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 
 ---
 
+
 # Requirements
 
 The `Secure Application Entity` consists of following components running on a secure and hardened linux system:
@@ -80,14 +81,74 @@ The `Secure Application Entity` consists of following components running on a se
 * Rosenpass
 * Arnika
 
+### golang version
+
+Version 1.22 => `golang-1.22`
 
 
 # Limitations
 
-[!IMPORTANT]
-* `Arnika` is designed to provide a PSK directly to a local wireguard only.
+> [!IMPORTANT]
+> **ARNIKA** is designed to provide a PSK directly to a local wireguard instance only
 
 ---
+
+
+# Install golang
+
+## Ubuntu 22.04.x
+
+```bash
+apt install golang-1.22
+export PATH=/usr/lib/go-1.22/bin/:$PATH
+```
+
+```shell
+$ go version
+go version go1.22.2 linux/amd64
+```
+
+
+
+> [!CAUTION]
+> The default golang version shipped with Ubuntu 22.04 is outdated and does not meet the requirements. Install and use `golang-1.22` instead.
+> ```shell
+> $ apt install golang-go
+> $ go version
+> go version go1.18.1 linux/amd64
+> $ make build
+> /home/arnika/arnika/go.mod:3: invalid go version '1.22.1': > must match format 1.23
+> ```
+
+
+---
+
+
+# Build
+
+```bash
+make build
+```
+
+```shell
+nean@qcicat01:~/arnika$ make build
+Building arnika
+CGO_ENABLED=0 go build -trimpath -ldflags "-w -s -extldflags=-Wl,-Bsymbolic -X 'main.Version=v0.2.0-14-gd429061' -X 'main.APPName=arnika'" -o build/arnika .
+go: downloading golang.org/x/crypto v0.8.0
+go: downloading golang.zx2c4.com/wireguard/wgctrl v0.0.0-20230429144221-925a1e7659e6
+go: downloading golang.zx2c4.com/wireguard v0.0.0-20230325221338-052af4a8072b
+go: downloading github.com/mdlayher/genetlink v1.3.2
+go: downloading github.com/mdlayher/netlink v1.7.2
+go: downloading golang.org/x/sys v0.7.0
+go: downloading golang.org/x/net v0.9.0
+go: downloading github.com/josharian/native v1.1.0
+go: downloading github.com/mdlayher/socket v0.4.1
+go: downloading golang.org/x/sync v0.1.0
+```
+
+
+---
+
 
 # Start Dev Environment
 
@@ -97,7 +158,7 @@ The `Secure Application Entity` consists of following components running on a se
 go run tools/mock.go
 ```
 
-now you can use the QKD KMS mock at http://127.0.0.1:8080
+now you can use the QKD KMS mock at `http://127.0.0.1:8080`
 
 ## Start Arnika #1
 
@@ -111,12 +172,6 @@ http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:999
 http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:9998 SERVER_ADDRESS=127.0.0.1:9999 INTERVAL=1m KMS_URL="https://QKDServer/api/v1/keys/CONSB" WIREGUARD_INTERFACE=qcicat0 WIREGUARD_PEER_PUBLIC_KEY="****************" build/arnika
 ```
 
-
-# Build
-
-```bash
-make build
-```
 
 # Configuration
 
