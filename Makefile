@@ -1,6 +1,6 @@
 # Define the name of the application and its version
 NAME := arnika
-VERSION := $(shell git describe --long --always)
+VERSION := $(shell git describe --tags --always)
 
 # Define the Go compiler and other tools
 GO = go
