@@ -160,6 +160,10 @@ go run tools/mock.go
 
 now you can use the QKD KMS mock at `http://127.0.0.1:8080`
 
+> [!NOTE]
+> The QKD KMS mock can be downloaded as a compiled `kms` binary from the release page and run without the need for golang.
+
+
 ## Start Arnika #1
 
 ```bash
