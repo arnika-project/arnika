@@ -81,6 +81,14 @@ The `Secure Application Entity` consists of following components running on a se
 * Rosenpass
 * Arnika
 
+### Wireguard
+
+Wireguard must be installed/setup separately before Arnika can be used. For further installation instructions, refer to the [WireGuard](https://www.wireguard.com/) homepage.
+
+### Rosenpass
+
+Rosenpass is optional, Arnika can run without Rosenpass / PQC, then it will run in QKD mode only. For further installation instructions, refer to the [Rosenpass](https://rosenpass.eu/) homepage.
+
 ### golang version
 
 Version 1.22 => `golang-1.22`
@@ -89,7 +97,7 @@ Version 1.22 => `golang-1.22`
 # Limitations
 
 > [!IMPORTANT]
-> **ARNIKA** is designed to provide a PSK directly to a local wireguard instance only
+> **ARNIKA** is designed to provide a PSK directly to a local wireguard instance only. This means **Wireguard** and **ARNIKA** must run on the same machine/kernel.
 
 ---
 
@@ -124,9 +132,24 @@ go version go1.22.2 linux/amd64
 ---
 
 
-# Build
+# Build binaries from source
+
+> [!NOTE]
+> **arnika** and **kms** (mock) binary can be downloaded as a compiled binary from the release page and run without the need for golang.
+
+Following steps are required to build the binaries from source.
+
+The binaries can be copied to the target system (matching architecture) or directory and executed.
+No further dependencies are required, all necessary libraries are statically linked, and the binaries are self-contained.
+
+The configuration for **arnika** is done via environment variables.
+
+# compile Arnika
 
 ```bash
+git clone git@github.com:arnika-project/arnika.git
+cd arnika
+go mod tidy
 make build
 ```
 
@@ -146,22 +169,50 @@ go: downloading github.com/mdlayher/socket v0.4.1
 go: downloading golang.org/x/sync v0.1.0
 ```
 
+The result is a single binary `arnika` located in the new created subdirecory `build/arnika`
+
+```shell
+./build/arnika
+2025/03/24 17:32:42.399684 Failed to parse config: Failed to get environment variable: LISTEN_ADDRESS
+```
+
+## compile KMS simulator
+
+```bash
+git clone git@github.com:arnika-project/arnika.git
+cd arnika/tools
+go mod tidy
+go build
+# rename `tools` to `kms`
+mv -v tools kms
+```
+
+The result is a single binary `tools` located in the new created subdirecory `tools`. It is recommended to rename it eg. to `kms`.
+
+> [!Note]
+> **kms** aka `mock` is designed to test **Arnika**, it is **NOT** a full featured ETSI014 Simulator.
+>
+> Static used values are, if adoption is required please change the source code:
+> * listening port is `8080`
+> * `http` only
+> * `CONSA` and `CONSB` as **SAE**
+> * `key` and `key_ID`
+
+
+
 
 ---
 
 
 # Start Dev Environment
 
-## Start QKD KMS mock
+## Start QKD KMS mock via go
 
 ```bash
 go run tools/mock.go
 ```
 
 now you can use the QKD KMS mock at `http://127.0.0.1:8080`
-
-> [!NOTE]
-> The QKD KMS mock can be downloaded as a compiled `kms` binary from the release page and run without the need for golang.
 
 
 ## Start Arnika #1
@@ -188,7 +239,7 @@ Arnika must be configured via environment variables, following are available:
 | CERTIFICATE | certificate file for cert authentication  | /etc/ssl/certs/arnika.crt |
 | PRIVATE_KEY | private key file for cert authentication | /etc/ssl/private/arnika.key |
 | CA_CERTIFICATE | CA certificate file for cert authentication | /etc/ssl/certs/ca-bundle.crt |
-| KMS_URL | URL of QKD KMS | https://localhost:8080/api/v1/keys/CONSA |
+| KMS_URL | URL of ETSI014 QKD KMS | https://localhost:8080/api/v1/keys/CONSA |
 | INTERVAL | interval between key requests to QKD KMS | 120s |
 | WIREGUARD_INTERFACE | name of the WireGuard interface | qcicat0 |
 | WIREGUARD_PEER_PUBLIC_KEY | public key of peer in WireGuard format | 8978940b-fb48-4ebf-ad7d-ca36a987fc32 |
