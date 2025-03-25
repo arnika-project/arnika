@@ -97,7 +97,9 @@ Version 1.22 => `golang-1.22`
 # Limitations
 
 > [!IMPORTANT]
-> **ARNIKA** is designed to provide a PSK directly to a local wireguard instance only. This means **Wireguard** and **ARNIKA** must run on the same machine/kernel.
+> **ARNIKA** is designed to provide a PSK directly to a local wireguard instance only.
+> 
+> This means **Wireguard** and **ARNIKA** must run on the same machine/kernel.
 
 ---
 
@@ -135,7 +137,7 @@ go version go1.22.2 linux/amd64
 # Build binaries from source
 
 > [!NOTE]
-> **arnika** and **kms** (mock) binary can be downloaded as a compiled binary from the release page and run without the need for golang.
+> **arnika** and **kms** (mock) can be downloaded as a compiled binary from the release page and run without the need for golang.
 
 Following steps are required to build the binaries from source.
 
@@ -169,7 +171,7 @@ go: downloading github.com/mdlayher/socket v0.4.1
 go: downloading golang.org/x/sync v0.1.0
 ```
 
-The result is a single binary `arnika` located in the new created subdirecory `build/arnika`
+The result is a single binary `arnika` located in the new created subdirecory `build` (`build/arnika`).
 
 ```shell
 ./build/arnika
@@ -187,7 +189,7 @@ go build
 mv -v tools kms
 ```
 
-The result is a single binary `tools` located in the new created subdirecory `tools`. It is recommended to rename it eg. to `kms`.
+The result is a single binary `tools` located in the new created subdirecory `tools` (`tools/tools`). It is recommended to rename it eg. to `kms` (`mv tools/tools tools/kms`).
 
 > [!Note]
 > **kms** aka `mock` is designed to test **Arnika**, it is **NOT** a full featured ETSI014 Simulator.
