@@ -14,6 +14,7 @@ type Config struct {
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
 	KMSURL                 string        // KMS_URL, URL of the KMS server
+	KMSHTTPTimeout         time.Duration // KMS_HTTP_TIMEOUT, HTTP connection timeout
 	Interval               time.Duration // INTERVAL, Interval between key updates
 	WireGuardInterface     string        // WIREGUARD_INTERFACE, Name of the WireGuard interface to configure
 	WireguardPeerPublicKey string        // WIREGUARD_PEER_PUBLIC_KEY, Public key of the WireGuard peer
@@ -50,9 +51,14 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	kmsHTTPTimeout, err := time.ParseDuration(getEnvOrDefault("KMS_HTTP_TIMEOUT", "10s"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse KMS_HTTP_TIMEOUT: %v", err)
+	}
+	config.KMSHTTPTimeout = kmsHTTPTimeout
 	interval, err := time.ParseDuration(getEnvOrDefault("INTERVAL", "10s"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse interval: %v", err)
+		return nil, fmt.Errorf("failed to parse INTERVAL: %v", err)
 	}
 	config.Interval = interval
 	config.WireGuardInterface, err = getEnv("WIREGUARD_INTERFACE")

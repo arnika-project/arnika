@@ -186,7 +186,7 @@ func main() {
 	skip := make(chan bool)
 	result := make(chan string)
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
-	kmsServer := kms.NewKMSServer(cfg.KMSURL, 10, kmsAuth)
+	kmsServer := kms.NewKMSServer(cfg.KMSURL, int(cfg.KMSHTTPTimeout.Seconds()), kmsAuth)
 	for {
 		go tcpServer(cfg.ListenAddress, result, done)
 		go func() {
