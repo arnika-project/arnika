@@ -394,7 +394,7 @@ Perform these steps on both Alice and Bob servers:
    **For Bob**:
    ```bash
    sudo tee /opt/arnika/arnika.env > /dev/null << EOF
-   INTERVAL="120s"
+   INTERVAL="137s"  # Alice-Interval 120s + Alice KMS HTTP timeout 10s + Safety 7s => prevent flapping
    LISTEN_ADDRESS="<BOB_IP>:9999"
    SERVER_ADDRESS="<ALICE_IP>:9999"
    CERTIFICATE="/opt/arnika/kms_certs/arnika-bob.crt"
