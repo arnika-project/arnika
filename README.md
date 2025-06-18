@@ -256,7 +256,7 @@ Arnika must be configured via environment variables, following are available:
 ## Cancom Converged Services Gmbh (CCS)
 
 **Arnika** was developed by
-[Cancom Converged Services](https://www.cancom.at/en/industry-focus/provider) and the source code was released under [Apache-2.0]([LICENSE-2.0.txt](https://www.apache.org/licenses/LICENSE-2.0))
+[Cancom Converged Services](https://www.cancom.at/en/industry-focus/provider) and the source code was released under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
 
 
 ## WireGuard
@@ -271,7 +271,7 @@ Arnika must be configured via environment variables, following are available:
 
 
 
-To ensure perfect forward secrecy (**PFS**) and minimizing the impact of key compromise [WireGuard](https://www.wireguard.com/) Rekeying timer is 120 seconds or 2^60 messages.
+To ensure perfect forward secrecy (**PFS**) and minimizing the impact of key compromise [WireGuard](https://www.wireguard.com/) re-keying timer is 120 seconds or 2^60 messages.
 
 Refer to [WireGuard](https://www.wireguard.com/) Homepage [https://www.wireguard.com/protocol/] and Whitepaper [https://www.wireguard.com/papers/wireguard.pdf] for more technical details.
 
@@ -286,25 +286,17 @@ Refer to [WireGuard](https://www.wireguard.com/) Homepage [https://www.wireguard
 
 ## Rosenpass
 
-The Rosenpass protocol provides a post-quantum-secure authenticated key exchange, based on the work Post-quantum WireGuard (PQWG) by Hülsing, Ning, Schwabe, Weber, and Zimmermann [https://eprint.iacr.org/2020/379], but also adds security against state disruption attacks CVE-2021-46873.
+The Rosenpass protocol provides a post-quantum-secure authenticated key exchange, based on the work [Post-quantum WireGuard (PQWG)](https://eprint.iacr.org/2020/379) by Hülsing, Ning, Schwabe, Weber, and Zimmermann, but also adds security against state disruption attacks CVE-2021-46873.
 
 While Rosenpass is designed with WireGuard in mind, it can be used as a stand-alone tool to exchange keys. Using this mode, it can be employed to secure other protocols against attacks from quantum computers. Rosenpass will provide a Post-Quantum Cryptography (PQC) key every 120 seconds.
 
-Rosenpass is using wo different Key Encapsulation Mechanisms (KEMs) Classic McEliece and Kyber
+Rosenpass is using two different Key Encapsulation Mechanisms (KEMs) Classic McEliece and Kyber (refer to the presentation on Classic McEliece at the [Fifth NIST PQC workshop](https://classic.mceliece.org/talks/20240410.pdf)): Classic McEliece is used for long-term keys, the foundation of security for identifying and authenticating the server, as well as for encrypting data to achieve authenticity and confidentiality. Kyber is only used for forward secrecy. A break of the lattice system does not damage security unless the attacker can also steal secret keys through, e.g., hardware theft.
 
-Refer to 10 – 12 Apr. 2024 Fifth NIST PQC workshop [https://classic.mceliece.org/talks/20240410.pdf]
+Rosenpass was funded through NLnet with financial support from the European Commission's NGI Assure program and ProtoType Fund of the Open Knowledge Foundation Germany, financed by the Federal Ministry of Education and Research (BMBF).
 
-Daniel J. Bernstein, Tung Chou, Carlos Cid, Jan Gilcher, Tanja Lange, Varun Maram, Ingo von Maurich, Rafael Misoczki, Ruben Niederhagen, Edoardo Persichetti, Christiane Peters, Nicolas Sendrier, Jakub Szefer, Cen Jung Tjhai, Martin Tomlinson, Wen Wang
+Refer to Rosenpass [homepage](https://rosenpass.eu/) and [whitepaper](https://rosenpass.eu/whitepaper.pdf) for more technical details.
 
-Classic McEliece for long-term keys, the foundation of security for identifying and authenticating the server, as well as for encrypting data. Authenticity and Confidentiality
-
-Kyber just for forward secrecy: a break of the lattice system does not damage security unless the attacker can also steal secret keys through, e.g., hardware theft.
-
-Rosenpass was funded through NLnet with financial support from the European Commission’s NGI Assure program and ProtoType Fund of the Open Knowledge Foundation Germany, financed by the Federal Ministry of Education and Research (BMBF).
-
-Refer to Rosenpass Homepage [https://rosenpass.eu/] and Whitepaper [https://rosenpass.eu/whitepaper.pdf] for more technical details.
-
-Rosenpass is free and open-source software (FOSS) and licensed under Apache 2.0 license
+Rosenpass is free and open-source software (FOSS) and licensed under Apache 2.0 license.
 
 Many thanks to [Karo](https://github.com/koraa) and [Paul](https://github.com/aparcar) from the [**Rosenpass**](https://github.com/rosenpass/rosenpass) project.
 
@@ -317,12 +309,12 @@ Building on the long research experience of Austrian institutions in the field o
 [QCI-CAT](https://qci-cat.at/) will investigate and verify new security applications for public authorities, such as secret sharing and message authentication.
 
 Additionally, [QCI-CAT](https://qci-cat.at/) will also leverage a research testbed for new technological approaches such as the combination of post-quantum encryption with QKD, long-distance QKD with secured trusted nodes and field trials of quantum repeaters.
-
 <br/>
+
 This project has received funding from the [DIGITAL-2021-QCI-01 Digital European Program](https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/digital-2021-qci-01-deploy-national) under Project number No 101091642 and the [National Foundation for Research, Technology and Development](https://www.stiftung-fte.at/).
 
 
-## AIT - Autrian Institute of Technology
+## AIT Austrian Institute of Technology
 
 [AIT Austrian Institute of Technology (AIT)](https://www.ait.ac.at/) is Austria’s largest research and technology organization.
 The institute takes a leading position in the Austrian innovation system and a key role in Europe.
