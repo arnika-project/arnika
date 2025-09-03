@@ -136,11 +136,11 @@ func getPQCKey(pqcKeyFile string) (string, error) {
 func setPSK(psk string, cfg *config.Config, logPrefix string) error {
 	if cfg.UsePQC() {
 		log.Println(logPrefix + " key derivation with PQC key enabled")
-		PQCKey, err := getPQCKey(cfg.PQCPSKFile)
+		pQCKey, err := getPQCKey(cfg.PQCPSKFile)
 		if err != nil {
 			return err
 		}
-		psk, err = kdf.DeriveKey(psk, PQCKey)
+		psk, err = kdf.DeriveKey(psk, pQCKey)
 		if err != nil {
 			return err
 		}
@@ -181,7 +181,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to parse config: %v", err)
 	}
-	interval := time.Duration(cfg.Interval)
+	interval := cfg.Interval
 	done := make(chan bool)
 	skip := make(chan bool)
 	result := make(chan string)

@@ -8,7 +8,7 @@ import (
 
 const Port = "8080"
 
-var data string = `{
+var data = `{
 	"/api/v1/keys/CONSA/enc_keys": {
 		"GET": {
 			"query_parameters": {},
