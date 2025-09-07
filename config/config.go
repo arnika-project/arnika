@@ -53,12 +53,12 @@ func Parse() (*Config, error) {
 	}
 	kmsHTTPTimeout, err := time.ParseDuration(getEnvOrDefault("KMS_HTTP_TIMEOUT", "10s"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse KMS_HTTP_TIMEOUT: %v", err)
+		return nil, fmt.Errorf("failed to parse KMS_HTTP_TIMEOUT: %w", err)
 	}
 	config.KMSHTTPTimeout = kmsHTTPTimeout
 	interval, err := time.ParseDuration(getEnvOrDefault("INTERVAL", "10s"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse INTERVAL: %v", err)
+		return nil, fmt.Errorf("failed to parse INTERVAL: %w", err)
 	}
 	config.Interval = interval
 	config.WireGuardInterface, err = getEnv("WIREGUARD_INTERFACE")
@@ -72,7 +72,7 @@ func Parse() (*Config, error) {
 	config.PQCPSKFile = getEnvOrDefault("PQC_PSK_FILE", "")
 	if config.PQCPSKFile != "" {
 		if _, err := os.Stat(config.PQCPSKFile); os.IsNotExist(err) {
-			return nil, fmt.Errorf("failed to open PQC PSK file: %v", err)
+			return nil, fmt.Errorf("failed to open PQC PSK file: %w", err)
 		}
 	}
 	return config, nil
