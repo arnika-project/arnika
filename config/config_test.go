@@ -27,6 +27,15 @@ func TestUsePQC(t *testing.T) {
 }
 
 func TestParse(t *testing.T) {
+	// Test case 1: Missing environment variable
+	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "KMS_URL", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY"} {
+		_, err := Parse()
+		if err == nil {
+			t.Errorf("Expected an error for missing %s", mandatoryEnvVar)
+		}
+		t.Setenv(mandatoryEnvVar, fmt.Sprintf("value_of_%s", mandatoryEnvVar))
+	}
+
 	// Mocking environment variables for testing
 	t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
 	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
@@ -34,7 +43,7 @@ func TestParse(t *testing.T) {
 	t.Setenv("WIREGUARD_INTERFACE", "wg0")
 	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
 
-	// Test case 1: All environment variables present
+	// Test case 2: All environment variables present
 	expectedConfig := &Config{
 		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
@@ -43,6 +52,7 @@ func TestParse(t *testing.T) {
 		CACertificate:          "", // Default value for CACertificate
 		KMSURL:                 "https://example.com",
 		Interval:               time.Second * 10, // Default value for Interval
+		KMSHTTPTimeout:         time.Second * 10, // Default value for KMSHTTPTimeout
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCPSKFile:             "", // Default value for PQCPSKFile
@@ -52,18 +62,8 @@ func TestParse(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 	}
 	// Assert the values of the config struct here
-	if reflect.DeepEqual(result, expectedConfig) != true {
+	if !reflect.DeepEqual(result, expectedConfig) {
 		t.Errorf("Expected config	%#v, but got %#v", expectedConfig, result)
-	}
-
-	// Test case 2: Missing environment variable
-	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "KMS_URL", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY"} {
-		os.Unsetenv(mandatoryEnvVar)
-		_, err = Parse()
-		if err == nil {
-			t.Errorf("Expected an error for missing %s", mandatoryEnvVar)
-		}
-		os.Setenv(mandatoryEnvVar, fmt.Sprintf("value_of_%s", mandatoryEnvVar))
 	}
 
 	// Test case 3: Interval parsing failure
