@@ -226,7 +226,7 @@ http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:999
 ## Start Arnika #2
 
 ```bash
-http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:9998 SERVER_ADDRESS=127.0.0.1:9999 INTERVAL=1m KMS_URL="https://QKDServer/api/v1/keys/CONSB" WIREGUARD_INTERFACE=qcicat0 WIREGUARD_PEER_PUBLIC_KEY="****************" build/arnika
+http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:9998 SERVER_ADDRESS=127.0.0.1:9999 INTERVAL=1m KMS_URL="http://localhost:8080/api/v1/keys/CONSB" WIREGUARD_INTERFACE=qcicat0 WIREGUARD_PEER_PUBLIC_KEY="****************" build/arnika
 ```
 
 
