@@ -119,7 +119,7 @@ func NewKMSServer(url string, timeout int, kmsAuth *Auth) *KMSHandler {
 // No parameters.
 // Returns a pointer to a Key struct and an error.
 func (q *KMSHandler) GetNewKey() (*Key, error) {
-	return q.kmsRequest("/enc_keys")
+	return q.kmsRequest("/enc_keys?number=1&size=256")
 }
 
 // GetKeyByID fetches a key from a KMS by its ID.
