@@ -181,6 +181,38 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to parse config: %v", err)
 	}
+
+	// Print startup configuration
+	log.Println("=== Arnika Configuration ===")
+	log.Printf("Listen Address:           %s", cfg.ListenAddress)
+	log.Printf("Server Address:           %s", cfg.ServerAddress)
+	log.Printf("KMS URL:                  %s", cfg.KMSURL)
+	log.Printf("KMS HTTP Timeout:         %s", cfg.KMSHTTPTimeout)
+	log.Printf("Key Rotation Interval:    %s", cfg.Interval)
+	log.Printf("WireGuard Interface:      %s", cfg.WireGuardInterface)
+	log.Printf("WireGuard Peer PublicKey: %s", cfg.WireguardPeerPublicKey)
+	if cfg.Certificate != "" {
+		log.Printf("Client Certificate:       %s", cfg.Certificate)
+	} else {
+		log.Printf("Client Certificate:       (not configured)")
+	}
+	if cfg.PrivateKey != "" {
+		log.Printf("Private Key:              %s", cfg.PrivateKey)
+	} else {
+		log.Printf("Private Key:              (not configured)")
+	}
+	if cfg.CACertificate != "" {
+		log.Printf("CA Certificate:           %s", cfg.CACertificate)
+	} else {
+		log.Printf("CA Certificate:           (not configured)")
+	}
+	if cfg.UsePQC() {
+		log.Printf("PQC PSK File:             %s (ENABLED)", cfg.PQCPSKFile)
+	} else {
+		log.Printf("PQC PSK File:             (disabled)")
+	}
+	log.Println("============================")
+
 	interval := cfg.Interval
 	done := make(chan bool)
 	skip := make(chan bool)
