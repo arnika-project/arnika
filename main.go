@@ -185,6 +185,7 @@ func main() {
 	done := make(chan bool)
 	skip := make(chan bool)
 	result := make(chan string)
+	keySuccess := make(chan bool, 1)
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
 	kmsServer := kms.NewKMSServer(cfg.KMSURL, int(cfg.KMSHTTPTimeout.Seconds()), kmsAuth)
 	for {
@@ -206,6 +207,12 @@ func main() {
 				err = setPSK(key.GetKey(), cfg, "<-- BACKUP:")
 				if err != nil {
 					log.Println(err.Error())
+				} else {
+					// Signal successful key exchange
+					select {
+					case keySuccess <- true:
+					default:
+					}
 				}
 			}
 		}()
@@ -236,9 +243,45 @@ func main() {
 					err = setPSK(key.GetKey(), cfg, "--> MASTER:")
 					if err != nil {
 						log.Println(err.Error())
+					} else {
+						// Signal successful key exchange
+						select {
+						case keySuccess <- true:
+						default:
+						}
 					}
 				}
 				<-ticker.C
+			}
+		}()
+		// Failsafe timer: if key exchange doesn't succeed within interval + 30s, inject random key
+		go func() {
+			failsafeTicker := time.NewTicker(interval + 30*time.Second)
+			defer failsafeTicker.Stop()
+			for {
+				select {
+				case <-failsafeTicker.C:
+					// Check if a successful key exchange occurred
+					select {
+					case <-keySuccess:
+						// Key exchange succeeded, reset and continue
+						log.Println("FAILSAFE: Key exchange successful, timer reset")
+					default:
+						// No successful key exchange, inject random key
+						log.Println("FAILSAFE: No successful key exchange detected, injecting random key to disrupt communication")
+						randomKey, err := kdf.GenerateRandomKey()
+						if err != nil {
+							log.Printf("FAILSAFE: Failed to generate random key: %v\n", err)
+							continue
+						}
+						err = setPSK(randomKey, cfg, "FAILSAFE:")
+						if err != nil {
+							log.Printf("FAILSAFE: Failed to set random key: %v\n", err)
+						} else {
+							log.Println("FAILSAFE: Random key injected successfully - communication disrupted")
+						}
+					}
+				}
 			}
 		}()
 		<-done
