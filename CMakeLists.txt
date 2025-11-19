@@ -30,7 +30,7 @@ add_go_executable(arnika main.go)
 # Configure the service file so that it knows where the
 # binary was installed.
 set(SERVICE_NAME arnika.service)
-set(EXE_PATH ${CMAKE_INSTALL_PREFIX}/bin/hello-world)
+set(EXE_PATH ${CMAKE_INSTALL_PREFIX}/bin/arnika)
 set(SERVICE_IN ${SERVICE_NAME}.in)
 set(SERVICE_OUT ${CMAKE_CURRENT_BINARY_DIR}/${SERVICE_NAME})
 configure_file(${SERVICE_IN} ${SERVICE_OUT} @ONLY)
