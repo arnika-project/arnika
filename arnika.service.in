@@ -1,0 +1,13 @@
+[Unit]
+Description=Arnika Quantum Secure VPN
+Wants=NetworkManager-wait-online.service
+Requires=NetworkManager-wait-online.service
+
+[Service]
+Type=simple
+ExecStart=@EXE_PATH@
+EnvironmentFile=/etc/arnika/conf.ini
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
