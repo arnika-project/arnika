@@ -78,8 +78,8 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 
 The `Secure Application Entity` consists of following components running on a secure and hardened linux system:
 * Wireguard
-* Rosenpass
 * Arnika
+* Rosenpass (optional)
 
 ### Wireguard
 
@@ -91,15 +91,20 @@ Rosenpass is optional, Arnika can run without Rosenpass / PQC, then it will run 
 
 ### golang version
 
-Version 1.22 => `golang-1.22`
+Version >1.22 => `golang-1.22`
 
 
 # Limitations
 
 > [!IMPORTANT]
-> **ARNIKA** is designed to provide a PSK directly to a local wireguard instance only.
+> **ARNIKA** is designed to provide a **PSK** directly to a local wireguard instance only.
 > 
 > This means **Wireguard** and **ARNIKA** must run on the same machine/kernel.
+>
+> A race condition may occur if **ARNIKA** is started in development environments on the same host at _exactly_ the same time.
+> This is intentional and a consequence of the simple yet robust state mechanism.
+> This will be changed in an upcoming major release and it has no impact on production and can be avoided by starting both with a random delay and using the recommended interval values.
+>
 
 ---
 
