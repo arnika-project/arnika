@@ -14,7 +14,6 @@ execute_process(
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-set(ENV{CGO_ENABLED} "0")
 
 # compose ldflags as a single string and pass as a separate COMMAND arg
 set(GO_LDFLAGS "-w -s -extldflags=-Wl,-Bsymbolic -X main.Version=${VERSION} -X main.APPName=${PROJECT_NAME}")
