@@ -19,7 +19,7 @@ fi
 
 # Only print about the service if it was installed for the first time.
 if [ $1 -eq 1 ]; then
-    printf %"$COLUMNS"s |tr " " "-"
+    printf %${COLUMNS:-80}s | tr " " "-"
     echo "$service_name was installed but wasn't started or enabled."
-    printf %"$COLUMNS"s |tr " " "-"
+    printf %${COLUMNS:-80}s | tr " " "-"
 fi
