@@ -11,5 +11,5 @@ service_name=@SERVICE_NAME@
 # Only remove the service file if we're removing the last
 # version of the package.
 if [ $1 -eq 0 ]; then
-    rm %{_unitdir}/$service_name
+    rm @SYSTEMD_UNITDIR@/$service_name
 fi
