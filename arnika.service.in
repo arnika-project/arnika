@@ -1,6 +1,7 @@
 [Unit]
 Description=Arnika Quantum Secure VPN
 Requires=NetworkManager-wait-online.service
+After=NetworkManager-wait-online.service
 [Service]
 Type=simple
 ExecStart=@EXE_PATH@
