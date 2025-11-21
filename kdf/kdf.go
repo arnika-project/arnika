@@ -1,6 +1,7 @@
 package kdf
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -29,4 +30,18 @@ func DeriveKey(kmsKey, pqcKey string) (string, error) {
 		return "", fmt.Errorf("error generating derived key: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(derivedKey), nil
+}
+
+// GenerateRandomKey generates a cryptographically secure random key.
+// This is used as a failsafe mechanism to disrupt communication when key exchange fails.
+//
+// Returns:
+// - string: a base64-encoded random 32-byte key
+// - error: an error if random generation fails
+func GenerateRandomKey() (string, error) {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", fmt.Errorf("error generating random key: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(randomBytes), nil
 }
