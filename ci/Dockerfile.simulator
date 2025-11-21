@@ -1,0 +1,16 @@
+# Dockerfile for QKD Simulator (mock KMS server)
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /build
+COPY tools/mock.go .
+COPY go.mod go.sum ./
+
+RUN go build -o /qkd-simulator mock.go
+
+FROM alpine:latest
+
+RUN apk add --no-cache bash iproute2 iputils
+
+COPY --from=builder /qkd-simulator /usr/local/bin/qkd-simulator
+
+CMD ["/usr/local/bin/qkd-simulator"]

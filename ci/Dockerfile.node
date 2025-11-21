@@ -1,0 +1,21 @@
+# Dockerfile for Arnika test nodes
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /build
+COPY . .
+
+RUN go build -o /arnika .
+
+FROM alpine:latest
+
+RUN apk add --no-cache \
+    bash \
+    wireguard-tools \
+    iproute2 \
+    iputils \
+    curl \
+    jq
+
+COPY --from=builder /arnika /usr/local/bin/arnika
+
+CMD ["sleep", "infinity"]
