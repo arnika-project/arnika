@@ -29,7 +29,7 @@ if(NOT CMAKE_Go_COMPILER)
       PATHS ${Go_BIN_PATH}
     )
     execute_process(COMMAND ${CMAKE_Go_COMPILER} version OUTPUT_VARIABLE GOLANG_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
-    STRING(REGEX MATCH "go[0-9]+.[0-9]+.[0-9]+[ /A-Za-z0-9]*" VERSION "${GOLANG_VERSION}")
+    string(REGEX MATCH "go[0-9]+\\.[0-9]+\\.[0-9]+[ /A-Za-z0-9]*" VERSION "${GOLANG_VERSION}")
     message("-- The Golang compiler identification is ${VERSION}")
     message("-- Check for working Golang compiler: ${CMAKE_Go_COMPILER}")
   endif()
