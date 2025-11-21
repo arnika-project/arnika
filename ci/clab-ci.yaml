@@ -14,6 +14,11 @@ topology:
       image: arnika-node:ci
       binds:
       - ./node-a:/etc/arnika
+      stages:
+        configure:
+          exec:
+          - command: containerlab tools netem set -n clab-arnika-ci-test-node-a -i eth2 --delay 1s
+            target: host
       exec:
       - bash -lc 'ip addr add 192.168.100.2/30 dev eth1 && ip link set eth1 up'
       - bash -lc 'ip addr add 10.0.0.1/30 dev eth2 && ip link set eth2 up'
