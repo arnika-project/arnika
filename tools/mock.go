@@ -1,173 +1,135 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
+
+	"github.com/google/uuid"
 )
 
 const Port = "8080"
 
-var data = `{
-	"/api/v1/keys/CONSA/enc_keys": {
-		"GET": {
-			"query_parameters": {},
-			"response": {
-				"status": 200,
-				"headers": {
-					"Content-Type": "application/json"
-				},
-				"body": {
-					"keys": [
-						{
-							"key": "wsybeAl6RwvP48e538L/SN9b8vtTUsvk1tL7YT4sgF0=",
-							"key_ID": "cba66e30-85d8-447e-ad00-f89042e282d8"
-						}
-					]
-				}
-			}
-		}
-	},
-	"/api/v1/keys/CONSA/dec_keys": {
-		"GET": {
-			"query_parameters": {
-				"key_ID": "cba66e30-85d8-447e-ad00-f89042e282d8"
-			},
-			"response": {
-				"status": 200,
-				"headers": {
-					"Content-Type": "application/json"
-				},
-				"body": {
-					"keys": [
-						{
-							"key": "wsybeAl6RwvP48e538L/SN9b8vtTUsvk1tL7YT4sgF0=",
-							"key_ID": "cba66e30-85d8-447e-ad00-f89042e282d8"
-						}
-					]
-				}
-			}
-		}
-	},
-	"/api/v1/keys/CONSB/enc_keys": {
-		"GET": {
-			"query_parameters": {},
-			"response": {
-				"status": 200,
-				"headers": {
-					"Content-Type": "application/json"
-				},
-				"body": {
-					"keys": [
-						{
-							"key": "wsybeAl6RwvP48e538L/SN9b8vtTUsvk1tL7YT4sgF0=",
-							"key_ID": "cba66e30-85d8-447e-ad00-f89042e282d8"
-						}
-					]
-				}
-			}
-		}
-	},
-	"/api/v1/keys/CONSB/dec_keys": {
-		"GET": {
-			"query_parameters": {
-				"key_ID": "cba66e30-85d8-447e-ad00-f89042e282d8"
-			},
-			"response": {
-				"status": 200,
-				"headers": {
-					"Content-Type": "application/json"
-				},
-				"body": {
-					"keys": [
-						{
-							"key": "wsybeAl6RwvP48e538L/SN9b8vtTUsvk1tL7YT4sgF0=",
-							"key_ID": "cba66e30-85d8-447e-ad00-f89042e282d8"
-						}
-					]
-				}
-			}
-		}
-	}
-}`
-
 const LOG = "[%d] %s %s"
 
-type mockData map[string]map[string]mockEndpoint
-
-type mockEndpoint struct {
-	QueryParameters map[string]string `json:"query_parameters"`
-	Response        response
+type KeyStore struct {
+	mu   sync.RWMutex
+	keys map[string]string // key_ID -> key
 }
 
-type response struct {
-	Status  int
-	Headers map[string]string
-	Body    any
+type KeyResponse struct {
+	Keys []Key `json:"keys"`
 }
 
-var mock mockData
+type Key struct {
+	KeyID string `json:"key_ID"`
+	Key   string `json:"key"`
+}
+
+var keyStore = &KeyStore{
+	keys: make(map[string]string),
+}
 
 func main() {
-	if err := json.Unmarshal([]byte(data), &mock); err != nil {
-		panic("error parsing mock data json: " + err.Error())
-	}
+	// Register handlers for both CONSA and CONSB
+	http.HandleFunc("/api/v1/keys/CONSA/enc_keys", handleEncKeys)
+	http.HandleFunc("/api/v1/keys/CONSA/dec_keys", handleDecKeys)
+	http.HandleFunc("/api/v1/keys/CONSB/enc_keys", handleEncKeys)
+	http.HandleFunc("/api/v1/keys/CONSB/dec_keys", handleDecKeys)
 
-	for endpoint := range mock {
-		http.HandleFunc(endpoint, handler)
-	}
-
+	log.Printf("QKD Simulator starting on port %s", Port)
 	if err := http.ListenAndServe(":"+Port, nil); err != nil {
 		panic("error starting server: " + err.Error())
 	}
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	data := mock[r.URL.Path][r.Method]
-	for k, v := range data.Response.Headers {
-		w.Header().Set(k, v)
-	}
-	if len(data.QueryParameters) > 0 {
-		queryParams := r.URL.Query()
-		if len(queryParams) == 0 {
-			notFoundResponse(w, r)
-			return
-		}
-		for k, v := range data.QueryParameters {
-			if val, ok := queryParams[k]; !ok || (len(val) == 0 || len(val) > 0 && val[0] != v) {
-				notFoundResponse(w, r)
-				return
-			}
-		}
-	}
-	w.WriteHeader(data.Response.Status)
-	body, err := json.Marshal(data.Response.Body)
-	if err != nil {
-		internlServerResponse(w, r, err)
+// handleEncKeys generates a new key and returns it
+func handleEncKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, err := w.Write(body); err != nil {
-		internlServerResponse(w, r, err)
+
+	// Generate a new UUID
+	keyID := uuid.New().String()
+
+	// Generate key material as SHA256 hash of the UUID
+	hash := sha256.Sum256([]byte(keyID))
+	keyMaterial := base64.StdEncoding.EncodeToString(hash[:])
+
+	// Store the key
+	keyStore.mu.Lock()
+	keyStore.keys[keyID] = keyMaterial
+	keyStore.mu.Unlock()
+
+	// Return the key
+	response := KeyResponse{
+		Keys: []Key{
+			{
+				KeyID: keyID,
+				Key:   keyMaterial,
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
+
+	log.Printf(LOG, http.StatusOK, r.Method, r.URL.Path)
+}
+
+// handleDecKeys retrieves a previously generated key by ID
+func handleDecKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	log.Printf(LOG, http.StatusOK, r.Method, r.URL.Path+getQueryParamaters(r))
+
+	// Get key_ID from query parameter
+	keyID := r.URL.Query().Get("key_ID")
+	if keyID == "" {
+		http.Error(w, "Missing key_ID parameter", http.StatusBadRequest)
+		log.Printf(LOG, http.StatusBadRequest, r.Method, r.URL.Path)
+		return
+	}
+
+	// Retrieve the key
+	keyStore.mu.RLock()
+	keyMaterial, exists := keyStore.keys[keyID]
+	keyStore.mu.RUnlock()
+
+	if !exists {
+		http.Error(w, "Key not found", http.StatusNotFound)
+		log.Printf(LOG, http.StatusNotFound, r.Method, r.URL.Path+"?key_ID="+keyID)
+		return
+	}
+
+	// Return the key
+	response := KeyResponse{
+		Keys: []Key{
+			{
+				KeyID: keyID,
+				Key:   keyMaterial,
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
+
+	log.Printf(LOG, http.StatusOK, r.Method, r.URL.Path+getQueryParameters(r))
 }
 
-func notFoundResponse(w http.ResponseWriter, r *http.Request) {
-	log.Printf(LOG, http.StatusNotFound, r.Method, r.URL.Path+getQueryParamaters(r))
-	w.WriteHeader(http.StatusNotFound)
-	w.Header().Set("Content-Type", "text/plain")
-	w.Write([]byte("404 page not found\n"))
-}
-
-func internlServerResponse(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf(LOG, http.StatusInternalServerError, r.Method, r.URL.Path+getQueryParamaters(r))
-	w.WriteHeader(http.StatusInternalServerError)
-	w.Header().Set("Content-Type", "text/plain")
-	w.Write([]byte("error writing response body: " + err.Error()))
-}
-
-func getQueryParamaters(r *http.Request) string {
+func getQueryParameters(r *http.Request) string {
 	if r.URL.RawQuery != "" {
 		return "?" + r.URL.RawQuery
 	}
