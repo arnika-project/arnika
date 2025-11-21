@@ -52,9 +52,17 @@ func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// Generate a new UUID
-	keyID := uuid.New().String()
+	
+	// create an RFC4122-compatible UUID whose first 4 bytes are 0xff
+	u := uuid.New()             // type uuid.UUID == [16]byte
+	for i := 0; i < 4; i++ {    // set first 4 bytes -> first 8 hex chars "ffffffff"
+		u[i] = 0xff
+	}
+	// ensure RFC4122 v4 version and variant bits are correct
+	u[6] = (u[6] & 0x0f) | 0x40 // set version = 4
+	u[8] = (u[8] & 0x3f) | 0x80 // set variant = RFC4122 (10xx)
+	
+	keyID := u.String() // e.g. "ffffffff-xxxx-4xxx-8xxx-xxxxxxxxxxxx"
 
 	// Generate key material as SHA256 hash of the UUID
 	hash := sha256.Sum256([]byte(keyID))
