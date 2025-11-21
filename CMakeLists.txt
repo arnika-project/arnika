@@ -47,7 +47,7 @@ install(FILES ${SERVICE_OUT} DESTINATION share)
 #
 # Each script has the option of performing verbose logging
 # Switch this variable to TRUE to enable those logs.
-# I found this helpful while troubeshooting package upgrades.
+# I found this helpful while troubleshooting package upgrades.
 set(VERBOSE_LOGGING FALSE)
 set(POST_IN ${CMAKE_CURRENT_LIST_DIR}/post.sh.in)
 set(POST_OUT ${CMAKE_CURRENT_BINARY_DIR}/post.sh)
