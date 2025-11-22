@@ -4,21 +4,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"sync"
-
-	"github.com/google/uuid"
+	"sync/atomic"
 )
 
 const Port = "8080"
 
 const LOG = "[%d] %s %s"
-
-type KeyStore struct {
-	mu   sync.RWMutex
-	keys map[string]string // key_ID -> key
-}
 
 type KeyResponse struct {
 	Keys []Key `json:"keys"`
@@ -29,9 +23,7 @@ type Key struct {
 	Key   string `json:"key"`
 }
 
-var keyStore = &KeyStore{
-	keys: make(map[string]string),
-}
+var counter atomic.Int64
 
 func main() {
 	// Register handlers for both CONSA and CONSB
@@ -53,25 +45,14 @@ func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// create an RFC4122-compatible UUID whose first 4 bytes are 0xff
-	u := uuid.New()             // type uuid.UUID == [16]byte
-	for i := 0; i < 4; i++ {    // set first 4 bytes -> first 8 hex chars "ffffffff"
-		u[i] = 0xff
-	}
-	// ensure RFC4122 v4 version and variant bits are correct
-	u[6] = (u[6] & 0x0f) | 0x40 // set version = 4
-	u[8] = (u[8] & 0x3f) | 0x80 // set variant = RFC4122 (10xx)
+	// Generate reproducible key ID using counter in UUIDv4 format
+	// Format: ffffffff-xxxx-4xxx-8xxx-xxxxxxxxxxxx with counter at the end
+	// UUIDv4: version 4 (0100) in position 12-15, variant (10xx) in position 16-17
+	keyID := fmt.Sprintf("ffffffff-ffff-4fff-8fff-%012d", counter.Add(1))
 	
-	keyID := u.String() // e.g. "ffffffff-xxxx-4xxx-8xxx-xxxxxxxxxxxx"
-
-	// Generate key material as SHA256 hash of the UUID
+	// Generate key material as SHA256 hash of the key ID
 	hash := sha256.Sum256([]byte(keyID))
 	keyMaterial := base64.StdEncoding.EncodeToString(hash[:])
-
-	// Store the key
-	keyStore.mu.Lock()
-	keyStore.keys[keyID] = keyMaterial
-	keyStore.mu.Unlock()
 
 	// Return the key
 	response := KeyResponse{
@@ -107,16 +88,9 @@ func handleDecKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve the key
-	keyStore.mu.RLock()
-	keyMaterial, exists := keyStore.keys[keyID]
-	keyStore.mu.RUnlock()
-
-	if !exists {
-		http.Error(w, "Key not found", http.StatusNotFound)
-		log.Printf(LOG, http.StatusNotFound, r.Method, r.URL.Path+"?key_ID="+keyID)
-		return
-	}
+	// Regenerate the key material from the key ID (deterministic)
+	hash := sha256.Sum256([]byte(keyID))
+	keyMaterial := base64.StdEncoding.EncodeToString(hash[:])
 
 	// Return the key
 	response := KeyResponse{
