@@ -27,6 +27,7 @@ INTERVAL=5s \
 KMS_URL="http://192.168.101.1:8080/api/v1/keys/CONSB" \
 WIREGUARD_INTERFACE=wg0 \
 WIREGUARD_PEER_PUBLIC_KEY="$(cat /etc/arnika/node-a.pub)" \
+MODE="AtLeastQkdRequired" \
 arnika &>> /tmp/arnika.log &
 
 echo "Node-b started successfully"
