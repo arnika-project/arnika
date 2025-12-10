@@ -139,7 +139,9 @@ func setPSK(wireguard *wg.WireGuardHandler, psk string, cfg *config.Config, logP
 		pQCKey, err := getPQCKey(cfg.PQCPSKFile)
 		if err != nil {
 			if cfg.IsPQCRequired() {
-				wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+				if err2 := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err2 != nil {
+					err = fmt.Errorf("%w, failed to set random PSK: %w", err, err2)
+				}
 				return fmt.Errorf("%s failed to read PQC key from file: %w, configure random PSK since mode is set to %s", logPrefix, err, cfg.Mode)
 			}
 			log.Println(logPrefix + " failed to read PQC key from file, using only KMS key since mode is set to " + cfg.Mode)
@@ -153,7 +155,9 @@ func setPSK(wireguard *wg.WireGuardHandler, psk string, cfg *config.Config, logP
 		}
 	}
 	if psk == "" {
-		wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+		if err := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err != nil {
+			return fmt.Errorf("%s failed to set random PSK: %w", logPrefix, err)
+		}
 		return fmt.Errorf("%s no keys left, configure random PSK", logPrefix)
 	}
 	log.Println(logPrefix + " configure wireguard interface")
