@@ -98,7 +98,7 @@ Version >1.22 => `golang-1.22`
 
 > [!IMPORTANT]
 > **ARNIKA** is designed to provide a **PSK** directly to a local wireguard instance only.
-> 
+>
 > This means **Wireguard** and **ARNIKA** must run on the same machine/kernel.
 >
 > A race condition may occur if **ARNIKA** is started in development environments on the same host at _exactly_ the same time.
@@ -248,10 +248,14 @@ Arnika must be configured via environment variables, following are available:
 | CA_CERTIFICATE | CA certificate file for cert authentication | /etc/ssl/certs/ca-bundle.crt |
 | KMS_URL | URL of ETSI014 QKD KMS | https://localhost:8080/api/v1/keys/CONSA |
 | KMS_HTTP_TIMEOUT | ETSI014 connection timeout for KMS requests | 10s |
+| KMS_BACKOFF_MAX_RETRIES | number of retries for a kms request before giving up | 5 |
+| KMS_BACKOFF_BASE_DELAY | base backoff delay, is exponentially increased with each retry | 100ms |
+| KMS_RETRY_INTERVAL | interval between key requests to QKD KMS in the event of a request failure | half of the INTERVAL value |
 | INTERVAL | interval between key requests to QKD KMS | 120s |
 | WIREGUARD_INTERFACE | name of the WireGuard interface | qcicat0 |
 | WIREGUARD_PEER_PUBLIC_KEY | public key of peer in WireGuard format | 8978940b-fb48-4ebf-ad7d-ca36a987fc32 |
 | PQC_PSK_FILE | file containing PQC preshared key | /rosenpass/pqc.psk |
+| MODE | Operation Mode, possible values are: "QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired" | QkdAndPqcRequired |
 
 ---
 
