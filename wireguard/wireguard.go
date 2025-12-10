@@ -56,3 +56,11 @@ func (wg *WireGuardHandler) SetKey(interfaceName, peerPublicKey, pskString strin
 	}
 	return wg.conn.ConfigureDevice(interfaceName, wgtypes.Config{Peers: []wgtypes.PeerConfig{peer}})
 }
+
+func (wg *WireGuardHandler) SetRandomPSK(interfaceName, peerPublicKey string) error {
+	psk, err := wgtypes.GenerateKey()
+	if err != nil {
+		return err
+	}
+	return wg.SetKey(interfaceName, peerPublicKey, psk.String())
+}

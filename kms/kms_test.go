@@ -85,9 +85,10 @@ func TestIsClientCertAuth(t *testing.T) {
 func TestNewKMSServer(t *testing.T) {
 	// Test case 1: Unauthenticated KMS server
 	url := "https://kms.example.com"
-	timeout := 10
+	timeout := time.Duration(10) * time.Second
+	backoffDefault := time.Duration(100) * time.Millisecond
 	kmsAuth := &Auth{}
-	kmsHandler := NewKMSServer(url, timeout, kmsAuth)
+	kmsHandler := NewKMSServer(url, timeout, 3, backoffDefault, kmsAuth)
 	if kmsHandler == nil {
 		t.Errorf("Expected non-nil KMSHandler")
 	}
@@ -97,7 +98,7 @@ func TestNewKMSServer(t *testing.T) {
 	if kmsHandler.conn == nil {
 		t.Errorf("Expected non-nil conn")
 	}
-	if kmsHandler.conn.Timeout != time.Duration(timeout)*time.Second {
+	if kmsHandler.conn.Timeout != timeout {
 		t.Errorf("Expected timeout %d, got %d", timeout, kmsHandler.conn.Timeout)
 	}
 	if kmsHandler.conn.Transport == nil {
