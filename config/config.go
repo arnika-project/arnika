@@ -125,7 +125,7 @@ func Parse() (*Config, error) {
 			return nil, fmt.Errorf("failed to open PQC PSK file: %w", err)
 		}
 	}
-	config.Mode = getEnvOrDefault("MODE", "QkdAndPqcRequired")
+	config.Mode = getEnvOrDefault("MODE", "AtLeastQkdRequired")
 	if config.Mode != "QkdAndPqcRequired" && config.Mode != "AtLeastQkdRequired" && config.Mode != "AtLeastPqcRequired" && config.Mode != "EitherQkdOrPqcRequired" {
 		return nil, fmt.Errorf("invalid MODE value: %s", config.Mode)
 	}

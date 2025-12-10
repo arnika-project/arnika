@@ -246,8 +246,8 @@ Arnika must be configured via environment variables, following are available:
 | CERTIFICATE | certificate file for cert authentication  | /etc/ssl/certs/arnika.crt |
 | PRIVATE_KEY | private key file for cert authentication | /etc/ssl/private/arnika.key |
 | CA_CERTIFICATE | CA certificate file for cert authentication | /etc/ssl/certs/ca-bundle.crt |
-| KMS_URL | URL of ETSI014 QKD KMS | https://localhost:8080/api/v1/keys/CONSA |
 | KMS_HTTP_TIMEOUT | ETSI014 connection timeout for KMS requests | 10s |
+| KMS_URL | URL of ETSI014 QKD KMS | https://localhost:8080/api/v1/keys/CONSA |
 | KMS_BACKOFF_MAX_RETRIES | number of retries for a kms request before giving up | 5 |
 | KMS_BACKOFF_BASE_DELAY | base backoff delay, is exponentially increased with each retry | 100ms |
 | KMS_RETRY_INTERVAL | interval between key requests to QKD KMS in the event of a request failure | half of the INTERVAL value |
@@ -255,7 +255,7 @@ Arnika must be configured via environment variables, following are available:
 | WIREGUARD_INTERFACE | name of the WireGuard interface | qcicat0 |
 | WIREGUARD_PEER_PUBLIC_KEY | public key of peer in WireGuard format | 8978940b-fb48-4ebf-ad7d-ca36a987fc32 |
 | PQC_PSK_FILE | file containing PQC preshared key | /rosenpass/pqc.psk |
-| MODE | Operation Mode, possible values are: "QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired" | QkdAndPqcRequired |
+| MODE | Operation Mode, possible values are: "QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired" | AtLeastQkdRequired |
 
 ---
 
