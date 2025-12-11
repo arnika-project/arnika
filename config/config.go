@@ -16,7 +16,7 @@ type Config struct {
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
 	KMSURL                 string        // KMS_URL, URL of the KMS server
 	KMSHTTPTimeout         time.Duration // KMS_HTTP_TIMEOUT, HTTP connection timeout
-	KMSBackouffMaxRetries  int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests
+	KMSBackoffMaxRetries  int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests
 	KMSBackoffBaseDelay    time.Duration // KMS_BACKOFF_BASE_DELAY, Base delay for KMS request retries, will get exponentially increased
 	KMSRetryInterval       time.Duration // KMS_RETRY_INTERVAL, Interval between KMS request retries
 	Interval               time.Duration // INTERVAL, Interval between key updates
@@ -48,7 +48,7 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Server Address:           %s\n", c.ServerAddress)
 	fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
 	fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
-	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackouffMaxRetries)
+	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
 	fmt.Printf("KMS Backoff Base Delay:   %s\n", c.KMSBackoffBaseDelay)
 	fmt.Printf("KMS Retry Interval:       %s\n", c.KMSRetryInterval)
 	fmt.Printf("Key Rotation Interval:    %s\n", c.Interval)
@@ -129,7 +129,7 @@ func Parse() (*Config, error) {
 	if config.Mode != "QkdAndPqcRequired" && config.Mode != "AtLeastQkdRequired" && config.Mode != "AtLeastPqcRequired" && config.Mode != "EitherQkdOrPqcRequired" {
 		return nil, fmt.Errorf("invalid MODE value: %s", config.Mode)
 	}
-	config.KMSBackouffMaxRetries, err = strconv.Atoi(getEnvOrDefault("KMS_BACKOFF_MAX_RETRIES", "5"))
+	config.KMSBackoffMaxRetries, err = strconv.Atoi(getEnvOrDefault("KMS_BACKOFF_MAX_RETRIES", "5"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse KMS_BACKOFF_MAX_RETRIES: %w", err)
 	}

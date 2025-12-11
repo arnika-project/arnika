@@ -189,7 +189,7 @@ func main() {
 	skip := make(chan bool)
 	result := make(chan string)
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
-	kmsServer := kms.NewKMSServer(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackouffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
+	kmsServer := kms.NewKMSServer(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
 	wireguard, err := wg.NewWireGuardHandler()
 	if err != nil {
 		log.Panicf("Failed to create WireGuard handler: %v", err)
