@@ -1,3 +1,16 @@
 .DS_Store
 /build
+<<<<<<< HEAD
 .vscode
+=======
+ci/node-a/node-a-pqc.key
+ci/node-a/node-a.key
+ci/node-a/node-a.pub
+ci/node-a/node-b.pub
+ci/node-b/node-b-pqc.key
+ci/node-b/node-b.key
+ci/node-b/node-b.pub
+ci/node-b/node-a.pub
+tools/kms
+tools/mock
+>>>>>>> f26b382 (additional test scripts and build syntax adoption)

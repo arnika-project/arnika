@@ -189,17 +189,15 @@ The result is a single binary `arnika` located in the new created subdirecory `b
 git clone git@github.com:arnika-project/arnika.git
 cd arnika/tools
 go mod tidy
-go build
-# rename `tools` to `kms`
-mv -v tools kms
+go build -o kms
 ```
 
-The result is a single binary `tools` located in the new created subdirecory `tools` (`tools/tools`). It is recommended to rename it eg. to `kms` (`mv tools/tools tools/kms`).
+The result is a single binary `kms` located in the new created subdirecory `tools` (`tools/kms`). If build without `-o` was used, it is recommended to rename it eg. to `kms` (`mv tools/tools tools/kms`).
 
 > [!Note]
 > **kms** aka `mock` is designed to test **Arnika**, it is **NOT** a full featured ETSI014 Simulator.
 >
-> Static used values are, if adoption is required please change the source code:
+> pseudo values are used, if adoption is required please change the source code:
 > * listening port is `8080`
 > * `http` only
 > * `CONSA` and `CONSB` as **SAE**
