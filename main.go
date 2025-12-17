@@ -186,7 +186,7 @@ func main() {
 	cfg.PrintStartupConfig()
 	interval := cfg.Interval
 	done := make(chan bool)
-	skip := make(chan bool)
+	skip := make(chan bool, 1)
 	result := make(chan string)
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
 	kmsServer := kms.NewKMSServer(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
@@ -199,9 +199,10 @@ func main() {
 		go func() {
 			for {
 				r := <-result
-				go func() {
-					skip <- true
-				}()
+				select {
+				case skip <- true:
+				default:
+				}
 				log.Println("<-- BACKUP: received key_id " + r)
 				log.Printf("<-- BACKUP: fetch key_id from %s\n", cfg.KMSURL)
 				// to stuff with key
