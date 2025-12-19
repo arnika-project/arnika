@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,11 @@ var (
 	Version string
 	// allows to overwrite app name on build.
 	APPName string
+)
+
+const (
+	MASTERPREFIX = "--> MASTER:"
+	BACKUPPREFIX = "<-- BACKUP:"
 )
 
 func handleServerConnection(c net.Conn, result chan string) {
@@ -130,35 +136,61 @@ func getPQCKey(pqcKeyFile string) (string, error) {
 	return scanner.Text(), nil
 }
 
-func setPSK(wireguard *wg.WireGuardHandler, psk string, cfg *config.Config, logPrefix string) error {
+func setPSK(wireguard *wg.WireGuardHandler, qkd string, cfg *config.Config, logPrefix string) {
+	psk := qkd
+	msg := ""
+	defer func() {
+		if msg != "" {
+			log.Println(msg)
+			if err := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err != nil {
+				log.Printf("%s ❌ failed to set random PSK: %v", logPrefix, err)
+			}
+		}
+	}()
+	if qkd == "" {
+		if cfg.IsQKDRequired() {
+			msg = fmt.Sprintf("%s ⛔ mode set to %s but no QKD key received, configure random PSK", logPrefix, cfg.Mode)
+			return
+		}
+		log.Printf("%s failed to get QKD key, using only PQC key since mode is set to %s", logPrefix, cfg.Mode)
+	}
 	if cfg.UsePQC() {
-		log.Println(logPrefix + " key derivation with PQC key enabled")
+		log.Printf("%s key derivation with PQC key enabled", logPrefix)
 		pQCKey, err := getPQCKey(cfg.PQCPSKFile)
 		if err != nil {
 			if cfg.IsPQCRequired() {
-				if err2 := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err2 != nil {
-					err = fmt.Errorf("%w, failed to set random PSK: %w", err, err2)
-				}
-				return fmt.Errorf("%s 🚫 failed to read PQC key from file: %w, configure random PSK since mode is set to %s", logPrefix, err, cfg.Mode)
+				msg = fmt.Sprintf("%s ⛔ failed to read PQC key from file: %v, configure random PSK since mode is set to %s", logPrefix, err, cfg.Mode)
+				return
 			}
-			log.Println(logPrefix + " failed to read PQC key from file, using only KMS key since mode is set to " + cfg.Mode)
+			log.Printf("%s failed to read PQC key from file, using only KMS key since mode is set to %s", logPrefix, cfg.Mode)
 		} else {
-			if pQCKey != "" {
-				psk, err = kdf.DeriveKey(psk, pQCKey)
+			pqc, err := base64.StdEncoding.DecodeString(pQCKey)
+			if err != nil {
+				if cfg.IsPQCRequired() {
+					msg = fmt.Sprintf("%s ⛔ failed to decode PQC key: %v, configure random PSK since mode is set to %s", logPrefix, err, cfg.Mode)
+					return
+				} else {
+					log.Printf("%s failed to decode PQC key, using only KMS key since mode is set to %s", logPrefix, cfg.Mode)
+				}
+			}
+			if len(pqc) > 0 {
+				psk, err = kdf.DeriveKey(psk, pqc)
 				if err != nil {
-					return err
+					msg = fmt.Sprintf("%s ⛔ failed to derive key: %v, configure random PSK since mode is set to %s", logPrefix, err, cfg.Mode)
+					return
 				}
 			}
 		}
 	}
 	if psk == "" {
-		if err := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err != nil {
-			return fmt.Errorf("%s ❌ failed to set random PSK: %w", logPrefix, err)
-		}
-		return fmt.Errorf("%s 🚫 no keys left, configure random PSK", logPrefix)
+		msg = fmt.Sprintf("%s ⛔ no keys left, configure random PSK", logPrefix)
+		return
 	}
-	log.Println(logPrefix + " ✅ configure wireguard interface")
-	return wireguard.SetKey(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, psk)
+	if err := wireguard.SetKey(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, psk); err != nil {
+		msg = fmt.Sprintf("%s ❌ failed to set PSK: %v", logPrefix, err)
+		return
+	}
+	log.Printf("%s ✅ configure wireguard interface", logPrefix)
 }
 
 func main() {
@@ -200,31 +232,13 @@ func main() {
 				case skip <- true:
 				default:
 				}
-				log.Println("<-- BACKUP: received key_id " + r)
-				log.Printf("<-- BACKUP: fetch key_id from %s\n", cfg.KMSURL)
-				// to stuff with key
+				log.Printf("%s received key_id %s", BACKUPPREFIX, r)
+				log.Printf("%s fetch key_id from %s\n", BACKUPPREFIX, cfg.KMSURL)
 				key, err := kmsServer.GetKeyByID(r)
 				if err != nil {
-					log.Printf("<-- BACKUP: failed to get qkd from kms: %v", err)
-					if cfg.IsQKDRequired() {
-						log.Printf("<-- BACKUP: 🚫 mode set to %s, configure random PSK", cfg.Mode)
-						err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
-						if err != nil {
-							log.Println(err.Error())
-						}
-						time.Sleep(time.Millisecond * 100)
-						continue
-					}
-					log.Printf("<-- BACKUP: proceeding since mode set to \"%s\"\n", cfg.Mode)
+					log.Printf("%s failed to get QKD from KMS: %v", BACKUPPREFIX, err)
 				}
-				err = setPSK(wireguard, key.GetKey(), cfg, "<-- BACKUP:")
-				if err != nil {
-					log.Printf("<-- BACKUP: 🚫 unable to set PSK: %v, configure random PSK", err)
-					err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
-					if err != nil {
-						log.Printf("<-- BACKUP: ❌ unable to set random PSK: %v", err)
-					}
-				}
+				setPSK(wireguard, key.GetKey(), cfg, BACKUPPREFIX)
 			}
 		}()
 		go func() {
@@ -236,35 +250,19 @@ func main() {
 				case <-skip:
 				default:
 					// get key_id and send
-					log.Printf("--> MASTER: fetch qkd key from %s\n", cfg.KMSURL)
+					log.Printf("%s fetch QKD key from %s\n", MASTERPREFIX, cfg.KMSURL)
 					key, err := kmsServer.GetNewKey()
 					if err != nil {
-						log.Printf("--> MASTER: failed to get qkd from kms: %v", err)
-						if cfg.IsQKDRequired() {
-							log.Printf("--> MASTER: 🚫 mode set to %s, configure random PSK", cfg.Mode)
-							err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
-							if err != nil {
-								log.Printf("--> MASTER: ❌ unable to set random PSK: %v", err)
-							}
-							time.Sleep(cfg.KMSRetryInterval)
-							continue
-						}
-						log.Printf("--> MASTER: proceeding since mode set to \"%s\"\n", cfg.Mode)
+						log.Printf("%s failed to get QKD from KMS: %v", MASTERPREFIX, err)
+						ticker.Reset(cfg.KMSRetryInterval)
 					} else {
-						log.Printf("--> MASTER: send key_id %s to %s\n", key.GetID(), cfg.ServerAddress)
+						log.Printf("%s send key_id %s to %s\n", MASTERPREFIX, key.GetID(), cfg.ServerAddress)
 						err = tcpClient(cfg.ServerAddress, key.GetID())
 						if err != nil {
 							log.Println(err.Error())
 						}
 					}
-					err = setPSK(wireguard, key.GetKey(), cfg, "--> MASTER:")
-					if err != nil {
-						log.Printf("--> MASTER: 🚫 unable to set PSK: %v, configure random PSK", err)
-						err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
-						if err != nil {
-							log.Printf("--> MASTER: ❌ unable to set random PSK: %v", err)
-						}
-					}
+					setPSK(wireguard, key.GetKey(), cfg, MASTERPREFIX)
 				}
 				<-ticker.C
 			}
