@@ -56,8 +56,6 @@ func handleServerConnection(c net.Conn, result chan string) {
 				fmt.Println("Connection closed by remote host.")
 				break
 			}
-			// expected
-			// fmt.Println("Failed to read from connection:", errRead)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -85,7 +83,6 @@ func tcpServer(url string, result chan string, done chan bool) {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
-				log.Println(err.Error())
 				break
 			}
 			go handleServerConnection(c, result)
@@ -142,7 +139,7 @@ func setPSK(wireguard *wg.WireGuardHandler, psk string, cfg *config.Config, logP
 				if err2 := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err2 != nil {
 					err = fmt.Errorf("%w, failed to set random PSK: %w", err, err2)
 				}
-				return fmt.Errorf("%s failed to read PQC key from file: %w, configure random PSK since mode is set to %s", logPrefix, err, cfg.Mode)
+				return fmt.Errorf("%s 🚫 failed to read PQC key from file: %w, configure random PSK since mode is set to %s", logPrefix, err, cfg.Mode)
 			}
 			log.Println(logPrefix + " failed to read PQC key from file, using only KMS key since mode is set to " + cfg.Mode)
 		} else {
@@ -156,11 +153,11 @@ func setPSK(wireguard *wg.WireGuardHandler, psk string, cfg *config.Config, logP
 	}
 	if psk == "" {
 		if err := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err != nil {
-			return fmt.Errorf("%s failed to set random PSK: %w", logPrefix, err)
+			return fmt.Errorf("%s ❌ failed to set random PSK: %w", logPrefix, err)
 		}
-		return fmt.Errorf("%s no keys left, configure random PSK", logPrefix)
+		return fmt.Errorf("%s 🚫 no keys left, configure random PSK", logPrefix)
 	}
-	log.Println(logPrefix + " configure wireguard interface")
+	log.Println(logPrefix + " ✅ configure wireguard interface")
 	return wireguard.SetKey(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, psk)
 }
 
@@ -210,7 +207,7 @@ func main() {
 				if err != nil {
 					log.Printf("<-- BACKUP: failed to get qkd from kms: %v", err)
 					if cfg.IsQKDRequired() {
-						log.Printf("<-- BACKUP: mode set to %s, configure random PSK", cfg.Mode)
+						log.Printf("<-- BACKUP: 🚫 mode set to %s, configure random PSK", cfg.Mode)
 						err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
 						if err != nil {
 							log.Println(err.Error())
@@ -222,7 +219,11 @@ func main() {
 				}
 				err = setPSK(wireguard, key.GetKey(), cfg, "<-- BACKUP:")
 				if err != nil {
-					log.Printf("<-- BACKUP: unable to set random PSK: %v", err)
+					log.Printf("<-- BACKUP: 🚫 unable to set PSK: %v, configure random PSK", err)
+					err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+					if err != nil {
+						log.Printf("<-- BACKUP: ❌ unable to set random PSK: %v", err)
+					}
 				}
 			}
 		}()
@@ -230,6 +231,7 @@ func main() {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
+				ticker.Reset(interval)
 				select {
 				case <-skip:
 				default:
@@ -239,10 +241,10 @@ func main() {
 					if err != nil {
 						log.Printf("--> MASTER: failed to get qkd from kms: %v", err)
 						if cfg.IsQKDRequired() {
-							log.Printf("--> MASTER: mode set to %s, configure random PSK", cfg.Mode)
+							log.Printf("--> MASTER: 🚫 mode set to %s, configure random PSK", cfg.Mode)
 							err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
 							if err != nil {
-								log.Printf("--> MASTER: unable to set random PSK: %v", err)
+								log.Printf("--> MASTER: ❌ unable to set random PSK: %v", err)
 							}
 							time.Sleep(cfg.KMSRetryInterval)
 							continue
@@ -257,7 +259,11 @@ func main() {
 					}
 					err = setPSK(wireguard, key.GetKey(), cfg, "--> MASTER:")
 					if err != nil {
-						log.Printf("--> MASTER: unable to set random PSK: %v", err)
+						log.Printf("--> MASTER: 🚫 unable to set PSK: %v, configure random PSK", err)
+						err = wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+						if err != nil {
+							log.Printf("--> MASTER: ❌ unable to set random PSK: %v", err)
+						}
 					}
 				}
 				<-ticker.C
