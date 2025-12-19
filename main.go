@@ -249,7 +249,7 @@ func main() {
 						}
 						log.Printf("--> MASTER: proceeding since mode set to \"%s\"\n", cfg.Mode)
 					} else {
-						log.Printf("--> MASTER: send key_id to %s\n", cfg.ServerAddress)
+						log.Printf("--> MASTER: send key_id %s to %s\n", key.GetID(), cfg.ServerAddress)
 						err = tcpClient(cfg.ServerAddress, key.GetID())
 						if err != nil {
 							log.Println(err.Error())

@@ -16,7 +16,7 @@ type Config struct {
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
 	KMSURL                 string        // KMS_URL, URL of the KMS server
 	KMSHTTPTimeout         time.Duration // KMS_HTTP_TIMEOUT, HTTP connection timeout
-	KMSBackoffMaxRetries  int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests
+	KMSBackoffMaxRetries   int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests
 	KMSBackoffBaseDelay    time.Duration // KMS_BACKOFF_BASE_DELAY, Base delay for KMS request retries, will get exponentially increased
 	KMSRetryInterval       time.Duration // KMS_RETRY_INTERVAL, Interval between KMS request retries
 	Interval               time.Duration // INTERVAL, Interval between key updates
@@ -51,7 +51,7 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
 	fmt.Printf("KMS Backoff Base Delay:   %s\n", c.KMSBackoffBaseDelay)
 	fmt.Printf("KMS Retry Interval:       %s\n", c.KMSRetryInterval)
-	fmt.Printf("Key Rotation Interval:    %s\n", c.Interval)
+	fmt.Printf("Interval:    							%s\n", c.Interval)
 	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
 	fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
 	fmt.Printf("Mode:                     %s\n", c.Mode)
