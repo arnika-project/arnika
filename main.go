@@ -257,7 +257,7 @@ func main() {
 					}
 					err = setPSK(wireguard, key.GetKey(), cfg, "--> MASTER:")
 					if err != nil {
-						log.Println(err.Error())
+						log.Printf("--> MASTER: unable to set random PSK: %v", err)
 					}
 				}
 				<-ticker.C
