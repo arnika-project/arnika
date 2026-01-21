@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"time"
@@ -11,6 +12,7 @@ import (
 type Config struct {
 	ListenAddress          string        // LISTEN_ADDRESS, Address to listen on for incoming connections
 	ServerAddress          string        // SERVER_ADDRESS, Address of the arnika server
+	ArnikaID               string        // ARNIKA_ID, up to 5-digit identifier (defaults to port number from ListenAddress)
 	Certificate            string        // CERTIFICATE, Path to the client certificate file
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
@@ -44,17 +46,16 @@ func (c *Config) IsQKDRequired() bool {
 
 func (c *Config) PrintStartupConfig() {
 	fmt.Println("=== Arnika Configuration ===")
-	fmt.Printf("Listen Address:           %s\n", c.ListenAddress)
-	fmt.Printf("Server Address:           %s\n", c.ServerAddress)
+	fmt.Printf("Arnika Mode:              %s\n", c.Mode)
+	fmt.Printf("Arnika Interval:          %s\n", c.Interval)
+	fmt.Printf("Arnika ID:                %s\n", c.ArnikaID)
+	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
+	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
 	fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
 	fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
 	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
 	fmt.Printf("KMS Backoff Base Delay:   %s\n", c.KMSBackoffBaseDelay)
 	fmt.Printf("KMS Retry Interval:       %s\n", c.KMSRetryInterval)
-	fmt.Printf("Interval:    							%s\n", c.Interval)
-	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
-	fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
-	fmt.Printf("Mode:                     %s\n", c.Mode)
 
 	if c.Certificate != "" {
 		fmt.Printf("Client Certificate:       %s\n", c.Certificate)
@@ -72,10 +73,14 @@ func (c *Config) PrintStartupConfig() {
 		fmt.Println("CA Certificate:           (not configured)")
 	}
 	if c.UsePQC() {
-		fmt.Printf("PQC PSK File:             %s (ENABLED)\n", c.PQCPSKFile)
+		fmt.Printf("PQC key provider:         ENABLED\n")
+		fmt.Printf("PQC key:                  %s\n", c.PQCPSKFile)
 	} else {
-		fmt.Println("PQC PSK File:             (disabled)")
+		fmt.Println("PQC key provider:        DISABLED")
 	}
+
+	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
+	fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
 	fmt.Println("============================")
 }
 
@@ -93,6 +98,25 @@ func Parse() (*Config, error) {
 	config.ServerAddress, err = getEnv("SERVER_ADDRESS")
 	if err != nil {
 		return nil, err
+	}
+	// Parse ArnikaID from environment or extract port from ListenAddress
+	arnikaIDEnv := os.Getenv("ARNIKA_ID")
+	if arnikaIDEnv != "" {
+		// Validate that it's a number with less than 6 digits
+		if len(arnikaIDEnv) > 5 {
+			return nil, fmt.Errorf("ARNIKA_ID must be smaller than 6 digits, got: %s", arnikaIDEnv)
+		}
+		if _, err := strconv.Atoi(arnikaIDEnv); err != nil {
+			return nil, fmt.Errorf("ARNIKA_ID must be a valid number: %w", err)
+		}
+		config.ArnikaID = arnikaIDEnv
+	} else {
+		// Extract port from ListenAddress as default
+		_, port, err := net.SplitHostPort(config.ListenAddress)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract port from LISTEN_ADDRESS: %w", err)
+		}
+		config.ArnikaID = port
 	}
 	config.Certificate = getEnvOrDefault("CERTIFICATE", "")
 	config.PrivateKey = getEnvOrDefault("PRIVATE_KEY", "")
