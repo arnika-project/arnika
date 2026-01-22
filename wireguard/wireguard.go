@@ -38,12 +38,12 @@ func (wg *WireGuardHandler) SetKey(interfaceName, peerPublicKey, pskString strin
 	// Verify the specified interface exists
 	peers, err := wg.conn.Device(interfaceName)
 	if err != nil {
-		return fmt.Errorf("failed to get device %s: %w", interfaceName, err)
+		return fmt.Errorf("[ERROR] failed to get device %s: %w", interfaceName, err)
 	}
 	// verify that the peer public key exists
 	for _, peer := range peers.Peers {
 		if peer.PublicKey.String() != peerPublicKey {
-			return fmt.Errorf("peer with public key %s not found on interface %s", peerPublicKey, interfaceName)
+			return fmt.Errorf("[ERROR] peer with public key %s not found on interface %s", peerPublicKey, interfaceName)
 		}
 	}
 	psk, err := wgtypes.ParseKey(pskString)
