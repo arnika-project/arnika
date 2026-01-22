@@ -48,6 +48,7 @@ func TestParse(t *testing.T) {
 	expectedConfig := &Config{
 		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
+		ArnikaID:               "8080",
 		Certificate:            "", // Default value for Certificate
 		PrivateKey:             "", // Default value for PrivateKey
 		CACertificate:          "", // Default value for CACertificate
