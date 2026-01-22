@@ -119,7 +119,7 @@ func TestGetEnv(t *testing.T) {
 	// Test case 2: Testing when the environment variable does not exist
 	os.Unsetenv("TEST_ENV")
 	result, err = getEnv("TEST_ENV")
-	expectedError := fmt.Errorf("Failed to get environment variable: TEST_ENV")
+	expectedError := fmt.Errorf("[ERROR] failed to get environment variable: TEST_ENV")
 	if err.Error() != expectedError.Error() {
 		t.Errorf("Expected error: %v, but got: %v", expectedError, err)
 	}
