@@ -104,17 +104,17 @@ func Parse() (*Config, error) {
 	if arnikaIDEnv != "" {
 		// Validate that it's a number with less than 6 digits
 		if len(arnikaIDEnv) > 5 {
-			return nil, fmt.Errorf("ARNIKA_ID must be smaller than 6 digits, got: %s", arnikaIDEnv)
+			return nil, fmt.Errorf("[ERROR] ARNIKA_ID must be smaller than 6 digits, got: %s", arnikaIDEnv)
 		}
 		if _, err := strconv.Atoi(arnikaIDEnv); err != nil {
-			return nil, fmt.Errorf("ARNIKA_ID must be a valid number: %w", err)
+			return nil, fmt.Errorf("[ERROR] ARNIKA_ID must be a valid number: %w", err)
 		}
 		config.ArnikaID = arnikaIDEnv
 	} else {
 		// Extract port from ListenAddress as default
 		_, port, err := net.SplitHostPort(config.ListenAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to extract port from LISTEN_ADDRESS: %w", err)
+			return nil, fmt.Errorf("[ERROR] failed to extract port from LISTEN_ADDRESS: %w", err)
 		}
 		config.ArnikaID = port
 	}
@@ -127,12 +127,12 @@ func Parse() (*Config, error) {
 	}
 	kmsHTTPTimeout, err := time.ParseDuration(getEnvOrDefault("KMS_HTTP_TIMEOUT", "10s"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse KMS_HTTP_TIMEOUT: %w", err)
+		return nil, fmt.Errorf("[ERROR] failed to parse KMS_HTTP_TIMEOUT: %w", err)
 	}
 	config.KMSHTTPTimeout = kmsHTTPTimeout
 	interval, err := time.ParseDuration(getEnvOrDefault("INTERVAL", "10s"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse INTERVAL: %w", err)
+		return nil, fmt.Errorf("[ERROR] failed to parse INTERVAL: %w", err)
 	}
 	config.Interval = interval
 	config.WireGuardInterface, err = getEnv("WIREGUARD_INTERFACE")
@@ -146,28 +146,28 @@ func Parse() (*Config, error) {
 	config.PQCPSKFile = getEnvOrDefault("PQC_PSK_FILE", "")
 	if config.PQCPSKFile != "" {
 		if _, err := os.Stat(config.PQCPSKFile); os.IsNotExist(err) {
-			return nil, fmt.Errorf("failed to open PQC PSK file: %w", err)
+			return nil, fmt.Errorf("[ERROR] failed to open PQC PSK file: %w", err)
 		}
 	}
 	config.Mode = getEnvOrDefault("MODE", "AtLeastQkdRequired")
 	if config.Mode != "QkdAndPqcRequired" && config.Mode != "AtLeastQkdRequired" && config.Mode != "AtLeastPqcRequired" && config.Mode != "EitherQkdOrPqcRequired" {
-		return nil, fmt.Errorf("invalid MODE value: %s", config.Mode)
+		return nil, fmt.Errorf("[ERROR] invalid MODE value: %s", config.Mode)
 	}
 	config.KMSBackoffMaxRetries, err = strconv.Atoi(getEnvOrDefault("KMS_BACKOFF_MAX_RETRIES", "5"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse KMS_BACKOFF_MAX_RETRIES: %w", err)
+		return nil, fmt.Errorf("[ERROR] failed to parse KMS_BACKOFF_MAX_RETRIES: %w", err)
 	}
 	kmsBackoffBaseDelay, err := time.ParseDuration(getEnvOrDefault("KMS_BACKOFF_BASE_DELAY", "100ms"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse KMS_BACKOFF_BASE_DELAY: %w", err)
+		return nil, fmt.Errorf("[ERROR] failed to parse KMS_BACKOFF_BASE_DELAY: %w", err)
 	}
 	config.KMSBackoffBaseDelay = kmsBackoffBaseDelay
 	config.KMSRetryInterval, err = time.ParseDuration(getEnvOrDefault("KMS_RETRY_INTERVAL", (config.Interval / 2).String()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse KMS_RETRY_INTERVAL: %w", err)
+		return nil, fmt.Errorf("[ERROR] failed to parse KMS_RETRY_INTERVAL: %w", err)
 	}
 	if !config.UsePQC() && config.IsPQCRequired() {
-		return nil, fmt.Errorf("PQC PSK file must be set when MODE is %s", config.Mode)
+		return nil, fmt.Errorf("[ERROR] PQC PSK file missing as MODE is %s", config.Mode)
 	}
 	return config, nil
 }
@@ -202,7 +202,7 @@ func getEnvOrDefault(key, defaultValue string) string {
 func getEnv(key string) (string, error) {
 	v := os.Getenv(key)
 	if v == "" {
-		return "", fmt.Errorf("Failed to get environment variable: %s", key)
+		return "", fmt.Errorf("[ERROR] failed to get environment variable: %s", key)
 	}
 	return v, nil
 }

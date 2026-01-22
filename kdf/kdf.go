@@ -12,7 +12,7 @@ import (
 func DeriveKey(kmsKey string, pqcKey []byte) (string, error) {
 	qkdKey, err := base64.StdEncoding.DecodeString(kmsKey)
 	if err != nil {
-		return "", fmt.Errorf("[ERROR] error decoding QKD key: %w", err)
+		return "", fmt.Errorf("[ERROR] failed decoding QKD key: %w", err)
 	}
 
 	// Create a new HKDF instance with SHA3-256 as the hash function
@@ -21,7 +21,7 @@ func DeriveKey(kmsKey string, pqcKey []byte) (string, error) {
 	// Generate a derived key using HKDF
 	derivedKey := make([]byte, 32) // Output key length
 	if _, err := io.ReadFull(hkdf, derivedKey); err != nil {
-		return "", fmt.Errorf("[ERROR] error generating derived key: %w", err)
+		return "", fmt.Errorf("[ERROR] failed generating derived key: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(derivedKey), nil
 }

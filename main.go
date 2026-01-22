@@ -52,9 +52,10 @@ func handleServerConnection(c net.Conn, result chan string) {
 			result <- msg
 			_, err := c.Write([]byte("ACK" + "\n"))
 			if err != nil { // Handle the write error
-				fmt.Println("Failed to write to connection:", err)
+				fmt.Println("[ERROR] Failed to write to connection:", err)
 				break
 			}
+			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPPREFIX, msg, c.RemoteAddr())
 		}
 		if errRead := scanner.Err(); errRead != nil { // Handle the read error
 			if errRead == io.EOF { // Handle EOF
@@ -172,6 +173,7 @@ func setPSK(wireguard *wg.WireGuardHandler, qkd string, cfg *config.Config, logP
 					log.Printf("[WARNING] %s failed to decode PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
 				}
 			} else {
+				// a key derivation will happen, either with key or with all zeros
 				psk, err = kdf.DeriveKey(psk, pqc)
 				if err != nil {
 					msg = fmt.Sprintf("[ERROR] %s failed to derive key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
@@ -235,11 +237,10 @@ func main() {
 				case skip <- true:
 				default:
 				}
-				log.Printf("[INFO] %s [OK] received key_id %s", BACKUPPREFIX, r)
 				log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPPREFIX, r, cfg.KMSURL)
 				key, err := kmsServer.GetKeyByID(r)
 				if err != nil {
-					log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from KMS: %v", BACKUPPREFIX, r, err)
+					log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPPREFIX, r, cfg.KMSURL, err)
 				}
 				setPSK(wireguard, key.GetKey(), cfg, BACKUPPREFIX)
 			}
@@ -256,7 +257,7 @@ func main() {
 					log.Printf("[INFO] %s [REQ] request QKD key from %s\n", MASTERPREFIX, cfg.KMSURL)
 					key, err := kmsServer.GetNewKey()
 					if err != nil {
-						log.Printf("[ERROR] %s failed to retrieve QKD key from KMS: %v", MASTERPREFIX, err)
+						log.Printf("[ERROR] %s failed to retrieve QKD key from %s, %v", MASTERPREFIX, cfg.KMSURL, err)
 						ticker.Reset(cfg.KMSRetryInterval)
 					} else {
 						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", MASTERPREFIX, key.GetID(), cfg.ServerAddress)
