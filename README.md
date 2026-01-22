@@ -77,13 +77,13 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 # Requirements
 
 The `Secure Application Entity` consists of following components running on a secure and hardened linux system:
-* Wireguard
+* WireGuard
 * Arnika
 * Rosenpass (optional)
 
-### Wireguard
+### WireGuard
 
-Wireguard must be installed/setup separately before Arnika can be used. For further installation instructions, refer to the [WireGuard](https://www.wireguard.com/) homepage.
+WireGuard must be installed/setup separately before Arnika can be used. For further installation instructions, refer to the [WireGuard](https://www.wireguard.com/) homepage.
 
 ### Rosenpass
 
@@ -97,9 +97,9 @@ Version >1.22 => `golang-1.22`
 # Limitations
 
 > [!IMPORTANT]
-> **ARNIKA** is designed to provide a **PSK** directly to a local wireguard instance only.
+> **ARNIKA** is intended to supply a **PSK** exclusively to a local WireGuard instance.
 >
-> This means **Wireguard** and **ARNIKA** must run on the same machine/kernel.
+> As a result, **WireGuard** and **ARNIKA** are required to operate on the same host and kernel instance.
 >
 > A race condition may occur if **ARNIKA** is started in development environments on the same host at _exactly_ the same time.
 > This is intentional and a consequence of the simple yet robust state mechanism.
@@ -142,14 +142,14 @@ go version go1.22.2 linux/amd64
 # Build binaries from source
 
 > [!NOTE]
-> **arnika** and **kms** (mock) can be downloaded as a compiled binary from the release page and run without the need for golang.
+> **Arnika** and **kms** (mock) can be downloaded as a compiled binary from the release page and run without the need for golang.
 
 Following steps are required to build the binaries from source.
 
 The binaries can be copied to the target system (matching architecture) or directory and executed.
 No further dependencies are required, all necessary libraries are statically linked, and the binaries are self-contained.
 
-The configuration for **arnika** is done via environment variables.
+The configuration for **Arnika** is done via environment variables.
 
 # compile Arnika
 
@@ -180,10 +180,35 @@ The result is a single binary `arnika` located in the new created subdirecory `b
 
 ```shell
 ./build/arnika
-2025/03/24 17:32:42.399684 Failed to parse config: Failed to get environment variable: LISTEN_ADDRESS
+=== Arnika Configuration ===
+Arnika Mode:              AtLeastQkdRequired
+Arnika Interval:          10s
+Arnika ID:                9999
+Arnika Listen Address:    127.0.0.1:9999
+Arnika Peer Address:      127.0.0.1:9998
+KMS URL:                  http://localhost:8080/api/v1/keys/CONSA
+KMS HTTP Timeout:         10s
+KMS Backoff Max Retries:  5
+KMS Backoff Base Delay:   100ms
+KMS Retry Interval:       5s
+Client Certificate:       (not configured)
+Private Key:              (not configured)
+CA Certificate:           (not configured)
+PQC key provider:        DISABLED
+WireGuard Interface:      qcicat0
+WireGuard Peer PublicKey: ****************=
+============================
+2026/01/22 18:04:40.628630 [INFO] MASTER[9999] [REQ] request QKD key from http://localhost:8080/api/v1/keys/CONSA
+2026/01/22 18:04:40.629081 [INFO] ARNIKA[9999] TCP server started on 127.0.0.1:9999
+2026/01/22 18:04:40.635236 [INFO] MASTER[9999] [SND] send key_id ffffffff-fe92-4fdc-bef3-c0cdc73ff774 to 127.0.0.1:9998
+2026/01/22 18:04:40.636669 [INFO] MASTER[9999] [OK] PSK configured on WireGuard interface: qcicat0 for peer: ****************=
+2026/01/22 18:04:43.399193 [INFO] BACKUP[9999] [RCV] received key_id ffffffff-bcec-4858-838e-623c79eabf61 from 127.0.0.1:58905
+2026/01/22 18:04:43.399195 [INFO] BACKUP[9999] [REQ] request QKD key for key_id ffffffff-bcec-4858-838e-623c79eabf61 from http://localhost:8080/api/v1/keys/CONSA
+2026/01/22 18:04:43.399760 [INFO] BACKUP[9999] [OK] PSK configured on WireGuard interface: qcicat0 for peer: ****************=
+2026/01/22 18:04:55.399323 [INFO] BACKUP[9999] [RCV] received key_id ffffffff-8a32-4540-9b78-7d4e1afebb5f from 127.0.0.1:58927
 ```
 
-## compile KMS simulator
+## compile QKD KMS simulator
 
 ```bash
 git clone git@github.com:arnika-project/arnika.git
@@ -197,11 +222,13 @@ The result is a single binary `kms` located in the new created subdirecory `tool
 > [!Note]
 > **kms** aka `mock` is designed to test **Arnika**, it is **NOT** a full featured ETSI014 Simulator.
 >
-> pseudo values are used, if adoption is required please change the source code:
+> pseudo values are used, if adoption is required please consider change the source code:
 > * listening port is `8080`
 > * `http` only
 > * `CONSA` and `CONSB` as **SAE**
 > * `key` and `key_ID`
+> * key `size=256`
+> * key `number=1`
 
 
 
@@ -211,25 +238,50 @@ The result is a single binary `kms` located in the new created subdirecory `tool
 
 # Start Dev Environment
 
-## Start QKD KMS mock via go
+## Start QKD KMS Simulator
+
+To start the simulator using Go:
 
 ```bash
 go run tools/mock.go
 ```
 
-now you can use the QKD KMS mock at `http://127.0.0.1:8080`
+Or, if you have already compiled the binary:
+
+```bash
+tools/kms
+```
+
+The QKD KMS simulator is now accessible at `http://127.0.0.1:8080`.
 
 
 ## Start Arnika #1
 
 ```bash
-http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:9999 SERVER_ADDRESS=127.0.0.1:9998 INTERVAL=1m KMS_URL="http://localhost:8080/api/v1/keys/CONSA" WIREGUARD_INTERFACE=qcicat0 WIREGUARD_PEER_PUBLIC_KEY="****************" build/arnika
+http_proxy=http://127.0.0.1:8080 \
+no_proxy=127.0.0.1 \
+LISTEN_ADDRESS=127.0.0.1:9999 \
+SERVER_ADDRESS=127.0.0.1:9998 \
+INTERVAL=120s \
+KMS_URL="http://localhost:8080/api/v1/keys/CONSA" \
+WIREGUARD_INTERFACE=qcicat0 \
+WIREGUARD_PEER_PUBLIC_KEY="****************=" \
+build/arnika
 ```
+
 
 ## Start Arnika #2
 
 ```bash
-http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:9998 SERVER_ADDRESS=127.0.0.1:9999 INTERVAL=1m KMS_URL="http://localhost:8080/api/v1/keys/CONSB" WIREGUARD_INTERFACE=qcicat0 WIREGUARD_PEER_PUBLIC_KEY="****************" build/arnika
+http_proxy=http://127.0.0.1:8080 \
+no_proxy=127.0.0.1 \
+LISTEN_ADDRESS=127.0.0.1:9998 \
+SERVER_ADDRESS=127.0.0.1:9999 \
+INTERVAL=120s \
+KMS_URL="http://localhost:8080/api/v1/keys/CONSB" \
+WIREGUARD_INTERFACE=qcicat0 \
+WIREGUARD_PEER_PUBLIC_KEY="****************=" \
+build/arnika
 ```
 
 
@@ -237,33 +289,35 @@ http_proxy=http://127.0.0.1:8080 no_proxy=127.0.0.1 LISTEN_ADDRESS=127.0.0.1:999
 
 Arnika must be configured via environment variables, following are available:
 
-| variable | description | example |
-| --- | --- | --- |
-| LISTEN_ADDRESS | address and port arnika listens on | 127.0.0.1:9998 |
-| SERVER_ADDRESS | address and port arnika connects to | 127.0.0.1:9998 |
-| CERTIFICATE | certificate file for cert authentication  | /etc/ssl/certs/arnika.crt |
-| PRIVATE_KEY | private key file for cert authentication | /etc/ssl/private/arnika.key |
-| CA_CERTIFICATE | CA certificate file for cert authentication | /etc/ssl/certs/ca-bundle.crt |
-| KMS_HTTP_TIMEOUT | ETSI014 connection timeout for KMS requests | 10s |
-| KMS_URL | URL of ETSI014 QKD KMS | https://localhost:8080/api/v1/keys/CONSA |
-| KMS_BACKOFF_MAX_RETRIES | number of retries for a kms request before giving up | 5 |
-| KMS_BACKOFF_BASE_DELAY | base backoff delay, is exponentially increased with each retry | 100ms |
-| KMS_RETRY_INTERVAL | interval between key requests to QKD KMS in the event of a request failure | half of the INTERVAL value |
-| INTERVAL | interval between key requests to QKD KMS | 120s |
-| WIREGUARD_INTERFACE | name of the WireGuard interface | qcicat0 |
-| WIREGUARD_PEER_PUBLIC_KEY | public key of peer in WireGuard format | 8978940b-fb48-4ebf-ad7d-ca36a987fc32 |
-| PQC_PSK_FILE | file containing PQC preshared key | /rosenpass/pqc.psk |
-| MODE | Operation Mode, possible values are: "QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired" | AtLeastQkdRequired |
+| Variable                  | Description                                                                                                  | Example                                  |
+|---------------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------|
+| LISTEN_ADDRESS            | IP address and port where Arnika listens for incoming connections                                            | 127.0.0.1:9998                           |
+| SERVER_ADDRESS            | IP address and port of the remote Arnika peer to connect to                                                  | 127.0.0.1:9998                           |
+| CERTIFICATE               | File path to the TLS certificate used for secure communication                                               | /etc/ssl/certs/arnika.crt                |
+| PRIVATE_KEY               | File path to the private key corresponding to the TLS certificate                                            | /etc/ssl/private/arnika.key              |
+| CA_CERTIFICATE            | File path to the CA certificate bundle for verifying peer certificates                                       | /etc/ssl/certs/ca-bundle.crt             |
+| KMS_HTTP_TIMEOUT          | Timeout duration for HTTP requests to the KMS (ETSI014)                                                      | 10s                                      |
+| KMS_URL                   | URL endpoint of the ETSI014 QKD Key Management System                                                        | https://localhost:8080/api/v1/keys/CONSA |
+| KMS_BACKOFF_MAX_RETRIES   | Maximum number of retry attempts for failed KMS requests                                                     | 5                                        |
+| KMS_BACKOFF_BASE_DELAY    | Initial delay before retrying a failed KMS request (exponential backoff applies)                             | 100ms                                    |
+| KMS_RETRY_INTERVAL        | Time interval between retry attempts after a failed KMS key request                                          | 60s                                      |
+| INTERVAL                  | Interval between regular key requests to the KMS; should align with WireGuard rekey interval                 | 120s                                     |
+| WIREGUARD_INTERFACE       | Name of the WireGuard network interface to configure                                                         | qcicat0                                  |
+| WIREGUARD_PEER_PUBLIC_KEY | Public key of the WireGuard peer for secure association                                                      | 8978940b-fb48-4ebf-ad7d-ca36a987fc32     |
+| PQC_PSK_FILE              | File path containing the PQC-generated preshared key (from Rosenpass or similar)                             | /rosenpass/pqc.psk                       |
+| MODE                      | Operation mode: "QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", or "EitherQkdOrPqcRequired" | AtLeastQkdRequired                       |
+| ARNIKA_ID                 | Optional identifier (up to 5 digits); defaults to LISTEN_PORT; used for logging and identification           | 9998                                     |
+
 
 ---
 
 
 #  Credits
 
-## Cancom Converged Services Gmbh (CCS)
+## CANCOM Converged Services GmbH (CCS)
 
 **Arnika** was developed by
-[Cancom Converged Services](https://www.cancom.at/en/industry-focus/provider) and the source code was released under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
+[CANCOM Converged Services](https://www.cancom.at/en/industry-focus/provider) as part of the [QCI-CAT](https://qci-cat.at/) project, and the source code was released under the [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) license.
 
 
 ## WireGuard
@@ -278,7 +332,7 @@ Arnika must be configured via environment variables, following are available:
 
 
 
-To ensure perfect forward secrecy (**PFS**) and minimizing the impact of key compromise [WireGuard](https://www.wireguard.com/) re-keying timer is 120 seconds or 2^60 messages.
+To ensure perfect forward secrecy (**PFS**) and minimizing the impact of key compromise [WireGuard](https://www.wireguard.com/) re-keying timer is **120 seconds** or **2^60 messages**.
 
 Refer to [WireGuard](https://www.wireguard.com/) Homepage [https://www.wireguard.com/protocol/] and Whitepaper [https://www.wireguard.com/papers/wireguard.pdf] for more technical details.
 
