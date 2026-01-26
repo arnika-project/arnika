@@ -1,0 +1,103 @@
+# .github/workflows/release.yml
+name: Manual release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (without leading v), e.g. 0.2.4'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    env:
+      VERSION: ${{ github.event.inputs.version }}      # 0.2.4
+      TAG: v${{ github.event.inputs.version }}         # v0.2.4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+            exit 1
+          fi
+
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Build arnika linux-amd64
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-w -s -X 'main.Version=$TAG' -X 'main.APPName=arnika'" \
+            -o build/arnika-linux-amd64 .
+
+      - name: Build kms linux-amd64
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-w -s -X 'main.Version=$TAG' -X 'main.APPName=kms'" \
+            -o build/kms-linux-amd64 ./tools
+
+      - name: Build arnika darwin-arm64
+        run: |
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-w -s -X 'main.Version=$TAG' -X 'main.APPName=arnika'" \
+            -o build/arnika-darwin-arm64 .
+
+      - name: Build kms darwin-arm64
+        run: |
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-w -s -X 'main.Version=$TAG' -X 'main.APPName=kms'" \
+            -o build/kms-darwin-arm64 ./tools
+
+      - name: Create tarballs
+        run: |
+          mkdir -p dist
+
+          cp build/arnika-linux-amd64 dist/
+          tar -C dist -czf arnika-v${VERSION}-linux-amd64.tar.gz arnika-linux-amd64
+          rm dist/arnika-linux-amd64
+
+          cp build/kms-linux-amd64 dist/
+          tar -C dist -czf kms-v${VERSION}-linux-amd64.tar.gz kms-linux-amd64
+          rm dist/kms-linux-amd64
+
+          cp build/arnika-darwin-arm64 dist/
+          tar -C dist -czf arnika-v${VERSION}-darwin-arm64.tar.gz arnika-darwin-arm64
+          rm dist/arnika-darwin-arm64
+
+          cp build/kms-darwin-arm64 dist/
+          tar -C dist -czf kms-v${VERSION}-darwin-arm64.tar.gz kms-darwin-arm64
+          rm dist/kms-darwin-arm64
+
+          ls -l
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}      # v0.2.4
+          name: ${{ env.TAG }}          # Release title: v0.2.4
+          files: |
+            arnika-v${{ env.VERSION }}-linux-amd64.tar.gz
+            kms-v${{ env.VERSION }}-linux-amd64.tar.gz
+            arnika-v${{ env.VERSION }}-darwin-arm64.tar.gz
+            kms-v${{ env.VERSION }}-darwin-arm64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
