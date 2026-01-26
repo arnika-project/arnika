@@ -36,11 +36,16 @@ func NewWireGuardHandler() (*WireGuardHandler, error) {
 // - error: an error if any occurred during the process.
 func (wg *WireGuardHandler) SetKey(interfaceName, peerPublicKey, pskString string) error {
 	// Verify the specified interface exists
-	_, err := wg.conn.Device(interfaceName)
+	peers, err := wg.conn.Device(interfaceName)
 	if err != nil {
-		return fmt.Errorf("failed to get device %s: %w", interfaceName, err)
+		return fmt.Errorf("[ERROR] failed to get device %s: %w", interfaceName, err)
 	}
-
+	// verify that the peer public key exists
+	for _, peer := range peers.Peers {
+		if peer.PublicKey.String() != peerPublicKey {
+			return fmt.Errorf("[ERROR] peer with public key %s not found on interface %s", peerPublicKey, interfaceName)
+		}
+	}
 	psk, err := wgtypes.ParseKey(pskString)
 	if err != nil {
 		return err
@@ -55,4 +60,12 @@ func (wg *WireGuardHandler) SetKey(interfaceName, peerPublicKey, pskString strin
 		PresharedKey: &psk,
 	}
 	return wg.conn.ConfigureDevice(interfaceName, wgtypes.Config{Peers: []wgtypes.PeerConfig{peer}})
+}
+
+func (wg *WireGuardHandler) SetRandomPSK(interfaceName, peerPublicKey string) error {
+	psk, err := wgtypes.GenerateKey()
+	if err != nil {
+		return err
+	}
+	return wg.SetKey(interfaceName, peerPublicKey, psk.String())
 }

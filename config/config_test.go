@@ -42,20 +42,26 @@ func TestParse(t *testing.T) {
 	t.Setenv("KMS_URL", "https://example.com")
 	t.Setenv("WIREGUARD_INTERFACE", "wg0")
 	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+	t.Setenv("MODE", "AtLeastQkdRequired")
 
 	// Test case 2: All environment variables present
 	expectedConfig := &Config{
 		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
+		ArnikaID:               "8080",
 		Certificate:            "", // Default value for Certificate
 		PrivateKey:             "", // Default value for PrivateKey
 		CACertificate:          "", // Default value for CACertificate
 		KMSURL:                 "https://example.com",
-		Interval:               time.Second * 10, // Default value for Interval
-		KMSHTTPTimeout:         time.Second * 10, // Default value for KMSHTTPTimeout
+		Interval:               time.Second * 10,       // Default value for Interval
+		KMSHTTPTimeout:         time.Second * 10,       // Default value for KMSHTTPTimeout
+		KMSBackoffMaxRetries:  5,                      // Default value for KMSBackoffMaxRetries
+		KMSBackoffBaseDelay:    time.Millisecond * 100, // Default value for KMSBackoffBaseDelay
+		KMSRetryInterval:       (time.Second * 10) / 2, // Default value for KMSRetryInterval
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCPSKFile:             "", // Default value for PQCPSKFile
+		Mode:                   "AtLeastQkdRequired",
 	}
 	result, err := Parse()
 	if err != nil {
@@ -114,11 +120,46 @@ func TestGetEnv(t *testing.T) {
 	// Test case 2: Testing when the environment variable does not exist
 	os.Unsetenv("TEST_ENV")
 	result, err = getEnv("TEST_ENV")
-	expectedError := fmt.Errorf("Failed to get environment variable: TEST_ENV")
+	expectedError := fmt.Errorf("[ERROR] failed to get environment variable: TEST_ENV")
 	if err.Error() != expectedError.Error() {
 		t.Errorf("Expected error: %v, but got: %v", expectedError, err)
 	}
 	if result != "" {
 		t.Errorf("Expected empty string, but got %s", result)
 	}
+}
+
+func TestIsQKDRequired(t *testing.T) {
+	// Test case 1: Mode is "QkdAndPqcRequired"
+	c := &Config{Mode: "QkdAndPqcRequired"}
+	result := c.IsQKDRequired()
+	expected := true
+	if result != expected {
+		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
+	}
+
+	// Test case 2: Mode is "AtLeastQkdRequired"
+	c = &Config{Mode: "AtLeastQkdRequired"}
+	result = c.IsQKDRequired()
+	expected = true
+	if result != expected {
+		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
+	}
+
+	// Test case 3: Mode is "AtLeastPqcRequired"
+	c = &Config{Mode: "AtLeastPqcRequired"}
+	result = c.IsQKDRequired()
+	expected = false
+	if result != expected {
+		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
+	}
+
+	// Test case 4: Mode is "EitherQkdOrPqcRequired"
+	c = &Config{Mode: "EitherQkdOrPqcRequired"}
+	result = c.IsQKDRequired()
+	expected = false
+	if result != expected {
+		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
+	}
+
 }

@@ -56,8 +56,10 @@ func (a *Auth) IsClientCertAuth() bool {
 
 // KMSHandler is a client for a kms KMS (Key Management Service)
 type KMSHandler struct {
-	baseUrl string
-	conn    *http.Client
+	baseUrl          string
+	maxRetries       int
+	backoffBaseDelay time.Duration
+	conn             *http.Client
 }
 
 // Key is a KMS generated key.
@@ -82,7 +84,7 @@ type response struct {
 //
 // Returns:
 // - *KMSHandler: a pointer to the KMSHandler instance.
-func NewKMSServer(url string, timeout int, kmsAuth *Auth) *KMSHandler {
+func NewKMSServer(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, kmsAuth *Auth) *KMSHandler {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
@@ -106,9 +108,11 @@ func NewKMSServer(url string, timeout int, kmsAuth *Auth) *KMSHandler {
 		tr.TLSClientConfig.RootCAs = caCertPool
 	}
 	return &KMSHandler{
-		baseUrl: url,
+		baseUrl:          url,
+		maxRetries:       maxRetries,
+		backoffBaseDelay: backoffBaseDelay,
 		conn: &http.Client{
-			Timeout:   time.Duration(timeout) * time.Second,
+			Timeout:   timeout,
 			Transport: tr,
 		},
 	}
@@ -136,11 +140,28 @@ func (q *KMSHandler) GetKeyByID(keyID string) (*Key, error) {
 // Returns a pointer to a Key struct and an error.
 func (q *KMSHandler) kmsRequest(path string) (*Key, error) {
 	var response response
-	res, err := q.conn.Get(q.baseUrl + path)
+	var res *http.Response
+	var err error
+
+	for attempt := 0; attempt <= q.maxRetries; attempt++ {
+		res, err = q.conn.Get(q.baseUrl + path)
+		if err == nil && res.StatusCode == http.StatusOK {
+			break
+		}
+		if attempt < q.maxRetries {
+			delay := q.backoffBaseDelay * time.Duration(1<<uint(attempt))
+			log.Printf("Attempt %d: Retrying in %s...", attempt+1, delay)
+			time.Sleep(delay)
+		}
+		if res != nil {
+			res.Body.Close()
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
+
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err

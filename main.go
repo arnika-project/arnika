@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,10 @@ var (
 	Version string
 	// allows to overwrite app name on build.
 	APPName string
+	// Prefix variables initialized after config is parsed
+	MASTERPREFIX string
+	BACKUPPREFIX string
+	ARNIKAPREFIX string
 )
 
 func handleServerConnection(c net.Conn, result chan string) {
@@ -47,17 +52,16 @@ func handleServerConnection(c net.Conn, result chan string) {
 			result <- msg
 			_, err := c.Write([]byte("ACK" + "\n"))
 			if err != nil { // Handle the write error
-				fmt.Println("Failed to write to connection:", err)
+				fmt.Println("[ERROR] Failed to write to connection:", err)
 				break
 			}
+			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPPREFIX, msg, c.RemoteAddr())
 		}
 		if errRead := scanner.Err(); errRead != nil { // Handle the read error
 			if errRead == io.EOF { // Handle EOF
 				fmt.Println("Connection closed by remote host.")
 				break
 			}
-			// expected
-			// fmt.Println("Failed to read from connection:", errRead)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -72,10 +76,10 @@ func tcpServer(url string, result chan string, done chan bool) {
 	)
 	go func() {
 		<-quit
-		log.Println("TCP Server shutdown")
+		log.Printf("[INFO] %s TCP server shutdown triggered on %s", ARNIKAPREFIX, url)
 		close(done)
 	}()
-	log.Printf("TCP Server listening on %s\n", url)
+	log.Printf("[INFO] %s TCP server started on %s\n", ARNIKAPREFIX, url)
 	ln, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Panicln(err.Error())
@@ -85,7 +89,6 @@ func tcpServer(url string, result chan string, done chan bool) {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
-				log.Println(err.Error())
 				break
 			}
 			go handleServerConnection(c, result)
@@ -133,33 +136,62 @@ func getPQCKey(pqcKeyFile string) (string, error) {
 	return scanner.Text(), nil
 }
 
-func setPSK(psk string, cfg *config.Config, logPrefix string) error {
+func setPSK(wireguard *wg.WireGuardHandler, qkd string, cfg *config.Config, logPrefix string) {
+	psk := qkd
+	msg := ""
+	defer func() {
+		if msg != "" {
+			log.Println(msg)
+			log.Printf("[ERROR] %s [STOP] configure random PSK to invalidate WireGuard session", logPrefix)
+			if err := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err != nil {
+				log.Printf("[ERROR] %s failed to configure random PSK: %v", logPrefix, err)
+			}
+		}
+	}()
+	if qkd == "" {
+		if cfg.IsQKDRequired() {
+			msg = fmt.Sprintf("[ERROR] %s mode set to %s but no QKD key received", logPrefix, cfg.Mode)
+			return
+		}
+		log.Printf("[WARNING] %s failed to retrieve QKD key, switching to PQC key since mode is set to %s", logPrefix, cfg.Mode)
+	}
 	if cfg.UsePQC() {
-		log.Println(logPrefix + " key derivation with PQC key enabled")
 		pQCKey, err := getPQCKey(cfg.PQCPSKFile)
 		if err != nil {
-			return err
+			if cfg.IsPQCRequired() {
+				msg = fmt.Sprintf("[ERROR] %s failed to retrieve PQC key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
+				return
+			}
+			log.Printf("[WARNING] %s failed to retrieve PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
+		} else {
+			pqc, err := base64.StdEncoding.DecodeString(pQCKey)
+			if err != nil {
+				if cfg.IsPQCRequired() {
+					msg = fmt.Sprintf("[ERROR] %s failed to decode PQC key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
+					return
+				} else {
+					log.Printf("[WARNING] %s failed to decode PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
+				}
+			} else {
+				// a key derivation will happen, either with key or with all zeros
+				psk, err = kdf.DeriveKey(psk, pqc)
+				if err != nil {
+					msg = fmt.Sprintf("[ERROR] %s failed to derive key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
+					return
+				}
+				log.Printf("[INFO] %s [OK] HKDF derivation completed for QKD+PQC key", logPrefix)
+			}
 		}
-		psk, err = kdf.DeriveKey(psk, pQCKey)
-		if err != nil {
-			return err
-		}
 	}
-	log.Println(logPrefix + " configure wireguard interface")
-	wireguard, err := wg.NewWireGuardHandler()
-	if err != nil {
-		return err
+	if psk == "" {
+		msg = fmt.Sprintf("[ERROR] %s no PSK available", logPrefix)
+		return
 	}
-	return wireguard.SetKey(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, psk)
-}
-
-func fibonacciRecursion(n int) int {
-	if n <= 1 {
-		return n
-	} else if n > 11 {
-		return 120
+	if err := wireguard.SetKey(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, psk); err != nil {
+		msg = fmt.Sprintf("[ERROR] %s failed to configure PSK on WireGuard interface: %v", logPrefix, err)
+		return
 	}
-	return fibonacciRecursion(n-1) + fibonacciRecursion(n-2)
+	log.Printf("[INFO] %s [OK] PSK configured on WireGuard interface: %s for peer: %s", logPrefix, cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
 }
 
 func main() {
@@ -179,96 +211,62 @@ func main() {
 	}
 	cfg, err := config.Parse()
 	if err != nil {
-		log.Fatalf("Failed to parse config: %v", err)
+		log.Fatalf("[ERROR] failed to parse config: %v", err)
 	}
-
-	// Print startup configuration
-	log.Println("=== Arnika Configuration ===")
-	log.Printf("Listen Address:           %s", cfg.ListenAddress)
-	log.Printf("Server Address:           %s", cfg.ServerAddress)
-	log.Printf("KMS URL:                  %s", cfg.KMSURL)
-	log.Printf("KMS HTTP Timeout:         %s", cfg.KMSHTTPTimeout)
-	log.Printf("Key Rotation Interval:    %s", cfg.Interval)
-	log.Printf("WireGuard Interface:      %s", cfg.WireGuardInterface)
-	log.Printf("WireGuard Peer PublicKey: %s", cfg.WireguardPeerPublicKey)
-	if cfg.Certificate != "" {
-		log.Printf("Client Certificate:       %s", cfg.Certificate)
-	} else {
-		log.Printf("Client Certificate:       (not configured)")
-	}
-	if cfg.PrivateKey != "" {
-		log.Printf("Private Key:              %s", cfg.PrivateKey)
-	} else {
-		log.Printf("Private Key:              (not configured)")
-	}
-	if cfg.CACertificate != "" {
-		log.Printf("CA Certificate:           %s", cfg.CACertificate)
-	} else {
-		log.Printf("CA Certificate:           (not configured)")
-	}
-	if cfg.UsePQC() {
-		log.Printf("PQC PSK File:             %s (ENABLED)", cfg.PQCPSKFile)
-	} else {
-		log.Printf("PQC PSK File:             (disabled)")
-	}
-	log.Println("============================")
-
+	cfg.PrintStartupConfig()
+	// Initialize prefixes with ArnikaID
+	MASTERPREFIX = fmt.Sprintf("MASTER[%s]", cfg.ArnikaID)
+	BACKUPPREFIX = fmt.Sprintf("BACKUP[%s]", cfg.ArnikaID)
+	ARNIKAPREFIX = fmt.Sprintf("ARNIKA[%s]", cfg.ArnikaID)
 	interval := cfg.Interval
 	done := make(chan bool)
-	skip := make(chan bool)
+	skip := make(chan bool, 1)
 	result := make(chan string)
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
-	kmsServer := kms.NewKMSServer(cfg.KMSURL, int(cfg.KMSHTTPTimeout.Seconds()), kmsAuth)
+	kmsServer := kms.NewKMSServer(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
+	wireguard, err := wg.NewWireGuardHandler()
+	if err != nil {
+		log.Panicf("[ERROR] [STOP] Failed to create WireGuard handler: %v", err)
+	}
 	for {
 		go tcpServer(cfg.ListenAddress, result, done)
 		go func() {
 			for {
 				r := <-result
-				go func() {
-					skip <- true
-				}()
-				log.Println("<-- BACKUP: received key_id " + r)
-				// to stuff with key
+				select {
+				case skip <- true:
+				default:
+				}
+				log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPPREFIX, r, cfg.KMSURL)
 				key, err := kmsServer.GetKeyByID(r)
 				if err != nil {
-					log.Println(err.Error())
-					time.Sleep(time.Millisecond * 100)
-					continue
+					log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPPREFIX, r, cfg.KMSURL, err)
 				}
-				err = setPSK(key.GetKey(), cfg, "<-- BACKUP:")
-				if err != nil {
-					log.Println(err.Error())
-				}
+				setPSK(wireguard, key.GetKey(), cfg, BACKUPPREFIX)
 			}
 		}()
 		go func() {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
-			i := 20
 			for {
+				ticker.Reset(interval)
 				select {
 				case <-skip:
 				default:
 					// get key_id and send
-					log.Printf("--> MASTER: fetch key_id from %s\n", cfg.KMSURL)
-
+					log.Printf("[INFO] %s [REQ] request QKD key from %s\n", MASTERPREFIX, cfg.KMSURL)
 					key, err := kmsServer.GetNewKey()
 					if err != nil {
-						log.Println(err.Error())
-						time.Sleep(time.Second * time.Duration(fibonacciRecursion(i/10)))
-						i++
-						continue
+						log.Printf("[ERROR] %s failed to retrieve QKD key from %s, %v", MASTERPREFIX, cfg.KMSURL, err)
+						ticker.Reset(cfg.KMSRetryInterval)
+					} else {
+						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", MASTERPREFIX, key.GetID(), cfg.ServerAddress)
+						err = tcpClient(cfg.ServerAddress, key.GetID())
+						if err != nil {
+							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", MASTERPREFIX, key.GetID(), cfg.ServerAddress, err)
+						}
 					}
-					i = 20
-					log.Printf("--> MASTER: send key_id to %s\n", cfg.ServerAddress)
-					err = tcpClient(cfg.ServerAddress, key.GetID())
-					if err != nil {
-						log.Println(err.Error())
-					}
-					err = setPSK(key.GetKey(), cfg, "--> MASTER:")
-					if err != nil {
-						log.Println(err.Error())
-					}
+					setPSK(wireguard, key.GetKey(), cfg, MASTERPREFIX)
 				}
 				<-ticker.C
 			}
