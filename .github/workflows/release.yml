@@ -55,6 +55,18 @@ jobs:
             go build -trimpath -ldflags "-w -s -X 'main.Version=$TAG' -X 'main.APPName=kms'" \
             -o build/kms-linux-amd64 ./tools
 
+      - name: Build arnika linux-arm64
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-w -s -X 'main.Version=$TAG' -X 'main.APPName=arnika'" \
+            -o build/arnika-linux-arm64 .
+
+      - name: Build kms linux-arm64
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-w -s -X 'main.Version=$TAG' -X 'main.APPName=kms'" \
+            -o build/kms-linux-arm64 ./tools
+
       - name: Build arnika darwin-arm64
         run: |
           GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
@@ -79,6 +91,14 @@ jobs:
           tar -C dist -czf kms-v${VERSION}-linux-amd64.tar.gz kms-linux-amd64
           rm dist/kms-linux-amd64
 
+          cp build/arnika-linux-arm64 dist/
+          tar -C dist -czf arnika-v${VERSION}-linux-arm64.tar.gz arnika-linux-arm64
+          rm dist/arnika-linux-arm64
+
+          cp build/kms-linux-arm64 dist/
+          tar -C dist -czf kms-v${VERSION}-linux-arm64.tar.gz kms-linux-arm64
+          rm dist/kms-linux-arm64
+
           cp build/arnika-darwin-arm64 dist/
           tar -C dist -czf arnika-v${VERSION}-darwin-arm64.tar.gz arnika-darwin-arm64
           rm dist/arnika-darwin-arm64
@@ -97,6 +117,8 @@ jobs:
           files: |
             arnika-v${{ env.VERSION }}-linux-amd64.tar.gz
             kms-v${{ env.VERSION }}-linux-amd64.tar.gz
+            arnika-v${{ env.VERSION }}-linux-arm64.tar.gz
+            kms-v${{ env.VERSION }}-linux-arm64.tar.gz
             arnika-v${{ env.VERSION }}-darwin-arm64.tar.gz
             kms-v${{ env.VERSION }}-darwin-arm64.tar.gz
         env:
