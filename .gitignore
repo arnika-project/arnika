@@ -1,6 +1,8 @@
 .DS_Store
 /build
 .vscode
+.ansible
+.terraform
 ci/node-a/node-a-pqc.key
 ci/node-a/node-a.key
 ci/node-a/node-a.pub
