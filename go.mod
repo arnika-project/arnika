@@ -1,6 +1,7 @@
 module github.com/arnika-project/arnika
 
-go 1.24.1
+// update to latest version https://go.dev/doc/devel/release#go1.24.0
+go 1.24.13
 
 require (
 	github.com/google/uuid v1.6.0
