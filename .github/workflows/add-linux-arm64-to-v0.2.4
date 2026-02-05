@@ -1,0 +1,79 @@
+name: Add linux-arm64 binaries to v0.2.4
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  add-linux-arm64:
+    runs-on: ubuntu-latest
+
+    env:
+      VERSION: 0.2.4
+      TAG: v0.2.4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: v0.2.4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build linux-arm64 binaries
+        run: |
+          mkdir -p dist
+
+          # arnika
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+            go build -o dist/arnika-linux-arm64 ./cmd/arnika
+
+          # kms
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+            go build -o dist/kms-linux-arm64 ./cmd/kms
+
+      - name: Create tarballs
+        run: |
+          cd dist
+
+          cp arnika-linux-arm64 arnika
+          tar czf arnika-v${VERSION}-linux-arm64.tar.gz arnika
+          rm arnika
+
+          cp kms-linux-arm64 kms
+          tar czf kms-v${VERSION}-linux-arm64.tar.gz kms
+          rm kms
+
+          ls -lah
+
+      - name: Get release upload URL
+        id: get_release
+        uses: actions-ecosystem/action-get-release@v1
+        with:
+          tag: v0.2.4
+
+      - name: Upload linux-arm64 arnika
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.get_release.outputs.upload_url }}
+          asset_path: dist/arnika-v0.2.4-linux-arm64.tar.gz
+          asset_name: arnika-v0.2.4-linux-arm64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload linux-arm64 kms
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.get_release.outputs.upload_url }}
+          asset_path: dist/kms-v0.2.4-linux-arm64.tar.gz
+          asset_name: kms-v0.2.4-linux-arm64.tar.gz
+          asset_content_type: application/gzip
