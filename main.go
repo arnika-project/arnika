@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -40,30 +39,25 @@ func handleServerConnection(c net.Conn, result chan string) {
 			fmt.Println("Recovered from panic:", r)
 		}
 	}()
-	for {
-		// scan message
-		scanner := bufio.NewScanner(c)
-		// Check that scanner is not nil.
-		if scanner == nil {
-			panic("received nil scanner")
+	defer c.Close()
+	// scan message
+	scanner := bufio.NewScanner(c)
+	// Check that scanner is not nil.
+	if scanner == nil {
+		panic("received nil scanner")
+	}
+	for scanner.Scan() {
+		msg := scanner.Text()
+		result <- msg
+		_, err := c.Write([]byte("ACK" + "\n"))
+		if err != nil { // Handle the write error
+			fmt.Println("[ERROR] Failed to write to connection:", err)
+			break
 		}
-		for scanner.Scan() {
-			msg := scanner.Text()
-			result <- msg
-			_, err := c.Write([]byte("ACK" + "\n"))
-			if err != nil { // Handle the write error
-				fmt.Println("[ERROR] Failed to write to connection:", err)
-				break
-			}
-			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPPREFIX, msg, c.RemoteAddr())
-		}
-		if errRead := scanner.Err(); errRead != nil { // Handle the read error
-			if errRead == io.EOF { // Handle EOF
-				fmt.Println("Connection closed by remote host.")
-				break
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
+		log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPPREFIX, msg, c.RemoteAddr())
+	}
+	if errRead := scanner.Err(); errRead != nil {
+		log.Printf("[INFO] %s connection closed from %s: %v", BACKUPPREFIX, c.RemoteAddr(), errRead)
 	}
 }
 
@@ -92,7 +86,6 @@ func tcpServer(url string, result chan string, done chan bool) {
 				break
 			}
 			go handleServerConnection(c, result)
-			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 	<-done
@@ -122,7 +115,12 @@ func tcpClient(url, data string) error {
 	if err != nil {
 		return err
 	}
-	return c.SetDeadline(time.Now().Add(time.Millisecond * 100))
+	// Wait for ACK from the backup before closing, so the connection
+	// is shut down cleanly instead of being reset mid-write.
+	c.SetDeadline(time.Now().Add(time.Millisecond * 500))
+	reader := bufio.NewReader(c)
+	_, err = reader.ReadString('\n')
+	return err
 }
 
 func getPQCKey(pqcKeyFile string) (string, error) {
@@ -228,50 +226,48 @@ func main() {
 	if err != nil {
 		log.Panicf("[ERROR] [STOP] Failed to create WireGuard handler: %v", err)
 	}
-	for {
-		go tcpServer(cfg.ListenAddress, result, done)
-		go func() {
-			for {
-				r := <-result
-				select {
-				case skip <- true:
-				default:
-				}
-				log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPPREFIX, r, cfg.KMSURL)
-				key, err := kmsServer.GetKeyByID(r)
-				if err != nil {
-					log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPPREFIX, r, cfg.KMSURL, err)
-				}
-				setPSK(wireguard, key.GetKey(), cfg, BACKUPPREFIX)
+	go tcpServer(cfg.ListenAddress, result, done)
+	go func() {
+		for {
+			r := <-result
+			select {
+			case skip <- true:
+			default:
 			}
-		}()
-		go func() {
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for {
-				ticker.Reset(interval)
-				select {
-				case <-skip:
-				default:
-					// get key_id and send
-					log.Printf("[INFO] %s [REQ] request QKD key from %s\n", MASTERPREFIX, cfg.KMSURL)
-					key, err := kmsServer.GetNewKey()
+			log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPPREFIX, r, cfg.KMSURL)
+			key, err := kmsServer.GetKeyByID(r)
+			if err != nil {
+				log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPPREFIX, r, cfg.KMSURL, err)
+				continue
+			}
+			setPSK(wireguard, key.GetKey(), cfg, BACKUPPREFIX)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			ticker.Reset(interval)
+			select {
+			case <-skip:
+			default:
+				// get key_id and send
+				log.Printf("[INFO] %s [REQ] request QKD key from %s\n", MASTERPREFIX, cfg.KMSURL)
+				key, err := kmsServer.GetNewKey()
+				if err != nil {
+					log.Printf("[ERROR] %s failed to retrieve QKD key from %s, %v", MASTERPREFIX, cfg.KMSURL, err)
+					ticker.Reset(cfg.KMSRetryInterval)
+				} else {
+					log.Printf("[INFO] %s [SND] send key_id %s to %s\n", MASTERPREFIX, key.GetID(), cfg.ServerAddress)
+					err = tcpClient(cfg.ServerAddress, key.GetID())
 					if err != nil {
-						log.Printf("[ERROR] %s failed to retrieve QKD key from %s, %v", MASTERPREFIX, cfg.KMSURL, err)
-						ticker.Reset(cfg.KMSRetryInterval)
-					} else {
-						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", MASTERPREFIX, key.GetID(), cfg.ServerAddress)
-						err = tcpClient(cfg.ServerAddress, key.GetID())
-						if err != nil {
-							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", MASTERPREFIX, key.GetID(), cfg.ServerAddress, err)
-						}
+						log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", MASTERPREFIX, key.GetID(), cfg.ServerAddress, err)
 					}
 					setPSK(wireguard, key.GetKey(), cfg, MASTERPREFIX)
 				}
-				<-ticker.C
 			}
-		}()
-		<-done
-		break
-	}
+			<-ticker.C
+		}
+	}()
+	<-done
 }
