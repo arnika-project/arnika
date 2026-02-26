@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -117,7 +118,9 @@ func tcpClient(url, data string) error {
 	}
 	// Wait for ACK from the backup before closing, so the connection
 	// is shut down cleanly instead of being reset mid-write.
-	c.SetDeadline(time.Now().Add(time.Millisecond * 500))
+	if err := c.SetDeadline(time.Now().Add(time.Millisecond * 500)); err != nil {
+		return err
+	}
 	reader := bufio.NewReader(c)
 	_, err = reader.ReadString('\n')
 	return err
@@ -244,6 +247,16 @@ func main() {
 		}
 	}()
 	go func() {
+		// Stagger first master attempt based on ArnikaID parity to prevent
+		// both nodes from simultaneously acting as master on startup.
+		// The node with an odd ID defers its first master attempt, giving the
+		// even-ID node time to establish itself and send a key_id.
+		idNum, _ := strconv.Atoi(cfg.ArnikaID)
+		if idNum%2 != 0 {
+			startupDelay := interval / 2
+			log.Printf("[INFO] %s deferring initial master attempt by %s (ArnikaID %s is odd)", ARNIKAPREFIX, startupDelay, cfg.ArnikaID)
+			time.Sleep(startupDelay)
+		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
