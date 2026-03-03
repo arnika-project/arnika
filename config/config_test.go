@@ -62,6 +62,8 @@ func TestParse(t *testing.T) {
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCPSKFile:             "", // Default value for PQCPSKFile
 		Mode:                   "AtLeastQkdRequired",
+		PreferedState:          "PRIMARY",              // Default value for PreferedState
+		ArnikaPeerTimeout:      time.Millisecond * 500, // Default value for ArnikaPeerTimeout
 	}
 	result, err := Parse()
 	if err != nil {

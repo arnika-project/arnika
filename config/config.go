@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -13,9 +14,12 @@ type Config struct {
 	ListenAddress          string        // LISTEN_ADDRESS, Address to listen on for incoming connections
 	ServerAddress          string        // SERVER_ADDRESS, Address of the arnika server
 	ArnikaID               string        // ARNIKA_ID, up to 5-digit identifier (defaults to port number from ListenAddress)
+	ArnikaPSK              string        // ARNIKA_PSK, PSK to authenticate with the other peer
+	PreferedState          string        // PREFERED_STATE, Preferred state of this instance ("MAIN" or "BACKUP")
 	Certificate            string        // CERTIFICATE, Path to the client certificate file
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
+	ArnikaPeerTimeout      time.Duration // ARNIKA_PEER_TIMEOUT, TCP connection timeout for peer connections
 	KMSURL                 string        // KMS_URL, URL of the KMS server
 	KMSHTTPTimeout         time.Duration // KMS_HTTP_TIMEOUT, HTTP connection timeout
 	KMSBackoffMaxRetries   int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests
@@ -47,10 +51,13 @@ func (c *Config) IsQKDRequired() bool {
 func (c *Config) PrintStartupConfig() {
 	fmt.Println("=== Arnika Configuration ===")
 	fmt.Printf("Arnika Mode:              %s\n", c.Mode)
+	fmt.Printf("Arnika Preferred State:   %s\n", c.PreferedState)
 	fmt.Printf("Arnika Interval:          %s\n", c.Interval)
 	fmt.Printf("Arnika ID:                %s\n", c.ArnikaID)
+	fmt.Printf("Arnika PSK:               %s\n", c.ArnikaPSK)
 	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
 	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
+	fmt.Printf("Arnika Peer Timeout:			%s\n", c.ArnikaPeerTimeout)
 	fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
 	fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
 	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
@@ -168,6 +175,15 @@ func Parse() (*Config, error) {
 	}
 	if !config.UsePQC() && config.IsPQCRequired() {
 		return nil, fmt.Errorf("[ERROR] PQC PSK file missing as MODE is %s", config.Mode)
+	}
+	config.PreferedState = strings.ToUpper(getEnvOrDefault("PREFERED_STATE", "PRIMARY"))
+	if config.PreferedState != "PRIMARY" && config.PreferedState != "BACKUP" {
+		return nil, fmt.Errorf("[ERROR] invalid PREFERED_STATE value: %s, available options are: PRIMARY, BACKUP", config.PreferedState)
+	}
+	config.ArnikaPSK = getEnvOrDefault("ARNIKA_PSK", "")
+	config.ArnikaPeerTimeout, err = time.ParseDuration(getEnvOrDefault("ARNIKA_PEER_TIMEOUT", "500ms"))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse ARNIKA_PEER_TIMEOUT: %w", err)
 	}
 	return config, nil
 }

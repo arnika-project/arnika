@@ -6,7 +6,7 @@ VERSION := $(shell git describe --tags --always)
 GO = go
 
 # Build flags
-GO_BUILD_VARS := CGO_ENABLED=0
+GO_BUILD_VARS := CGO_ENABLED=0 GOEXPERIMENT=runtimesecret
 BUILD_FLAGS = -trimpath -ldflags "-w -s -extldflags=-Wl,-Bsymbolic -X 'main.Version=$(VERSION)' -X 'main.APPName=$(NAME)'"
 BINARY_NAME ?= arnika
 BUILD_DIR ?= build

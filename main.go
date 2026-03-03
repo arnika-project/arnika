@@ -2,17 +2,20 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/arnika-project/arnika/auth"
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/kdf"
 	"github.com/arnika-project/arnika/kms"
@@ -25,13 +28,329 @@ var (
 	// allows to overwrite app name on build.
 	APPName string
 	// Prefix variables initialized after config is parsed
-	MASTERPREFIX string
-	BACKUPPREFIX string
-	ARNIKAPREFIX string
+	PRIMARYLOGPREFIX string
+	BACKUPLOGPREFIX  string
+	ARNIKALOGPREFIX  string
 )
 
-func handleServerConnection(c net.Conn, result chan string) {
-	// Check that c is not nil.
+// maxClockSkew is the maximum allowed timestamp difference in seconds (replay protection).
+const maxClockSkew int64 = 60
+
+// rateLimiter implements a simple per-IP rate limiter.
+type rateLimiter struct {
+	mu       sync.Mutex
+	requests map[string][]time.Time
+	limit    int
+	window   time.Duration
+}
+
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	rl := &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    limit,
+		window:   window,
+	}
+	go func() {
+		for {
+			time.Sleep(window)
+			rl.cleanup()
+		}
+	}()
+	return rl
+}
+
+func (rl *rateLimiter) Allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+
+	times := rl.requests[ip]
+	valid := times[:0]
+	for _, t := range times {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+
+	if len(valid) >= rl.limit {
+		rl.requests[ip] = valid
+		return false
+	}
+
+	rl.requests[ip] = append(valid, now)
+	return true
+}
+
+func (rl *rateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	cutoff := time.Now().Add(-rl.window)
+	for ip, times := range rl.requests {
+		valid := times[:0]
+		for _, t := range times {
+			if t.After(cutoff) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.requests, ip)
+		} else {
+			rl.requests[ip] = valid
+		}
+	}
+}
+
+// udpServer listens for incoming UDP packets using the security-hardened protocol:
+//   - Stateless cookie exchange (DDoS protection)
+//   - HMAC-SHA256 signature verification (authentication)
+//   - Timestamp validation (replay protection)
+//   - Per-IP rate limiting (flood protection)
+//   - Constant-time checks, uniform error messages (side-channel resistance)
+//
+// Protocol flow:
+//  1. Client sends INIT packet (signed, no payload) -> Server replies with COOKIE
+//  2. Client sends DATA packet (signed, with cookie + encrypted payload) -> Server replies with ACK
+func udpServer(address string, psk string, result chan string, done chan bool) {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit,
+		syscall.SIGTERM,
+		syscall.SIGINT,
+	)
+	addr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		log.Panicf("[ERROR] failed to resolve UDP address %s: %v", address, err)
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		log.Panicf("[ERROR] failed to listen on UDP %s: %v", address, err)
+	}
+	log.Printf("[INFO] %s UDP server started on %s\n", ARNIKALOGPREFIX, address)
+
+	// Generate per-instance server secret for cookie generation
+	serverSecret := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, serverSecret); err != nil {
+		log.Panicf("[ERROR] failed to generate server secret: %v", err)
+	}
+
+	// Rate limiter: 30 requests per IP per minute
+	limiter := newRateLimiter(30, time.Minute)
+
+	go func() {
+		<-quit
+		log.Printf("[INFO] %s UDP server shutdown triggered on %s", ARNIKALOGPREFIX, address)
+		close(done)
+		conn.Close()
+	}()
+
+	buf := make([]byte, 4096)
+	for {
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-done:
+				return
+			default:
+				log.Printf("[ERROR] %s UDP read error: %v", ARNIKALOGPREFIX, err)
+				continue
+			}
+		}
+
+		clientIP := remoteAddr.IP.String()
+
+		// 1. Rate limit check (cheapest, no crypto)
+		if !limiter.Allow(clientIP) {
+			log.Printf("[DEBUG] %s rate limited %s", BACKUPLOGPREFIX, remoteAddr)
+			continue
+		}
+
+		// 2. Base64 decode
+		raw, err := base64.StdEncoding.DecodeString(string(buf[:n]))
+		if err != nil {
+			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+			continue
+		}
+
+		// 3. Unmarshal + HMAC verify (cheap, before any decryption)
+		pkt, err := auth.UnmarshalPacket([]byte(psk), raw)
+		if err != nil {
+			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+			continue
+		}
+
+		// 4. Timestamp check (replay protection)
+		now := time.Now().Unix()
+		diff := now - pkt.Timestamp
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > maxClockSkew {
+			log.Printf("[DEBUG] %s packet rejected from %s (timestamp)", BACKUPLOGPREFIX, remoteAddr)
+			continue
+		}
+
+		switch pkt.Type {
+		case auth.PacketInit:
+			// Generate cookie and send back — no decryption, very cheap
+			cookie := auth.GenerateCookie(serverSecret, clientIP, pkt.Timestamp)
+			resp := &auth.Packet{
+				Type:      auth.PacketCookie,
+				Timestamp: time.Now().Unix(),
+				Cookie:    cookie,
+			}
+			respB64 := base64.StdEncoding.EncodeToString(resp.Marshal([]byte(psk)))
+			_, _ = conn.WriteToUDP([]byte(respB64), remoteAddr)
+			log.Printf("[DEBUG] %s sent cookie to %s", BACKUPLOGPREFIX, remoteAddr)
+
+		case auth.PacketData:
+			// 5. Verify cookie (cheap HMAC, before decryption)
+			if !auth.VerifyCookie(serverSecret, clientIP, pkt.Cookie, now, maxClockSkew) {
+				log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+				continue
+			}
+
+			// 6. Decrypt payload (expensive, only after all cheap checks pass)
+			decrypted, err := auth.Decrypt([]byte(psk), pkt.Payload)
+			if err != nil {
+				log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+				log.Printf("[ERROR] %s authentication failed, psk mismatch or message corrupted", BACKUPLOGPREFIX)
+				continue
+			}
+
+			// 7. Send ACK
+			ack := &auth.Packet{
+				Type:      auth.PacketAck,
+				Timestamp: time.Now().Unix(),
+			}
+			ackB64 := base64.StdEncoding.EncodeToString(ack.Marshal([]byte(psk)))
+			_, _ = conn.WriteToUDP([]byte(ackB64), remoteAddr)
+
+			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, string(decrypted), remoteAddr)
+			result <- string(decrypted)
+
+		default:
+			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+		}
+	}
+}
+
+// udpClient sends an encrypted, HMAC-signed key ID to the peer via the security-hardened
+// UDP protocol. Uses cookie exchange for DDoS protection. Retries up to 3 times on timeout.
+//
+// Protocol flow:
+//  1. Send INIT -> Receive COOKIE
+//  2. Send DATA (with cookie + encrypted keyID) -> Receive ACK
+func udpClient(address, psk, keyID string, timeout time.Duration) error {
+	if address == "" {
+		return fmt.Errorf("address is empty")
+	}
+	if keyID == "" {
+		return fmt.Errorf("keyID is empty")
+	}
+
+	raddr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return fmt.Errorf("failed to resolve address: %w", err)
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return fmt.Errorf("failed to dial UDP: %w", err)
+	}
+	defer conn.Close()
+
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Step 1: Send INIT to request cookie
+		initPkt := &auth.Packet{
+			Type:      auth.PacketInit,
+			Timestamp: time.Now().Unix(),
+		}
+		initBytes := base64.StdEncoding.EncodeToString(initPkt.Marshal([]byte(psk)))
+		_, err = conn.Write([]byte(initBytes))
+		if err != nil {
+			return fmt.Errorf("failed to write INIT packet: %w", err)
+		}
+
+		// Step 2: Wait for COOKIE response
+		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return fmt.Errorf("failed to set read deadline: %w", err)
+		}
+		cookieBuf := make([]byte, 1024)
+		n, err := conn.Read(cookieBuf)
+		if err != nil {
+			if attempt < maxRetries {
+				log.Printf("[DEBUG] %s cookie timeout (attempt %d/%d), retrying...", PRIMARYLOGPREFIX, attempt, maxRetries)
+				continue
+			}
+			return fmt.Errorf("no cookie after %d attempts: %w", maxRetries, err)
+		}
+
+		cookieRaw, err := base64.StdEncoding.DecodeString(string(cookieBuf[:n]))
+		if err != nil {
+			return fmt.Errorf("failed to decode cookie response: %w", err)
+		}
+		cookiePkt, err := auth.UnmarshalPacket([]byte(psk), cookieRaw)
+		if err != nil {
+			return fmt.Errorf("authentication failed")
+		}
+		if cookiePkt.Type != auth.PacketCookie {
+			return fmt.Errorf("authentication failed")
+		}
+
+		// Step 3: Send DATA with cookie + encrypted keyID
+		encrypted, err := auth.Encrypt([]byte(psk), []byte(keyID))
+		if err != nil {
+			return fmt.Errorf("failed to encrypt key_id: %w", err)
+		}
+		dataPkt := &auth.Packet{
+			Type:      auth.PacketData,
+			Timestamp: time.Now().Unix(),
+			Cookie:    cookiePkt.Cookie,
+			Payload:   encrypted,
+		}
+		dataBytes := base64.StdEncoding.EncodeToString(dataPkt.Marshal([]byte(psk)))
+		_, err = conn.Write([]byte(dataBytes))
+		if err != nil {
+			return fmt.Errorf("failed to write DATA packet: %w", err)
+		}
+
+		// Step 4: Wait for ACK
+		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return fmt.Errorf("failed to set read deadline: %w", err)
+		}
+		ackBuf := make([]byte, 1024)
+		n, err = conn.Read(ackBuf)
+		if err != nil {
+			if attempt < maxRetries {
+				log.Printf("[DEBUG] %s ACK timeout (attempt %d/%d), retrying...", PRIMARYLOGPREFIX, attempt, maxRetries)
+				continue
+			}
+			return fmt.Errorf("no ACK after %d attempts: %w", maxRetries, err)
+		}
+
+		ackRaw, err := base64.StdEncoding.DecodeString(string(ackBuf[:n]))
+		if err != nil {
+			return fmt.Errorf("authentication failed")
+		}
+		ackPkt, err := auth.UnmarshalPacket([]byte(psk), ackRaw)
+		if err != nil {
+			return fmt.Errorf("authentication failed")
+		}
+		if ackPkt.Type != auth.PacketAck {
+			return fmt.Errorf("authentication failed")
+		}
+
+		return nil // success
+	}
+	return fmt.Errorf("unreachable")
+}
+
+// --- Legacy TCP implementation (kept for reference) ---
+
+/*
+func handleServerConnection(c net.Conn, psk string, result chan string) {
 	if c == nil {
 		panic("received nil connection")
 	}
@@ -41,29 +360,32 @@ func handleServerConnection(c net.Conn, result chan string) {
 		}
 	}()
 	defer c.Close()
-	// scan message
 	scanner := bufio.NewScanner(c)
-	// Check that scanner is not nil.
 	if scanner == nil {
 		panic("received nil scanner")
 	}
 	for scanner.Scan() {
 		msg := scanner.Text()
-		result <- msg
-		_, err := c.Write([]byte("ACK" + "\n"))
-		if err != nil { // Handle the write error
+		decrypted, err := auth.Decrypt([]byte(psk), []byte(msg))
+		if err != nil {
+			log.Printf("[DEBUG] failed to decrypt message: %s, %v", msg, err)
+			log.Println("[ERROR] Authentication failed, psk mismatch or message corrupted")
+			break
+		}
+		result <- string(decrypted)
+		_, err = c.Write([]byte("ACK" + "\n"))
+		if err != nil {
 			fmt.Println("[ERROR] Failed to write to connection:", err)
 			break
 		}
-		log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPPREFIX, msg, c.RemoteAddr())
+		log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, decrypted, c.RemoteAddr())
 	}
 	if errRead := scanner.Err(); errRead != nil {
-		log.Printf("[INFO] %s connection closed from %s: %v", BACKUPPREFIX, c.RemoteAddr(), errRead)
+		log.Printf("[INFO] %s connection closed from %s: %v", BACKUPLOGPREFIX, c.RemoteAddr(), errRead)
 	}
 }
 
-func tcpServer(url string, result chan string, done chan bool) {
-	// defer close(done)
+func tcpServer(url string, psk string, result chan string, done chan bool) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit,
 		syscall.SIGTERM,
@@ -71,10 +393,10 @@ func tcpServer(url string, result chan string, done chan bool) {
 	)
 	go func() {
 		<-quit
-		log.Printf("[INFO] %s TCP server shutdown triggered on %s", ARNIKAPREFIX, url)
+		log.Printf("[INFO] %s TCP server shutdown triggered on %s", ARNIKALOGPREFIX, url)
 		close(done)
 	}()
-	log.Printf("[INFO] %s TCP server started on %s\n", ARNIKAPREFIX, url)
+	log.Printf("[INFO] %s TCP server started on %s\n", ARNIKALOGPREFIX, url)
 	ln, err := net.Listen("tcp", url)
 	if err != nil {
 		log.Panicln(err.Error())
@@ -86,7 +408,7 @@ func tcpServer(url string, result chan string, done chan bool) {
 			if err != nil {
 				break
 			}
-			go handleServerConnection(c, result)
+			go handleServerConnection(c, psk, result)
 		}
 	}()
 	<-done
@@ -96,14 +418,14 @@ func tcpServer(url string, result chan string, done chan bool) {
 	}
 }
 
-func tcpClient(url, data string) error {
+func tcpClient(url, data string, timeout time.Duration) error {
 	if url == "" {
 		return fmt.Errorf("url is empty")
 	}
 	if data == "" {
 		return fmt.Errorf("data is empty")
 	}
-	c, err := net.DialTimeout("tcp", url, time.Millisecond*100)
+	c, err := net.DialTimeout("tcp", url, timeout)
 	if err != nil {
 		return err
 	}
@@ -116,15 +438,14 @@ func tcpClient(url, data string) error {
 	if err != nil {
 		return err
 	}
-	// Wait for ACK from the backup before closing, so the connection
-	// is shut down cleanly instead of being reset mid-write.
-	if err := c.SetDeadline(time.Now().Add(time.Millisecond * 500)); err != nil {
+	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return err
 	}
 	reader := bufio.NewReader(c)
 	_, err = reader.ReadString('\n')
 	return err
 }
+*/
 
 func getPQCKey(pqcKeyFile string) (string, error) {
 	file, err := os.Open(pqcKeyFile)
@@ -216,9 +537,9 @@ func main() {
 	}
 	cfg.PrintStartupConfig()
 	// Initialize prefixes with ArnikaID
-	MASTERPREFIX = fmt.Sprintf("MASTER[%s]", cfg.ArnikaID)
-	BACKUPPREFIX = fmt.Sprintf("BACKUP[%s]", cfg.ArnikaID)
-	ARNIKAPREFIX = fmt.Sprintf("ARNIKA[%s]", cfg.ArnikaID)
+	PRIMARYLOGPREFIX = fmt.Sprintf("PRIMARY[%s]", cfg.ArnikaID)
+	BACKUPLOGPREFIX = fmt.Sprintf("BACKUP[%s]", cfg.ArnikaID)
+	ARNIKALOGPREFIX = fmt.Sprintf("ARNIKA[%s]", cfg.ArnikaID)
 	interval := cfg.Interval
 	done := make(chan bool)
 	skip := make(chan bool, 1)
@@ -229,7 +550,7 @@ func main() {
 	if err != nil {
 		log.Panicf("[ERROR] [STOP] Failed to create WireGuard repository: %v", err)
 	}
-	go tcpServer(cfg.ListenAddress, result, done)
+	go udpServer(cfg.ListenAddress, cfg.ArnikaPSK, result, done)
 	go func() {
 		for {
 			r := <-result
@@ -237,26 +558,16 @@ func main() {
 			case skip <- true:
 			default:
 			}
-			log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPPREFIX, r, cfg.KMSURL)
+			log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPLOGPREFIX, r, cfg.KMSURL)
 			key, err := kmsServer.GetKeyByID(r)
 			if err != nil {
-				log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPPREFIX, r, cfg.KMSURL, err)
+				log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPLOGPREFIX, r, cfg.KMSURL, err)
 				continue
 			}
-			setPSK(keyWriter, key.GetKey(), cfg, BACKUPPREFIX)
+			setPSK(keyWriter, key.GetKey(), cfg, BACKUPLOGPREFIX)
 		}
 	}()
 	go func() {
-		// Stagger first master attempt based on ArnikaID parity to prevent
-		// both nodes from simultaneously acting as master on startup.
-		// The node with an odd ID defers its first master attempt, giving the
-		// even-ID node time to establish itself and send a key_id.
-		idNum, _ := strconv.Atoi(cfg.ArnikaID)
-		if idNum%2 != 0 {
-			startupDelay := interval / 2
-			log.Printf("[INFO] %s deferring initial master attempt by %s (ArnikaID %s is odd)", ARNIKAPREFIX, startupDelay, cfg.ArnikaID)
-			time.Sleep(startupDelay)
-		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -265,18 +576,37 @@ func main() {
 			case <-skip:
 			default:
 				// get key_id and send
-				log.Printf("[INFO] %s [REQ] request QKD key from %s\n", MASTERPREFIX, cfg.KMSURL)
+				log.Printf("[INFO] %s [REQ] request QKD key from %s\n", PRIMARYLOGPREFIX, cfg.KMSURL)
 				key, err := kmsServer.GetNewKey()
 				if err != nil {
-					log.Printf("[ERROR] %s failed to retrieve QKD key from %s, %v", MASTERPREFIX, cfg.KMSURL, err)
+					log.Printf("[ERROR] %s failed to retrieve QKD key from %s, %v", PRIMARYLOGPREFIX, cfg.KMSURL, err)
 					ticker.Reset(cfg.KMSRetryInterval)
 				} else {
-					log.Printf("[INFO] %s [SND] send key_id %s to %s\n", MASTERPREFIX, key.GetID(), cfg.ServerAddress)
-					err = tcpClient(cfg.ServerAddress, key.GetID())
-					if err != nil {
-						log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", MASTERPREFIX, key.GetID(), cfg.ServerAddress, err)
+					now := time.Now()
+					var nextTick time.Time
+					if cfg.PreferedState == "BACKUP" {
+						// Wait until the next .5 second (e.g., 12:34:56.500)
+						nextTick = now.Truncate(time.Second).Add(500 * time.Millisecond)
+						if now.After(nextTick) {
+							nextTick = nextTick.Add(time.Second)
+						}
+						log.Printf("[INFO] %s [REQ] use 500ms delay\n", BACKUPLOGPREFIX)
+					} else {
+						// Wait until the next full second (e.g., 12:34:57.000)
+						nextTick = now.Truncate(time.Second).Add(time.Second)
 					}
-					setPSK(keyWriter, key.GetKey(), cfg, MASTERPREFIX)
+					time.Sleep(nextTick.Sub(now))
+					// Check if a key was received from peer during the delay
+					select {
+					case <-skip:
+					default:
+						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, key.GetID(), cfg.ServerAddress)
+						err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, key.GetID(), cfg.ArnikaPeerTimeout)
+						if err != nil {
+							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, key.GetID(), cfg.ServerAddress, err)
+						}
+						setPSK(keyWriter, key.GetKey(), cfg, PRIMARYLOGPREFIX)
+					}
 				}
 			}
 			<-ticker.C
