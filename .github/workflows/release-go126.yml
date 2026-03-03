@@ -48,8 +48,11 @@ jobs:
       - name: Run govulncheck (security scan)
         run: govulncheck ./...
 
-      - name: Install Nancy (Sonatype vulnerability scanner)
-        run: go install github.com/sonatype-iq/nancy@latest
+      - name: Generate go list
+        run: go list -json -m all > go.list
+        
+      - name: Nancy scan
+        uses: sonatype-nexus-community/nancy-github-action@main
 
       - name: Run Nancy dependency audit
         run: go list -m -json all | nancy sleuth
