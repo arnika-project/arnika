@@ -17,18 +17,15 @@ import (
 type PacketType byte
 
 const (
-	PacketInit   PacketType = 'I' // Client requests a cookie (no payload, cheap to process)
-	PacketCookie PacketType = 'C' // Server sends cookie back (DDoS proof-of-origin)
-	PacketData   PacketType = 'D' // Client sends encrypted data with cookie
-	PacketAck    PacketType = 'A' // Server acknowledges receipt
+	PacketData PacketType = 'D' // Client sends encrypted data (signed + AES-GCM encrypted payload)
+	PacketAck  PacketType = 'A' // Server acknowledges receipt
 )
 
-// Packet represents a security-hardened UDP message with HMAC authentication,
-// timestamp for replay protection, and cookie for DDoS mitigation.
+// Packet represents a security-hardened UDP message with HMAC authentication
+// and timestamp for replay protection.
 type Packet struct {
 	Type      PacketType
 	Timestamp int64  // Unix timestamp for replay protection
-	Cookie    []byte // Stateless cookie for DDoS protection (40 bytes or nil)
 	Payload   []byte // Encrypted data (AES-GCM) or nil
 	Signature []byte // HMAC-SHA256 over all preceding fields (32 bytes)
 }
@@ -44,13 +41,6 @@ func deriveKey(psk []byte) []byte {
 // Uses domain separation ("hmac-key:" prefix) to prevent key reuse with AES.
 func deriveHMACKey(psk []byte) []byte {
 	hash := sha256.Sum256(append([]byte("hmac-key:"), psk...))
-	return hash[:]
-}
-
-// deriveCookieKey derives a separate key for cookie generation.
-// Uses domain separation ("cookie-key:" prefix).
-func deriveCookieKey(serverSecret []byte) []byte {
-	hash := sha256.Sum256(append([]byte("cookie-key:"), serverSecret...))
 	return hash[:]
 }
 
@@ -142,34 +132,29 @@ func Decrypt(psk, ciphertext []byte) ([]byte, error) {
 
 // signedPayload returns the bytes covered by the HMAC signature.
 func (p *Packet) signedPayload() []byte {
-	buf := make([]byte, 0, 1+8+len(p.Cookie)+len(p.Payload))
+	buf := make([]byte, 0, 1+8+len(p.Payload))
 	buf = append(buf, byte(p.Type))
 	ts := make([]byte, 8)
 	binary.BigEndian.PutUint64(ts, uint64(p.Timestamp))
 	buf = append(buf, ts...)
-	buf = append(buf, p.Cookie...)
 	buf = append(buf, p.Payload...)
 	return buf
 }
 
 // Marshal encodes a Packet to bytes and signs it with the PSK.
-// Wire format: [type(1)][timestamp(8)][cookie_len(2)][cookie(N)][payload_len(2)][payload(N)][signature(32)]
+// Wire format: [type(1)][timestamp(8)][payload_len(2)][payload(N)][signature(32)]
 func (p *Packet) Marshal(psk []byte) []byte {
 	p.Signature = Sign(psk, p.signedPayload())
 
-	cookieLen := len(p.Cookie)
 	payloadLen := len(p.Payload)
-	totalLen := 1 + 8 + 2 + cookieLen + 2 + payloadLen + 32
+	totalLen := 1 + 8 + 2 + payloadLen + 32
 
 	buf := make([]byte, totalLen)
 	buf[0] = byte(p.Type)
 	binary.BigEndian.PutUint64(buf[1:9], uint64(p.Timestamp))
-	binary.BigEndian.PutUint16(buf[9:11], uint16(cookieLen))
-	copy(buf[11:11+cookieLen], p.Cookie)
-	off := 11 + cookieLen
-	binary.BigEndian.PutUint16(buf[off:off+2], uint16(payloadLen))
-	copy(buf[off+2:off+2+payloadLen], p.Payload)
-	copy(buf[off+2+payloadLen:], p.Signature)
+	binary.BigEndian.PutUint16(buf[9:11], uint16(payloadLen))
+	copy(buf[11:11+payloadLen], p.Payload)
+	copy(buf[11+payloadLen:], p.Signature)
 
 	return buf
 }
@@ -177,8 +162,8 @@ func (p *Packet) Marshal(psk []byte) []byte {
 // UnmarshalPacket decodes bytes into a Packet and verifies the HMAC signature.
 // Returns a uniform error message regardless of failure reason (side-channel resistant).
 func UnmarshalPacket(psk, data []byte) (*Packet, error) {
-	// Minimum: type(1) + timestamp(8) + cookie_len(2) + payload_len(2) + signature(32) = 45
-	if len(data) < 45 {
+	// Minimum: type(1) + timestamp(8) + payload_len(2) + signature(32) = 43
+	if len(data) < 43 {
 		return nil, fmt.Errorf("authentication failed")
 	}
 
@@ -186,27 +171,17 @@ func UnmarshalPacket(psk, data []byte) (*Packet, error) {
 	p.Type = PacketType(data[0])
 	p.Timestamp = int64(binary.BigEndian.Uint64(data[1:9]))
 
-	cookieLen := int(binary.BigEndian.Uint16(data[9:11]))
-	if len(data) < 11+cookieLen+2+32 {
-		return nil, fmt.Errorf("authentication failed")
-	}
-	if cookieLen > 0 {
-		p.Cookie = make([]byte, cookieLen)
-		copy(p.Cookie, data[11:11+cookieLen])
-	}
-
-	off := 11 + cookieLen
-	payloadLen := int(binary.BigEndian.Uint16(data[off : off+2]))
-	if len(data) < off+2+payloadLen+32 {
+	payloadLen := int(binary.BigEndian.Uint16(data[9:11]))
+	if len(data) < 11+payloadLen+32 {
 		return nil, fmt.Errorf("authentication failed")
 	}
 	if payloadLen > 0 {
 		p.Payload = make([]byte, payloadLen)
-		copy(p.Payload, data[off+2:off+2+payloadLen])
+		copy(p.Payload, data[11:11+payloadLen])
 	}
 
 	p.Signature = make([]byte, 32)
-	copy(p.Signature, data[off+2+payloadLen:off+2+payloadLen+32])
+	copy(p.Signature, data[11+payloadLen:11+payloadLen+32])
 
 	// Verify signature using constant-time comparison
 	if !Verify(psk, p.signedPayload(), p.Signature) {
@@ -214,54 +189,4 @@ func UnmarshalPacket(psk, data []byte) (*Packet, error) {
 	}
 
 	return p, nil
-}
-
-// GenerateCookie creates a stateless cookie for DDoS protection.
-// Format: [8 bytes timestamp][32 bytes HMAC(cookieKey, clientIP + timestamp)]
-// The cookie embeds its own creation timestamp so the server can verify expiry.
-func GenerateCookie(serverSecret []byte, clientIP string, timestamp int64) []byte {
-	cookie := make([]byte, 40)
-	binary.BigEndian.PutUint64(cookie[:8], uint64(timestamp))
-
-	data := append([]byte(clientIP), cookie[:8]...)
-	secret.Do(func() {
-		key := deriveCookieKey(serverSecret)
-		mac := hmac.New(sha256.New, key)
-		mac.Write(data)
-		copy(cookie[8:], mac.Sum(nil))
-	})
-
-	return cookie
-}
-
-// VerifyCookie verifies a stateless cookie using constant-time comparison.
-// Checks both the HMAC and that the cookie timestamp is within maxAge seconds of now.
-func VerifyCookie(serverSecret []byte, clientIP string, cookie []byte, nowUnix int64, maxAge int64) bool {
-	if len(cookie) != 40 {
-		return false
-	}
-
-	cookieTimestamp := int64(binary.BigEndian.Uint64(cookie[:8]))
-
-	// Check cookie age
-	diff := nowUnix - cookieTimestamp
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > maxAge {
-		return false
-	}
-
-	// Recompute expected HMAC
-	data := append([]byte(clientIP), cookie[:8]...)
-	var expected []byte
-	secret.Do(func() {
-		key := deriveCookieKey(serverSecret)
-		mac := hmac.New(sha256.New, key)
-		mac.Write(data)
-		expected = make([]byte, sha256.Size)
-		copy(expected, mac.Sum(nil))
-	})
-
-	return subtle.ConstantTimeCompare(expected, cookie[8:]) == 1
 }

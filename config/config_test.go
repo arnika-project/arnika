@@ -62,7 +62,6 @@ func TestParse(t *testing.T) {
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCPSKFile:             "", // Default value for PQCPSKFile
 		Mode:                   "AtLeastQkdRequired",
-		PreferedState:          "PRIMARY",              // Default value for PreferedState
 		ArnikaPeerTimeout:      time.Millisecond * 500, // Default value for ArnikaPeerTimeout
 	}
 	result, err := Parse()
@@ -164,4 +163,26 @@ func TestIsQKDRequired(t *testing.T) {
 		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
 	}
 
+}
+
+func TestIsPrimary(t *testing.T) {
+	psk := "shared-secret-key"
+	nodeA := &Config{ArnikaID: "9999", ArnikaPSK: psk}
+	nodeB := &Config{ArnikaID: "9998", ArnikaPSK: psk}
+
+	// For each interval, the two nodes must get opposite roles
+	for i := uint64(0); i < 100; i++ {
+		a := nodeA.IsPrimary(i)
+		b := nodeB.IsPrimary(i)
+		if a == b {
+			t.Fatalf("interval %d: both nodes got the same role (IsPrimary=%v)", i, a)
+		}
+	}
+
+	// Deterministic: same input → same output
+	for i := uint64(0); i < 50; i++ {
+		if nodeA.IsPrimary(i) != nodeA.IsPrimary(i) {
+			t.Fatalf("interval %d: IsPrimary is not deterministic", i)
+		}
+	}
 }
