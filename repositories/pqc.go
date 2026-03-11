@@ -19,7 +19,7 @@ func (r *FilePQCRepository) GetNewKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(file)
 	scanner.Scan()
 	return scanner.Text(), nil

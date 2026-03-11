@@ -1,3 +1,4 @@
+// Package config handles application configuration loading and validation.
 package config
 
 import (
@@ -36,7 +37,7 @@ type Config struct {
 	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
 }
 
-// Use PQC returns a boolean indicating whether the PQC PSK file is set in the Config struct.
+// UsePQC returns a boolean indicating whether the PQC PSK file is set in the Config struct.
 //
 // No parameters.
 // Returns a boolean value indicating whether the PQC PSK file is set.

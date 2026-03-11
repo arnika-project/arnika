@@ -1,3 +1,5 @@
+// Package auth provides the security-hardened UDP protocol implementation
+// including packet signing, encryption, and replay protection.
 package auth
 
 import (

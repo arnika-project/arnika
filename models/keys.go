@@ -1,3 +1,4 @@
+// Package models defines shared data types used across the application.
 package models
 
 type keyType string

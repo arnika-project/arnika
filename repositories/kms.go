@@ -1,3 +1,4 @@
+// Package repositories provides data access implementations for keys and external services.
 package repositories
 
 import (
@@ -46,7 +47,7 @@ type kmsResponse struct {
 }
 
 type HTTPKMSRepository struct {
-	baseUrl          string
+	baseURL          string
 	maxRetries       int
 	backoffBaseDelay time.Duration
 	conn             *http.Client
@@ -75,7 +76,7 @@ func NewHTTPKMSRepository(url string, timeout time.Duration, maxRetries int, bac
 		tr.TLSClientConfig.RootCAs = caCertPool
 	}
 	return &HTTPKMSRepository{
-		baseUrl:          url,
+		baseURL:          url,
 		maxRetries:       maxRetries,
 		backoffBaseDelay: backoffBaseDelay,
 		conn: &http.Client{
@@ -103,7 +104,7 @@ func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key string, err 
 	var res *http.Response
 
 	for attempt := 0; attempt <= r.maxRetries; attempt++ {
-		res, err = r.conn.Get(r.baseUrl + path)
+		res, err = r.conn.Get(r.baseURL + path)
 		if err == nil && res.StatusCode == http.StatusOK {
 			break
 		}
@@ -113,13 +114,13 @@ func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key string, err 
 			time.Sleep(delay)
 		}
 		if res != nil {
-			res.Body.Close()
+			_ = res.Body.Close()
 		}
 	}
 	if err != nil {
 		return "", "", err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {

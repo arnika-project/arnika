@@ -1,3 +1,4 @@
+// Package kdf provides HKDF-based key derivation functions using SHA3-256.
 package kdf
 
 import (

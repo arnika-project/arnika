@@ -44,7 +44,7 @@ func udpServer(address string, psk string, result chan string, done chan bool, r
 		<-quit
 		log.Printf("[INFO] %s UDP server shutdown triggered on %s", ARNIKALOGPREFIX, address)
 		close(done)
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	buf := make([]byte, 4096)
@@ -140,7 +140,7 @@ func udpClient(address, psk, keyID string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("failed to dial UDP: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {

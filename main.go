@@ -103,7 +103,9 @@ func main() {
 	cfg.PrintStartupConfig()
 	var colorStart, colorEnd string
 	arnikaIDInt := 0
-	fmt.Sscanf(cfg.ArnikaID, "%d", &arnikaIDInt)
+	if _, err := fmt.Sscanf(cfg.ArnikaID, "%d", &arnikaIDInt); err != nil {
+		log.Printf("[WARN] failed to parse ArnikaID %q as integer: %v", cfg.ArnikaID, err)
+	}
 	if arnikaIDInt%2 == 0 {
 		colorStart = "\033[35m"
 	} else {

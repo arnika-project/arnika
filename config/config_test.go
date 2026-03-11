@@ -123,7 +123,9 @@ func TestGetEnv(t *testing.T) {
 	}
 
 	// Test case 2: Testing when the environment variable does not exist
-	os.Unsetenv("TEST_ENV")
+	if err := os.Unsetenv("TEST_ENV"); err != nil {
+		t.Fatalf("failed to unset env var: %v", err)
+	}
 	result, err = getEnv("TEST_ENV")
 	expectedError := fmt.Errorf("[ERROR] failed to get environment variable: TEST_ENV")
 	if err.Error() != expectedError.Error() {
@@ -185,7 +187,9 @@ func TestIsPrimary(t *testing.T) {
 
 	// Deterministic: same input → same output
 	for i := uint64(0); i < 50; i++ {
-		if nodeA.IsPrimary(i) != nodeA.IsPrimary(i) {
+		first := nodeA.IsPrimary(i)
+		second := nodeA.IsPrimary(i)
+		if first != second {
 			t.Fatalf("interval %d: IsPrimary is not deterministic", i)
 		}
 	}

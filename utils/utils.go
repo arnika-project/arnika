@@ -1,3 +1,4 @@
+// Package utils provides common utility functions.
 package utils
 
 func ZeroBytes(b []byte) {
