@@ -1,12 +1,59 @@
 package services
 
+import (
+	"github.com/arnika-project/arnika/models"
+)
+
 type keyReaderRepository interface {
+	*KeyReaderManaged | *KeyReaderUnmanaged
+}
+
+type KeyReaderUnmanaged interface {
+	GetNewKey() (key string, err error)
+}
+
+type KeyReaderManaged interface {
+	GetNewKey() (keyID string, key string, err error)
+	GetKeyByID(keyID *string) (key string, err error)
 }
 
 type KeyReaderService struct {
-	repo keyReaderRepository
+	repoManaged   KeyReaderManaged
+	repoUnmanaged KeyReaderUnmanaged
 }
 
-func NewKeyReaderService(repo keyReaderRepository) *KeyReaderService {
-	return &KeyReaderService{repo: repo}
+func NewKeyReaderService[T keyReaderRepository](repo T) *KeyReaderService {
+	if managedRepo, ok := any(repo).(*KeyReaderManaged); ok && managedRepo != nil {
+		return &KeyReaderService{repoManaged: *managedRepo}
+	}
+	if unmanagedRepo, ok := any(repo).(*KeyReaderUnmanaged); ok && unmanagedRepo != nil {
+		return &KeyReaderService{repoUnmanaged: *unmanagedRepo}
+	}
+	panic("invalid repository type passed to NewKeyReaderService")
+}
+
+func (s *KeyReaderService) GetNewKey() (key *models.Key, err error) {
+	if s.repoManaged != nil {
+		id, key, err := s.repoManaged.GetNewKey()
+		if err != nil {
+			return nil, err
+		}
+		return &models.Key{ID: &id, Key: key, Type: models.KeyTypeManaged}, nil
+	}
+	keyStr, err := s.repoUnmanaged.GetNewKey()
+	if err != nil {
+		return nil, err
+	}
+	return &models.Key{Key: keyStr, Type: models.KeyTypeUnmanaged}, nil
+}
+
+func (s *KeyReaderService) GetKeyByID(keyID *string) (*models.Key, error) {
+	if s.repoUnmanaged != nil {
+		panic("GetKeyByID is not supported for unmanaged keys")
+	}
+	key, err := s.repoManaged.GetKeyByID(keyID)
+	if err != nil {
+		return nil, err
+	}
+	return &models.Key{ID: keyID, Key: key, Type: models.KeyTypeManaged}, nil
 }
