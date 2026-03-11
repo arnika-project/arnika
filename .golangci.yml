@@ -1,0 +1,12 @@
+version: '2'
+
+run:
+  build-tags:
+    - goexperiment.runtimesecret
+
+linters:
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - '-SA5011'
