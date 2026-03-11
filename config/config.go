@@ -215,7 +215,7 @@ func Parse() (*Config, error) {
 		return nil, fmt.Errorf("[ERROR] failed to parse RATE_WINDOW: %w", err)
 	}
 	// Parse max clock skew config
-	maxClockSkewStr := getEnvOrDefault("MAX_CLOCK_SKEW", "60s")
+	maxClockSkewStr := getEnvOrDefault("MAX_CLOCK_SKEW", "1m")
 	maxClockSkew, err := time.ParseDuration(maxClockSkewStr)
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse MAX_CLOCK_SKEW: %w", err)
