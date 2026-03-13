@@ -4,12 +4,14 @@ package repositories
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"runtime/secret"
 	"time"
 )
 
@@ -87,19 +89,19 @@ func NewHTTPKMSRepository(url string, timeout time.Duration, maxRetries int, bac
 	}
 }
 
-func (r *HTTPKMSRepository) GetNewKey() (keyID string, key string, err error) {
+func (r *HTTPKMSRepository) GetNewKey() (keyID string, key []byte, err error) {
 	return r.kmsRequest("/enc_keys?number=1&size=256")
 }
 
-func (r *HTTPKMSRepository) GetKeyByID(keyID *string) (key string, err error) {
+func (r *HTTPKMSRepository) GetKeyByID(keyID *string) (key []byte, err error) {
 	if keyID == nil || *keyID == "" {
-		return "", fmt.Errorf("keyID is empty")
+		return nil, fmt.Errorf("keyID is empty")
 	}
 	_, key, err = r.kmsRequest("/dec_keys?key_ID=" + *keyID)
 	return key, err
 }
 
-func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key string, err error) {
+func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key []byte, err error) {
 	var kmsResp kmsResponse
 	var res *http.Response
 
@@ -118,19 +120,28 @@ func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key string, err 
 		}
 	}
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
 	defer func() { _ = res.Body.Close() }()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
+	defer clear(body)
 	if err := json.Unmarshal(body, &kmsResp); err != nil {
-		return "", "", fmt.Errorf("cant parse KMS response (%s): %w", string(body), err)
+		return "", nil, fmt.Errorf("cant parse KMS response: %w", err)
 	}
 	if len(kmsResp.Keys) == 0 || kmsResp.Keys[0].ID == "" || kmsResp.Keys[0].Key == "" {
-		return "", "", fmt.Errorf("unable to fetch key from KMS: %s", string(body))
+		return "", nil, fmt.Errorf("unable to fetch key from KMS")
 	}
-	return kmsResp.Keys[0].ID, kmsResp.Keys[0].Key, nil
+
+	var rawKey []byte
+	secret.Do(func() {
+		rawKey, err = base64.StdEncoding.DecodeString(kmsResp.Keys[0].Key)
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to decode KMS key: %w", err)
+	}
+	return kmsResp.Keys[0].ID, rawKey, nil
 }

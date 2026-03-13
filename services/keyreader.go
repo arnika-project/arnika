@@ -10,12 +10,12 @@ type keyReaderRepository interface {
 }
 
 type KeyReaderUnmanaged interface {
-	GetNewKey() (key string, err error)
+	GetNewKey() (key []byte, err error)
 }
 
 type KeyReaderManaged interface {
-	GetNewKey() (keyID string, key string, err error)
-	GetKeyByID(keyID *string) (key string, err error)
+	GetNewKey() (keyID string, key []byte, err error)
+	GetKeyByID(keyID *string) (key []byte, err error)
 }
 
 type KeyReaderService struct {
@@ -35,26 +35,26 @@ func NewKeyReaderService[T keyReaderRepository](repo T) *KeyReaderService {
 
 func (s *KeyReaderService) GetNewKey() (key *models.Key, err error) {
 	if s.repoManaged != nil {
-		id, key, err := s.repoManaged.GetNewKey()
+		id, keyBytes, err := s.repoManaged.GetNewKey()
 		if err != nil {
 			return nil, err
 		}
-		return &models.Key{ID: &id, Key: key, Type: models.KeyTypeManaged}, nil
+		return &models.Key{ID: &id, Key: keyBytes, Type: models.KeyTypeManaged}, nil
 	}
-	keyStr, err := s.repoUnmanaged.GetNewKey()
+	keyBytes, err := s.repoUnmanaged.GetNewKey()
 	if err != nil {
 		return nil, err
 	}
-	return &models.Key{Key: keyStr, Type: models.KeyTypeUnmanaged}, nil
+	return &models.Key{Key: keyBytes, Type: models.KeyTypeUnmanaged}, nil
 }
 
 func (s *KeyReaderService) GetKeyByID(keyID *string) (*models.Key, error) {
 	if s.repoUnmanaged != nil {
 		panic("GetKeyByID is not supported for unmanaged keys")
 	}
-	key, err := s.repoManaged.GetKeyByID(keyID)
+	keyBytes, err := s.repoManaged.GetKeyByID(keyID)
 	if err != nil {
 		return nil, err
 	}
-	return &models.Key{ID: keyID, Key: key, Type: models.KeyTypeManaged}, nil
+	return &models.Key{ID: keyID, Key: keyBytes, Type: models.KeyTypeManaged}, nil
 }

@@ -8,6 +8,7 @@ import (
 
 	"os"
 
+	"runtime/secret"
 	"time"
 
 	"github.com/arnika-project/arnika/config"
@@ -26,10 +27,15 @@ var (
 	ARNIKALOGPREFIX  string
 )
 
-func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd string, cfg *config.Config, logPrefix string) {
-	psk := qkd
+func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logPrefix string) {
+	var psk []byte
+	if qkd != nil {
+		psk = make([]byte, len(qkd))
+		copy(psk, qkd)
+	}
 	msg := ""
 	defer func() {
+		clear(psk)
 		if msg != "" {
 			log.Println(msg)
 			log.Printf("[ERROR] %s [STOP] configure random PSK to invalidate WireGuard session", logPrefix)
@@ -38,7 +44,7 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 			}
 		}
 	}()
-	if qkd == "" {
+	if len(qkd) == 0 {
 		if cfg.IsQKDRequired() {
 			msg = fmt.Sprintf("[ERROR] %s mode set to %s but no QKD key received", logPrefix, cfg.Mode)
 			return
@@ -54,29 +60,27 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 			}
 			log.Printf("[WARNING] %s failed to retrieve PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
 		} else {
-			pqc, err := base64.StdEncoding.DecodeString(pqcKey.Key)
+			defer pqcKey.Zero()
+			var derivedKey []byte
+			secret.Do(func() {
+				derivedKey, err = kdf.DeriveKey(psk, pqcKey.Key)
+			})
 			if err != nil {
-				if cfg.IsPQCRequired() {
-					msg = fmt.Sprintf("[ERROR] %s failed to decode PQC key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
-					return
-				} else {
-					log.Printf("[WARNING] %s failed to decode PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
-				}
-			} else {
-				psk, err = kdf.DeriveKey(psk, pqc)
-				if err != nil {
-					msg = fmt.Sprintf("[ERROR] %s failed to derive key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
-					return
-				}
-				log.Printf("[INFO] %s [OK] HKDF derivation completed for QKD+PQC key", logPrefix)
+				msg = fmt.Sprintf("[ERROR] %s failed to derive key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
+				return
 			}
+			clear(psk)
+			psk = derivedKey
+			log.Printf("[INFO] %s [OK] HKDF derivation completed for QKD+PQC key", logPrefix)
 		}
 	}
-	if psk == "" {
+	if len(psk) == 0 {
 		msg = fmt.Sprintf("[ERROR] %s no PSK available", logPrefix)
 		return
 	}
-	if err := keyWriter.SetPSK(psk); err != nil {
+	// Encode to base64 for WireGuard interface (requires string)
+	pskStr := base64.StdEncoding.EncodeToString(psk)
+	if err := keyWriter.SetPSK(pskStr); err != nil {
 		msg = fmt.Sprintf("[ERROR] %s failed to configure PSK on WireGuard interface: %v", logPrefix, err)
 		return
 	}
@@ -125,7 +129,7 @@ func main() {
 	if err != nil {
 		log.Panicf("[ERROR] [STOP] Failed to create WireGuard repository: %v", err)
 	}
-	go udpServer(cfg.ListenAddress, cfg.ArnikaPSK, result, done, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
+	go udpServer(cfg.ListenAddress, []byte(cfg.ArnikaPSK), result, done, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
 	go func() {
 		for {
 			r := <-result
@@ -178,7 +182,7 @@ func main() {
 							continue
 						}
 						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress)
-						err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, *key.ID, cfg.ArnikaPeerTimeout)
+						err = udpClient(cfg.ServerAddress, []byte(cfg.ArnikaPSK), *key.ID, cfg.ArnikaPeerTimeout)
 						if err != nil {
 							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress, err)
 						}

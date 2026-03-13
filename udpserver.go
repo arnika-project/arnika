@@ -21,7 +21,7 @@ import (
 //
 // Protocol flow:
 //  1. Client sends DATA packet (signed + encrypted payload) -> Server replies with ACK
-func udpServer(address string, psk string, result chan string, done chan bool, rateLimit int, rateWindow, maxClockSkew time.Duration) {
+func udpServer(address string, psk []byte, result chan string, done chan bool, rateLimit int, rateWindow, maxClockSkew time.Duration) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit,
 		syscall.SIGTERM,
@@ -76,7 +76,7 @@ func udpServer(address string, psk string, result chan string, done chan bool, r
 		}
 
 		// 3. Unmarshal + HMAC verify (cheap, before any decryption)
-		pkt, err := auth.UnmarshalPacket([]byte(psk), raw)
+		pkt, err := auth.UnmarshalPacket(psk, raw)
 		if err != nil {
 			log.Printf("[WARNING] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
 			continue
@@ -99,7 +99,7 @@ func udpServer(address string, psk string, result chan string, done chan bool, r
 		}
 
 		// 5. Decrypt payload (expensive, only after all cheap checks pass)
-		decrypted, err := auth.Decrypt([]byte(psk), pkt.Payload)
+		decrypted, err := auth.Decrypt(psk, pkt.Payload)
 		if err != nil {
 			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
 			log.Printf("[ERROR] %s authentication failed, psk mismatch or message corrupted", BACKUPLOGPREFIX)
@@ -111,7 +111,7 @@ func udpServer(address string, psk string, result chan string, done chan bool, r
 			Type:      auth.PacketAck,
 			Timestamp: time.Now().Unix(),
 		}
-		ackB64 := base64.StdEncoding.EncodeToString(ack.Marshal([]byte(psk)))
+		ackB64 := base64.StdEncoding.EncodeToString(ack.Marshal(psk))
 		_, _ = conn.WriteToUDP([]byte(ackB64), remoteAddr)
 
 		log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, string(decrypted), remoteAddr)
@@ -124,7 +124,7 @@ func udpServer(address string, psk string, result chan string, done chan bool, r
 //
 // Protocol flow:
 //  1. Send DATA (signed + encrypted keyID) -> Receive ACK
-func udpClient(address, psk, keyID string, timeout time.Duration) error {
+func udpClient(address string, psk []byte, keyID string, timeout time.Duration) error {
 	if address == "" {
 		return fmt.Errorf("address is empty")
 	}
@@ -145,7 +145,7 @@ func udpClient(address, psk, keyID string, timeout time.Duration) error {
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Step 1: Encrypt keyID and send DATA packet
-		encrypted, err := auth.Encrypt([]byte(psk), []byte(keyID))
+		encrypted, err := auth.Encrypt(psk, []byte(keyID))
 		if err != nil {
 			return fmt.Errorf("failed to encrypt key_id: %w", err)
 		}
@@ -154,7 +154,7 @@ func udpClient(address, psk, keyID string, timeout time.Duration) error {
 			Timestamp: time.Now().Unix(),
 			Payload:   encrypted,
 		}
-		dataBytes := base64.StdEncoding.EncodeToString(dataPkt.Marshal([]byte(psk)))
+		dataBytes := base64.StdEncoding.EncodeToString(dataPkt.Marshal(psk))
 		_, err = conn.Write([]byte(dataBytes))
 		if err != nil {
 			return fmt.Errorf("failed to write DATA packet: %w", err)
@@ -178,7 +178,7 @@ func udpClient(address, psk, keyID string, timeout time.Duration) error {
 		if err != nil {
 			return fmt.Errorf("authentication failed")
 		}
-		ackPkt, err := auth.UnmarshalPacket([]byte(psk), ackRaw)
+		ackPkt, err := auth.UnmarshalPacket(psk, ackRaw)
 		if err != nil {
 			return fmt.Errorf("authentication failed")
 		}
