@@ -225,9 +225,17 @@ func main() {
 	result := make(chan string)
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
 	kmsServer := kms.NewKMSServer(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
-	handler, err := keyhandler.NewWireGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	var handler keyhandler.Handler
+	switch cfg.KeyHandler {
+	case "wireguard":
+		handler, err = keyhandler.NewWireGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	case "file":
+		handler, err = keyhandler.NewFile(cfg.KeyOutputFile)
+	default:
+		log.Panicf("[ERROR] [STOP] Unknown key handler: %s", cfg.KeyHandler)
+	}
 	if err != nil {
-		log.Panicf("[ERROR] [STOP] Failed to create key handler: %v", err)
+		log.Panicf("[ERROR] [STOP] Failed to create key handler (%s): %v", cfg.KeyHandler, err)
 	}
 	go tcpServer(cfg.ListenAddress, result, done)
 	go func() {
