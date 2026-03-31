@@ -1,0 +1,148 @@
+name: wolfGuard Integration Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  wolfguard-integration:
+    name: wolfGuard + Arnika + QKD Simulator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout arnika
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool \
+            linux-headers-$(uname -r) \
+            iproute2 \
+            build-essential \
+            curl jq
+
+      - name: Clone wolfSSL and wolfGuard side by side
+        run: |
+          git clone --depth 1 https://github.com/wolfssl/wolfssl.git /tmp/wolfssl
+          git clone --depth 1 https://github.com/wolfSSL/wolfGuard.git /tmp/wolfguard
+
+      - name: Build wolfSSL (userspace + kernel module)
+        working-directory: /tmp/wolfssl
+        run: |
+          KERNEL_SRC="/usr/src/linux-headers-$(uname -r)"
+          ./autogen.sh
+          ./configure --quiet \
+            --enable-wolfguard \
+            --enable-cryptonly \
+            --enable-intelasm \
+            --enable-linuxkm \
+            --with-linux-source="$KERNEL_SRC" \
+            --prefix="$(pwd)/linuxkm/build"
+          make -j$(nproc) module
+          sudo make install
+          sudo ldconfig
+          # linuxkm_memory.h is referenced by installed headers but not
+          # copied by make install — place it where wolfGuard Kbuild expects it
+          sudo mkdir -p linuxkm/build/include/linuxkm
+          sudo cp linuxkm/linuxkm_memory.h linuxkm/build/include/linuxkm/
+          # Install kernel module to system module directory
+          sudo mkdir -p "/lib/modules/$(uname -r)/extra"
+          sudo cp linuxkm/libwolfssl.ko "/lib/modules/$(uname -r)/extra/"
+          sudo depmod -a
+          sudo modprobe libwolfssl
+
+      - name: Build wolfGuard (userspace tool + kernel module)
+        working-directory: /tmp/wolfguard
+        run: |
+          KERNEL_SRC="/usr/src/linux-headers-$(uname -r)"
+          # Build wg-fips userspace tool
+          make -C user-src -j$(nproc)
+          sudo make -C user-src install
+          # Build kernel module — Kbuild defaults to ../../wolfssl for WOLFSSL_ROOT
+          make -C kernel-src -j$(nproc) \
+            KERNELDIR="$KERNEL_SRC" \
+            KERNELRELEASE="$(uname -r)"
+          sudo mkdir -p "/lib/modules/$(uname -r)/extra"
+          sudo cp kernel-src/wolfguard.ko "/lib/modules/$(uname -r)/extra/"
+          sudo depmod -a
+
+      - name: Load wolfGuard kernel module
+        run: |
+          # Unload standard wireguard if loaded
+          sudo modprobe -r wireguard 2>/dev/null || true
+          # libwolfssl already loaded during build; load wolfguard
+          sudo modprobe wolfguard
+          # Verify both modules are loaded
+          lsmod | grep wolfguard
+          lsmod | grep libwolfssl
+
+      - name: Generate WireGuard keys (using wg-fips)
+        run: |
+          mkdir -p /tmp/wolfguard-test/node-a /tmp/wolfguard-test/node-b
+          sudo wg-fips genkey | tee /tmp/wolfguard-test/node-a/private.key | sudo wg-fips pubkey > /tmp/wolfguard-test/node-a/public.key
+          sudo wg-fips genkey | tee /tmp/wolfguard-test/node-b/private.key | sudo wg-fips pubkey > /tmp/wolfguard-test/node-b/public.key
+          chmod 600 /tmp/wolfguard-test/node-a/private.key /tmp/wolfguard-test/node-b/private.key
+
+      - name: Build arnika and QKD simulator
+        run: |
+          go build -o build/arnika .
+          cd tools && go build -o ../build/qkd-simulator mock.go
+
+      - name: Set up network namespaces
+        run: |
+          sudo bash ci/wolfguard/setup-namespaces.sh
+
+      - name: Start QKD simulator
+        run: |
+          ./build/qkd-simulator &> /tmp/wolfguard-test/qkd-simulator.log &
+          echo $! > /tmp/wolfguard-test/qkd-simulator.pid
+          # Wait for simulator to be ready
+          for i in $(seq 1 15); do
+            if curl -s http://192.168.100.1:8080/api/v1/keys/CONSB/enc_keys > /dev/null 2>&1; then
+              echo "QKD simulator is ready"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Start arnika nodes
+        run: |
+          sudo bash ci/wolfguard/start-nodes.sh
+
+      - name: Wait for key exchange
+        run: sleep 15
+
+      - name: Verify PSK injection
+        run: |
+          sudo bash ci/wolfguard/verify.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "====== QKD Simulator Logs ======"
+          cat /tmp/wolfguard-test/qkd-simulator.log || true
+          echo "====== Node-A Arnika Logs ======"
+          cat /tmp/wolfguard-test/node-a/arnika.log || true
+          echo "====== Node-B Arnika Logs ======"
+          cat /tmp/wolfguard-test/node-b/arnika.log || true
+          echo "====== WireGuard Status (ns-a) ======"
+          sudo ip netns exec ns-a wg-fips show wg0 || true
+          echo "====== WireGuard Status (ns-b) ======"
+          sudo ip netns exec ns-b wg-fips show wg0 || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo ip netns del ns-a 2>/dev/null || true
+          sudo ip netns del ns-b 2>/dev/null || true
+          kill $(cat /tmp/wolfguard-test/qkd-simulator.pid 2>/dev/null) 2>/dev/null || true
+          sudo rm -rf /tmp/wolfguard-test

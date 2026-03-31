@@ -174,7 +174,6 @@ func setPSK(handler keyhandler.Handler, qkd string, cfg *config.Config, logPrefi
 					log.Printf("[WARNING] %s failed to decode PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
 				}
 			} else {
-				// a key derivation will happen, either with key or with all zeros
 				psk, err = kdf.DeriveKey(psk, pqc)
 				if err != nil {
 					msg = fmt.Sprintf("[ERROR] %s failed to derive key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
@@ -192,7 +191,7 @@ func setPSK(handler keyhandler.Handler, qkd string, cfg *config.Config, logPrefi
 		msg = fmt.Sprintf("[ERROR] %s failed to deliver PSK: %v", logPrefix, err)
 		return
 	}
-	log.Printf("[INFO] %s [OK] PSK delivered via key handler", logPrefix)
+	log.Printf("[INFO] %s [OK] PSK delivered via %s handler", logPrefix, cfg.KeyHandler)
 }
 
 func main() {
