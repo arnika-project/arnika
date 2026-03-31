@@ -229,6 +229,8 @@ func main() {
 	switch cfg.KeyHandler {
 	case "wireguard":
 		handler, err = keyhandler.NewWireGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	case "wolfguard":
+		handler, err = keyhandler.NewWolfGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
 	case "file":
 		handler, err = keyhandler.NewFile(cfg.KeyOutputFile)
 	default:

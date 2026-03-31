@@ -22,7 +22,7 @@ type Config struct {
 	KMSBackoffBaseDelay    time.Duration // KMS_BACKOFF_BASE_DELAY, Base delay for KMS request retries, will get exponentially increased
 	KMSRetryInterval       time.Duration // KMS_RETRY_INTERVAL, Interval between KMS request retries
 	Interval               time.Duration // INTERVAL, Interval between key updates
-	KeyHandler             string        // KEY_HANDLER, Key output handler ("wireguard", "file")
+	KeyHandler             string        // KEY_HANDLER, Key output handler ("wireguard", "wolfguard", "file")
 	WireGuardInterface     string        // WIREGUARD_INTERFACE, Name of the WireGuard interface to configure
 	WireguardPeerPublicKey string        // WIREGUARD_PEER_PUBLIC_KEY, Public key of the WireGuard peer
 	KeyOutputFile          string        // KEY_OUTPUT_FILE, Path to write the PSK when KEY_HANDLER is "file"
@@ -82,7 +82,7 @@ func (c *Config) PrintStartupConfig() {
 	}
 
 	fmt.Printf("Key Handler:             %s\n", c.KeyHandler)
-	if c.KeyHandler == "wireguard" {
+	if c.KeyHandler == "wireguard" || c.KeyHandler == "wolfguard" {
 		fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
 		fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
 	}
@@ -144,10 +144,10 @@ func Parse() (*Config, error) {
 	}
 	config.Interval = interval
 	config.KeyHandler = getEnvOrDefault("KEY_HANDLER", "wireguard")
-	if config.KeyHandler != "wireguard" && config.KeyHandler != "file" {
-		return nil, fmt.Errorf("[ERROR] invalid KEY_HANDLER value: %s (must be wireguard or file)", config.KeyHandler)
+	if config.KeyHandler != "wireguard" && config.KeyHandler != "wolfguard" && config.KeyHandler != "file" {
+		return nil, fmt.Errorf("[ERROR] invalid KEY_HANDLER value: %s (must be wireguard, wolfguard, or file)", config.KeyHandler)
 	}
-	if config.KeyHandler == "wireguard" {
+	if config.KeyHandler == "wireguard" || config.KeyHandler == "wolfguard" {
 		config.WireGuardInterface, err = getEnv("WIREGUARD_INTERFACE")
 		if err != nil {
 			return nil, err
