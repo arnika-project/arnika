@@ -230,6 +230,8 @@ func main() {
 		handler, err = keyhandler.NewWireGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
 	case "wolfguard":
 		handler, err = keyhandler.NewWolfGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	case "macsec":
+		handler, err = keyhandler.NewMACsec(cfg.MACsecInterface, cfg.MACsecRxSCI)
 	case "file":
 		handler, err = keyhandler.NewFile(cfg.KeyOutputFile)
 	default:
