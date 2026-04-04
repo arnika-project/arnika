@@ -22,8 +22,12 @@ type Config struct {
 	KMSBackoffBaseDelay    time.Duration // KMS_BACKOFF_BASE_DELAY, Base delay for KMS request retries, will get exponentially increased
 	KMSRetryInterval       time.Duration // KMS_RETRY_INTERVAL, Interval between KMS request retries
 	Interval               time.Duration // INTERVAL, Interval between key updates
+	KeyHandler             string        // KEY_HANDLER, Key output handler ("wireguard", "wolfguard", "macsec", "file")
 	WireGuardInterface     string        // WIREGUARD_INTERFACE, Name of the WireGuard interface to configure
 	WireguardPeerPublicKey string        // WIREGUARD_PEER_PUBLIC_KEY, Public key of the WireGuard peer
+	KeyOutputFile          string        // KEY_OUTPUT_FILE, Path to write the PSK when KEY_HANDLER is "file"
+	MACsecInterface        string        // MACSEC_INTERFACE, Name of the MACsec interface
+	MACsecRxSCI            string        // MACSEC_RX_SCI, Peer's Secure Channel Identifier (16 hex chars)
 	PQCPSKFile             string        // PQC_PSK_FILE, Path to the PQC PSK file
 	Mode                   string        // MODE, Operation mode ("QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired")
 }
@@ -79,8 +83,18 @@ func (c *Config) PrintStartupConfig() {
 		fmt.Println("PQC key provider:        DISABLED")
 	}
 
-	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
-	fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
+	fmt.Printf("Key Handler:             %s\n", c.KeyHandler)
+	if c.KeyHandler == "wireguard" || c.KeyHandler == "wolfguard" {
+		fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
+		fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
+	}
+	if c.KeyHandler == "macsec" {
+		fmt.Printf("MACsec Interface:        %s\n", c.MACsecInterface)
+		fmt.Printf("MACsec RX SCI:           %s\n", c.MACsecRxSCI)
+	}
+	if c.KeyHandler == "file" {
+		fmt.Printf("Key Output File:         %s\n", c.KeyOutputFile)
+	}
 	fmt.Println("============================")
 }
 
@@ -135,13 +149,38 @@ func Parse() (*Config, error) {
 		return nil, fmt.Errorf("[ERROR] failed to parse INTERVAL: %w", err)
 	}
 	config.Interval = interval
-	config.WireGuardInterface, err = getEnv("WIREGUARD_INTERFACE")
-	if err != nil {
-		return nil, err
+	config.KeyHandler = getEnvOrDefault("KEY_HANDLER", "wireguard")
+	if config.KeyHandler != "wireguard" && config.KeyHandler != "wolfguard" && config.KeyHandler != "macsec" && config.KeyHandler != "file" {
+		return nil, fmt.Errorf("[ERROR] invalid KEY_HANDLER value: %s (must be wireguard, wolfguard, macsec, or file)", config.KeyHandler)
 	}
-	config.WireguardPeerPublicKey, err = getEnv("WIREGUARD_PEER_PUBLIC_KEY")
-	if err != nil {
-		return nil, err
+	if config.KeyHandler == "wireguard" || config.KeyHandler == "wolfguard" {
+		config.WireGuardInterface, err = getEnv("WIREGUARD_INTERFACE")
+		if err != nil {
+			return nil, err
+		}
+		config.WireguardPeerPublicKey, err = getEnv("WIREGUARD_PEER_PUBLIC_KEY")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if config.KeyHandler == "macsec" {
+		config.MACsecInterface, err = getEnv("MACSEC_INTERFACE")
+		if err != nil {
+			return nil, err
+		}
+		config.MACsecRxSCI, err = getEnv("MACSEC_RX_SCI")
+		if err != nil {
+			return nil, err
+		}
+		if len(config.MACsecRxSCI) != 16 {
+			return nil, fmt.Errorf("[ERROR] MACSEC_RX_SCI must be 16 hex characters, got %d", len(config.MACsecRxSCI))
+		}
+	}
+	if config.KeyHandler == "file" {
+		config.KeyOutputFile, err = getEnv("KEY_OUTPUT_FILE")
+		if err != nil {
+			return nil, err
+		}
 	}
 	config.PQCPSKFile = getEnvOrDefault("PQC_PSK_FILE", "")
 	if config.PQCPSKFile != "" {

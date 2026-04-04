@@ -302,12 +302,118 @@ Arnika must be configured via environment variables, following are available:
 | KMS_BACKOFF_BASE_DELAY    | Initial delay before retrying a failed KMS request (exponential backoff applies)                             | 100ms                                    |
 | KMS_RETRY_INTERVAL        | Time interval between retry attempts after a failed KMS key request                                          | 60s                                      |
 | INTERVAL                  | Interval between regular key requests to the KMS; should align with WireGuard rekey interval                 | 120s                                     |
-| WIREGUARD_INTERFACE       | Name of the WireGuard network interface to configure                                                         | qcicat0                                  |
-| WIREGUARD_PEER_PUBLIC_KEY | Public key of the WireGuard peer for secure association                                                      | 8978940b-fb48-4ebf-ad7d-ca36a987fc32     |
+| KEY_HANDLER               | Key output handler: `wireguard` (default), `wolfguard`, `macsec`, or `file`                                  | wireguard                                |
+| WIREGUARD_INTERFACE       | Name of the WireGuard/wolfGuard network interface (required for `wireguard`/`wolfguard` handlers)            | qcicat0                                  |
+| WIREGUARD_PEER_PUBLIC_KEY | Public key of the WireGuard/wolfGuard peer (required for `wireguard`/`wolfguard` handlers)                   | H9adDtDH...nsHc=                         |
+| MACSEC_INTERFACE          | Name of the MACsec network interface (required for `macsec` handler)                                         | macsec0                                  |
+| MACSEC_RX_SCI             | Peer's Secure Channel Identifier, 16 hex characters (required for `macsec` handler)                          | 001122334455ffff                          |
+| KEY_OUTPUT_FILE           | File path to write the PSK to (required for `file` handler)                                                  | /tmp/arnika.psk                          |
 | PQC_PSK_FILE              | File path containing the PQC-generated preshared key (from Rosenpass or similar)                             | /rosenpass/pqc.psk                       |
 | MODE                      | Operation mode: "QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", or "EitherQkdOrPqcRequired" | AtLeastQkdRequired                       |
 | ARNIKA_ID                 | Optional identifier (up to 5 digits); defaults to LISTEN_PORT; used for logging and identification           | 9998                                     |
 
+
+## Key Handlers
+
+Arnika supports multiple key output backends via the `KEY_HANDLER` environment variable. The handler determines how derived PSKs are delivered to their destination.
+
+### WireGuard (default)
+
+The default handler injects PSKs into a standard WireGuard interface via netlink using the [wgctrl](https://pkg.go.dev/golang.zx2c4.com/wireguard/wgctrl) library. WireGuard uses Curve25519 for key exchange with 32-byte keys.
+
+```bash
+KEY_HANDLER=wireguard \
+WIREGUARD_INTERFACE=wg0 \
+WIREGUARD_PEER_PUBLIC_KEY="H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=" \
+arnika
+```
+
+### wolfGuard
+
+[wolfGuard](https://github.com/wolfSSL/wolfGuard) is a FIPS-validated drop-in replacement for WireGuard that uses SECP256R1 (NIST P-256) instead of Curve25519. It registers as a separate generic netlink family (`wolfguard`) and uses 65-byte uncompressed ECC public keys instead of WireGuard's 32-byte keys.
+
+Because the standard `wgctrl` library is hardcoded to the `wireguard` netlink family and 32-byte keys, Arnika includes a dedicated wolfGuard handler that talks directly to the `wolfguard` generic netlink family using the same attribute IDs.
+
+**Requirements:**
+- Linux with the wolfGuard kernel module loaded (`sudo modprobe wolfguard`)
+- wolfSSL kernel module (`libwolfssl.ko`) loaded as a dependency
+- `wg-fips` userspace tool for interface setup (key generation, peer configuration)
+- `CAP_NET_ADMIN` capability
+
+**Interface setup** (using `wg-fips`, not standard `wg`):
+```bash
+# Create wolfGuard interface
+ip link add dev wg0 type wolfguard
+ip addr add 172.16.0.1/24 dev wg0
+
+# Generate keys with wg-fips (requires loaded kernel module)
+sudo wg-fips genkey | tee private.key | sudo wg-fips pubkey > public.key
+
+# Configure interface
+sudo wg-fips set wg0 private-key private.key listen-port 51820
+sudo wg-fips set wg0 peer "$PEER_PUBKEY" allowed-ips 172.16.0.2/32 endpoint 10.0.0.2:51820
+ip link set wg0 up
+```
+
+**Start Arnika with wolfGuard:**
+```bash
+KEY_HANDLER=wolfguard \
+WIREGUARD_INTERFACE=wg0 \
+WIREGUARD_PEER_PUBLIC_KEY="$PEER_PUBKEY" \
+arnika
+```
+
+### MACsec
+
+[MACsec](https://en.wikipedia.org/wiki/IEEE_802.1AE) (IEEE 802.1AE) provides hop-by-hop Layer 2 encryption. Arnika injects 256-bit keys (GCM-AES-256) into MACsec Security Associations (SAs) via the kernel's `macsec` generic netlink family, and switches the active encoding SA via rtnetlink.
+
+**Hitless key rotation:** Arnika performs hitless SA rotation by cycling through association numbers 0-3 with a sliding window of two active SAs (current + previous). This ensures the peer can still decrypt with the old key while transitioning to the new one.
+
+| Step | Inject AN | Delete AN | Active SAs |
+|------|-----------|-----------|------------|
+| 1    | 0         | —         | 0          |
+| 2    | 1         | —         | 0, 1       |
+| 3    | 2         | 0         | 1, 2       |
+| 4    | 3         | 1         | 2, 3       |
+| 5    | 0         | 2         | 3, 0       |
+| 6    | 1         | 3         | 0, 1       |
+
+The RX Secure Channel (SC) for the peer is created automatically on the first key injection if it does not already exist.
+
+**Requirements:**
+- Linux with MACsec support (kernel 4.6+)
+- MACsec interface already created (e.g., via `ip link`)
+- `CAP_NET_ADMIN` capability
+
+**Interface setup:**
+```bash
+# Create MACsec interface on top of a physical interface
+ip link add link eth0 macsec0 type macsec sci 001122334455ffff encrypt on
+
+# Bring it up
+ip link set macsec0 up
+ip addr add 10.0.0.1/24 dev macsec0
+```
+
+**Start Arnika with MACsec:**
+```bash
+KEY_HANDLER=macsec \
+MACSEC_INTERFACE=macsec0 \
+MACSEC_RX_SCI=aabbccddeeff0001 \
+arnika
+```
+
+The `MACSEC_RX_SCI` is the Secure Channel Identifier of the remote peer's transmit SC — typically derived from the peer's MAC address and port number (16 hex characters / 8 bytes).
+
+### File
+
+The file handler writes PSKs to a file on disk, useful for integration with external tools or debugging.
+
+```bash
+KEY_HANDLER=file \
+KEY_OUTPUT_FILE=/tmp/arnika.psk \
+arnika
+```
 
 ---
 
