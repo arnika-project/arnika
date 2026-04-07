@@ -2,15 +2,30 @@
 
 set -eu
 
-# This version of the test script is designed to be run against a KMS instance, and will print the HTTP status code and response body for each test case. It is for HTTP only, no TLS support.
+# This version of the test script is designed to be run against a KMS instance,
+# and will print the HTTP status code and response body for each test case.
+# It is for HTTP only, no TLS support.
+#
+# Test cases (ref: ETSI GS QKD 014 V1.1.1)
+#
+# 01  POST /status              — reject POST on status endpoint (ETSI 014 §6.1: GET only)         expect 405
+# 02  GET  /status              — retrieve KMS status (ETSI 014 §6.1)                              expect 200
+# 03  POST /enc_keys {}         — request key with empty JSON body, defaults apply (ETSI 014 §6.2) expect 200
+# 04  GET  /enc_keys            — request key with no parameters, defaults apply (ETSI 014 §6.2)   expect 200
+# 05  POST /enc_keys?n=1&s=256  — request key via query params on POST (ETSI 014 §6.2)             expect 200
+# 06  GET  /enc_keys?n=1&s=256  — request key via query params on GET (ETSI 014 §6.2)              expect 200
+# 07  GET  /enc_keys?n=2&s=256  — reject unsupported number=2 (ETSI 014 §6.2)                      expect 400
+# 08  POST /enc_keys {n:1,s:256}— request key with full JSON body (ETSI 014 §6.2)                  expect 200
+# 09  GET  /enc_keys {n:1,s:256}— request key with JSON body on GET (ETSI 014 §6.2)                expect 200
+# 10  POST /enc_keys {n:1}      — request key with minimum JSON body (ETSI 014 §6.2)               expect 200
+# 11  GET  /enc_keys {n:1}      — request key with minimum JSON body on GET (ETSI 014 §6.2)        expect 200
+# 12  POST /enc_keys (no body)  — reject POST without JSON body (RFC 8259 validation)              expect 400
+# 13  GET  /enc_keys (no body)  — request key with no body on GET, defaults apply (ETSI 014 §6.2)  expect 200
+# 14  POST /dec_keys {key_IDs}  — retrieve key by ID via POST (ETSI 014 §6.3)                      expect 200
+# 15  GET  /dec_keys?key_ID=... — retrieve key by ID via query param (ETSI 014 §6.3)               expect 200
+# 16  POST /dec_keys (repeat)   — verify repeatability with distinct key (ETSI 014 §6.3)           expect 200
+# 17  GET  /dec_keys (repeat)   — verify repeatability with distinct key (ETSI 014 §6.3)           expect 200
 
-# It covers the following endpoints:
-# - POST /status
-# - GET /status
-# - POST /enc_keys (with and without query parameters)
-# - GET /enc_keys (with and without query parameters)
-# - POST /dec_keys (with key_IDs in the body)
-# - GET /dec_keys (with key_ID as a query parameter)
 
 SAE="${SAE:-CONSA}"
 KMS="${KMS:-http://127.0.0.1:8080/api/v1/keys/${SAE}}"
@@ -18,7 +33,7 @@ KMS="${KMS:-http://127.0.0.1:8080/api/v1/keys/${SAE}}"
 PASS=0
 FAIL=0
 
-printf 'Started at %s\n---\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+printf '# Started at %s\n---\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 
 run_case() {
   local label="$1"
@@ -65,22 +80,26 @@ run_case '06: GET /enc_keys?number=1&size=256' 'GET' "$KMS/enc_keys?number=1&siz
 run_case '07: GET /enc_keys?number=2&size=256 (expect 400)' 'GET' "$KMS/enc_keys?number=2&size=256" '' 400
 run_case '08: POST /enc_keys with {"number":1,"size":256}' 'POST' "$KMS/enc_keys" '{"number":1,"size":256}'
 run_case '09: GET /enc_keys with {"number":1,"size":256}' 'GET' "$KMS/enc_keys" '{"number":1,"size":256}'
+run_case '10: POST /enc_keys with {"number":1} (minimum body)' 'POST' "$KMS/enc_keys" '{"number":1}'
+run_case '11: GET /enc_keys with {"number":1} (minimum body)' 'GET' "$KMS/enc_keys" '{"number":1}'
+run_case '12: POST /enc_keys (no body, expect 400)' 'POST' "$KMS/enc_keys" '' 400
+run_case '13: GET /enc_keys (no body)' 'GET' "$KMS/enc_keys" ''
 
 # Get a fresh key_ID for each dec_keys test
 KEY_ID=$(fetch_key_id)
-run_case "10: POST /dec_keys with {\"key_IDs\":[\"$KEY_ID\"]}" 'POST' "$KMS/dec_keys" '{"key_IDs":["'"$KEY_ID"'"]}'
+run_case "14: POST /dec_keys with {\"key_IDs\":[\"$KEY_ID\"]}" 'POST' "$KMS/dec_keys" '{"key_IDs":["'"$KEY_ID"'"]}'
 
 KEY_ID=$(fetch_key_id)
-run_case "11: GET /dec_keys?key_ID=$KEY_ID" 'GET' "$KMS/dec_keys?key_ID=$KEY_ID" ''
+run_case "15: GET /dec_keys?key_ID=$KEY_ID" 'GET' "$KMS/dec_keys?key_ID=$KEY_ID" ''
 
 # Repeat dec_keys tests to verify repeatability with distinct keys
 KEY_ID=$(fetch_key_id)
-run_case "12: POST /dec_keys (repeat) with {\"key_IDs\":[\"$KEY_ID\"]}" 'POST' "$KMS/dec_keys" '{"key_IDs":["'"$KEY_ID"'"]}'
+run_case "16: POST /dec_keys (repeat) with {\"key_IDs\":[\"$KEY_ID\"]}" 'POST' "$KMS/dec_keys" '{"key_IDs":["'"$KEY_ID"'"]}'
 
 KEY_ID=$(fetch_key_id)
-run_case "13: GET /dec_keys (repeat) ?key_ID=$KEY_ID" 'GET' "$KMS/dec_keys?key_ID=$KEY_ID" ''
+run_case "17: GET /dec_keys (repeat) ?key_ID=$KEY_ID" 'GET' "$KMS/dec_keys?key_ID=$KEY_ID" ''
 
-printf 'Finished at %s — %d passed, %d failed\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$PASS" "$FAIL"
+printf '# Finished at %s — %d passed, %d failed\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
 
 

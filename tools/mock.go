@@ -20,8 +20,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const Port = "8080"
-
 const LOG = "%s [%d] %s %s from %s"
 const DEBUG = "[DEBUG]"
 
@@ -72,6 +70,7 @@ var keyStore = &KeyStore{
 
 var randomizer = rand.New(rand.NewSource(time.Now().UnixNano()))
 var debugEnabled = isDebugEnabled()
+var listenAddr = getListenAddr()
 
 const (
 	defaultKeyNumber          = 1
@@ -95,7 +94,7 @@ func main() {
 	http.HandleFunc("/api/v1/keys/CONSB/dec_keys", handleDecKeys)
 	http.HandleFunc("/api/v1/keys/CONSB/status", handleStatus)
 	log.Printf("======== QKD KMS Simulator ========")
-	log.Printf("[CONF] listening on port:%s", Port)
+	log.Printf("[CONF] listen address=%s (set LISTEN=host:port to override)", listenAddr)
 	log.Printf("[CONF] supported key size=%d", defaultKeySize)
 	log.Printf("[CONF] supported key number=%d", defaultKeyNumber)
 	log.Printf("[CONF] available SAE:")
@@ -108,7 +107,7 @@ func main() {
 	log.Printf("[CONF] debug logging enabled=%t (set DEBUG=true to enable)", debugEnabled)
 	log.Printf("===================================")
 
-	if err := http.ListenAndServe(":"+Port, nil); err != nil {
+	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		panic("[ERROR] failed starting server: " + err.Error())
 	}
 }
@@ -448,6 +447,13 @@ func debugLogResponse(status int, contentType string, body []byte) {
 func isDebugEnabled() bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv("DEBUG")))
 	return value == "true"
+}
+
+func getListenAddr() string {
+	if addr := strings.TrimSpace(os.Getenv("LISTEN")); addr != "" {
+		return addr
+	}
+	return ":8080"
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) error {
