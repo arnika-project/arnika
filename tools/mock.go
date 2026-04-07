@@ -42,8 +42,12 @@ type EncKeysPostRequest struct {
 	Size   *int `json:"size"`
 }
 
+type DecKeyIDEntry struct {
+	KeyID string `json:"key_ID"`
+}
+
 type DecKeysPostRequest struct {
-	KeyIDs []string `json:"key_IDs"`
+	KeyIDs []DecKeyIDEntry `json:"key_IDs"`
 }
 
 type ErrorResponse struct {
@@ -359,9 +363,9 @@ func parseDecKeysRequest(r *http.Request) ([]string, error) {
 		if len(request.KeyIDs) != 1 {
 			return nil, fmt.Errorf("only one key_ID is supported")
 		}
-		first := strings.TrimSpace(request.KeyIDs[0])
+		first := strings.TrimSpace(request.KeyIDs[0].KeyID)
 		if first == "" {
-			return nil, fmt.Errorf("key_IDs[0] cannot be empty")
+			return nil, fmt.Errorf("key_IDs[0].key_ID cannot be empty")
 		}
 		return []string{first}, nil
 	default:

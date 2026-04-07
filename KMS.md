@@ -223,7 +223,7 @@ KEY_ID=$(curl -sS -X POST http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys \
 # Then retrieve it:
 curl -sS -X POST http://127.0.0.1:8080/api/v1/keys/CONSA/dec_keys \
   -H 'Content-Type: application/json' \
-  -d "{\"key_IDs\":[\"$KEY_ID\"]}"
+  -d "{\"key_IDs\":[{\"key_ID\":\"$KEY_ID\"}]}"
 ```
 
 Response (`200`):
@@ -292,8 +292,8 @@ kill %1
 
 | # | Method | Endpoint | Description | Spec | Expect |
 |---|--------|----------|-------------|------|--------|
-| 01 | POST | /status | Reject POST on status endpoint (GET only) | §6.1 | 405 |
-| 02 | GET | /status | Retrieve KMS status | §6.1 | 200 |
+| 01 | POST | /status | Reject POST on status endpoint (GET only) | §5.2 | 405 |
+| 02 | GET | /status | Retrieve KMS status | §5.2, §6.1 | 200 |
 | 03 | POST | /enc\_keys | Request key with empty JSON body `{}`, defaults apply | §6.2 | 200 |
 | 04 | GET | /enc\_keys | Request key with no parameters, defaults apply | §6.2 | 200 |
 | 05 | POST | /enc\_keys?number=1&size=256 | Request key via query params on POST | §6.2 | 200 |
@@ -305,104 +305,92 @@ kill %1
 | 11 | GET | /enc\_keys | Request key with minimum JSON body on GET `{"number":1}` | §6.2 | 200 |
 | 12 | POST | /enc\_keys | Reject POST without JSON body (RFC 8259 validation) | — | 400 |
 | 13 | GET | /enc\_keys | Request key with no body on GET, defaults apply | §6.2 | 200 |
-| 14 | POST | /dec\_keys | Retrieve key by ID via POST `{"key_IDs":["..."]}` | §6.3 | 200 |
-| 15 | GET | /dec\_keys?key\_ID=... | Retrieve key by ID via query param | §6.3 | 200 |
-| 16 | POST | /dec\_keys | Verify repeatability with distinct key (POST) | §6.3 | 200 |
-| 17 | GET | /dec\_keys?key\_ID=... | Verify repeatability with distinct key (GET) | §6.3 | 200 |
+| 14 | GET | /dec\_keys?key\_ID=... | Retrieve key by ID via query param | §5.4, §6.4 | 200 |
+| 15 | POST | /dec\_keys | Retrieve key by ID via POST `{"key_IDs":[{"key_ID":"..."}]}` | §5.4, §6.4 | 200 |
 
 ### Sample Output
 
 > **Note:** UUIDs, key material, and status counts are pseudo-random and will differ on each run. The output below is a representative snapshot.
 
 ```shell
-# Started at 2026-04-07 18:08:09
+# Started at 2026-04-07 21:00:43
 ---
 01: POST /status (expect 405)
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/status' -H "Content-Type: application/json" -d '{}'
+[CMD] curl -sS -X POST 'http://192.168.3.151:8080/api/v1/keys/CONSA/status' -H "Content-Type: application/json" -d '{}'
 HTTP 405
 {"message":"Method not allowed"}
 ---
 02: GET /status
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/status'
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/status'
 HTTP 200
-{"source_KME_ID":"CONSA","target_KME_ID":"CONSB","master_SAE_ID":"CONSA","slave_SAE_ID":"CONSB","key_size":256,"stored_key_count":6407,"max_key_count":6407,"max_key_per_request":1,"max_key_size":256,"min_key_size":256,"max_SAE_ID_count":0}
+{"source_KME_ID":"CONSA","target_KME_ID":"CONSB","master_SAE_ID":"CONSA","slave_SAE_ID":"CONSB","key_size":256,"stored_key_count":6413,"max_key_count":6413,"max_key_per_request":1,"max_key_size":256,"min_key_size":256,"max_SAE_ID_count":0}
 ---
 03: POST /enc_keys (empty body)
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{}'
+[CMD] curl -sS -X POST 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{}'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-5482-47d9-8420-3d5b2890bf19","key":"SKiXMN5lW725N1/A+I590joXvt71sSwCQU49bkMXNQY="}]}
+{"keys":[{"key_ID":"ffffffff-721b-46b8-bd63-8fdb197b54cd","key":"0ntG1r54QnJCM0v2aTLQ28GYDmc5RcIwdZ1+qSWEFXg="}]}
 ---
 04: GET /enc_keys
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys'
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-cd3e-401d-8848-a285a2c0903b","key":"8bOYCzKR35e4qbNIOHLpSEVbaxqUhfej1QD9DagoCzc="}]}
+{"keys":[{"key_ID":"ffffffff-fa8b-41b4-94f5-d07f3313b58c","key":"ISHBOsNY8CwD6tmnZBUaSyuEB2qthr8ZMGH6U4d2dqY="}]}
 ---
 05: POST /enc_keys?number=1&size=256
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys?number=1&size=256' -H "Content-Type: application/json" -d '{}'
+[CMD] curl -sS -X POST 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys?number=1&size=256' -H "Content-Type: application/json" -d '{}'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-4e0c-4c5b-93f5-2f02d26a4fc1","key":"vZwNTT97OrQRJPG8ga/AFB5QldxOmFqU2UEmMEBOhfo="}]}
+{"keys":[{"key_ID":"ffffffff-4468-45f5-83ba-9232a79e8af1","key":"JzhXrleBmuCwe5GKNDA1b288W/5Dw/axpfHyv4lO948="}]}
 ---
 06: GET /enc_keys?number=1&size=256
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys?number=1&size=256'
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys?number=1&size=256'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-7930-479f-87cd-36a9c116816f","key":"CAqo3AVKqkLhMpRyrN+afeUgABZFyd38GvAEcZcZzHc="}]}
+{"keys":[{"key_ID":"ffffffff-e6dc-4f9d-87a3-ea521150d2cc","key":"QkgxWa/0dEDuFy2AOzZegG215PAYsb6QaKu49e5T0GQ="}]}
 ---
 07: GET /enc_keys?number=2&size=256 (expect 400)
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys?number=2&size=256'
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys?number=2&size=256'
 HTTP 400
 {"message":"unsupported number: 2"}
 ---
 08: POST /enc_keys with {"number":1,"size":256}
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1,"size":256}'
+[CMD] curl -sS -X POST 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1,"size":256}'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-267c-463b-92d8-4c6e4bd7e187","key":"FScNyVx2fq4aIr/0m9fM+o/MmH60gF0dy8J5VsYw+4Q="}]}
+{"keys":[{"key_ID":"ffffffff-2092-468e-90ec-c78fc29a610d","key":"QFK8FNTJh367782XyYmGYF/IHwbAh7QKphXxqo+df5o="}]}
 ---
 09: GET /enc_keys with {"number":1,"size":256}
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1,"size":256}'
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1,"size":256}'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-6050-4f47-bbf8-64e222ca29f1","key":"faV7qs71qrmy+/5x9NmBhjAMhrsH1R1IviOQsnNqDBk="}]}
+{"keys":[{"key_ID":"ffffffff-4d45-46a5-8cb2-ed4176f2ce42","key":"aZa6LImAVHIJoF0mn0N/HW7LjEVULPN7S0CK4+7OfiE="}]}
 ---
 10: POST /enc_keys with {"number":1} (minimum body)
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1}'
+[CMD] curl -sS -X POST 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1}'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-419c-4414-9d15-3e05ac6d7fe7","key":"yEdEvJYo3355smB8jCYxMTQn1aenj+AxgouRHpEU7PU="}]}
+{"keys":[{"key_ID":"ffffffff-b406-4201-94c5-21655282f164","key":"BIn/PdxFmh6yhcHMdT963QjWKzkoFevSoghWHK/Ugew="}]}
 ---
 11: GET /enc_keys with {"number":1} (minimum body)
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1}'
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys' -H "Content-Type: application/json" -d '{"number":1}'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-725c-40b9-90c5-33f8fef1cf85","key":"+FUtpp3/M0lTZ4j4W7gJP9h0IkEUQnWtQtSNtO6aE7A="}]}
+{"keys":[{"key_ID":"ffffffff-c984-451d-b8f3-4efbf28a2859","key":"P/m6EvbDly2VbAqkHBGFPqVauPlCVrr7lZZsL7ziDQs="}]}
 ---
 12: POST /enc_keys (no body, expect 400)
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys'
+[CMD] curl -sS -X POST 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys'
 HTTP 400
 {"message":"invalid JSON payload"}
 ---
 13: GET /enc_keys (no body)
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys'
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/enc_keys'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-86d4-40eb-9939-51719f34599b","key":"NS2Jp4GWCaKjXBVbsx+DPmqUyvL7/VyTUixt/O8AkeI="}]}
+{"keys":[{"key_ID":"ffffffff-97dc-4c9d-ba08-070cf9e1356e","key":"EKyTMH6otrQwecTIYhB5nlINmMjkfwSG0bGXtG6b4Hk="}]}
 ---
-14: POST /dec_keys with {"key_IDs":["ffffffff-ea76-4c10-84b8-503c06ad7bd4"]}
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/dec_keys' -H "Content-Type: application/json" -d '{"key_IDs":["ffffffff-ea76-4c10-84b8-503c06ad7bd4"]}'
+14: GET /dec_keys?key_ID=ffffffff-dab1-417b-b515-f3dea7004505
+[CMD] curl -sS -X GET 'http://192.168.3.151:8080/api/v1/keys/CONSA/dec_keys?key_ID=ffffffff-dab1-417b-b515-f3dea7004505'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-ea76-4c10-84b8-503c06ad7bd4","key":"VaqZteJROdCwX+LtaoeUtiQv9cJwvmREfqfG9zaiUO4="}]}
+{"keys":[{"key_ID":"ffffffff-dab1-417b-b515-f3dea7004505","key":"rJZggeyDswhi0qm3GdVf7jzgonjDSfqleHlzMFCPyKs="}]}
 ---
-15: GET /dec_keys?key_ID=ffffffff-2e08-40b3-9030-f37883416439
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/dec_keys?key_ID=ffffffff-2e08-40b3-9030-f37883416439'
+15: POST /dec_keys with {"key_IDs":[{"key_ID":"ffffffff-b9cc-4c7b-9766-e44c53fd22a4"}]}
+[CMD] curl -sS -X POST 'http://192.168.3.151:8080/api/v1/keys/CONSA/dec_keys' -H "Content-Type: application/json" -d '{"key_IDs":[{"key_ID":"ffffffff-b9cc-4c7b-9766-e44c53fd22a4"}]}'
 HTTP 200
-{"keys":[{"key_ID":"ffffffff-2e08-40b3-9030-f37883416439","key":"KRZdOXJYZQujHWe5Pzq1/YldjoPYNMvgAtu7fakxqAU="}]}
+{"keys":[{"key_ID":"ffffffff-b9cc-4c7b-9766-e44c53fd22a4","key":"MVJ6mGIu4fjaGq3wk/sv42Cdyk/jcYjrS2RAY2eo7Ss="}]}
 ---
-16: POST /dec_keys (repeat) with {"key_IDs":["ffffffff-ee65-4568-a880-d68374767d15"]}
-[CMD] curl -sS -X POST 'http://127.0.0.1:8080/api/v1/keys/CONSA/dec_keys' -H "Content-Type: application/json" -d '{"key_IDs":["ffffffff-ee65-4568-a880-d68374767d15"]}'
-HTTP 200
-{"keys":[{"key_ID":"ffffffff-ee65-4568-a880-d68374767d15","key":"1WbHe38TUPH7fyrzSBrJYWsqbHYwtmkSb16CHf7egyc="}]}
----
-17: GET /dec_keys (repeat) ?key_ID=ffffffff-6a39-4b78-a728-fac1c2a129fa
-[CMD] curl -sS -X GET 'http://127.0.0.1:8080/api/v1/keys/CONSA/dec_keys?key_ID=ffffffff-6a39-4b78-a728-fac1c2a129fa'
-HTTP 200
-{"keys":[{"key_ID":"ffffffff-6a39-4b78-a728-fac1c2a129fa","key":"lhxKeRF+XCJU0V4YWi09JIq9E8/+t0zdKahoFPshcGM="}]}
----
-# Finished at 2026-04-07 18:08:09 — 17 passed, 0 failed
+# Finished at 2026-04-07 21:00:43 — 15 passed, 0 failed
 ```
 
 ---

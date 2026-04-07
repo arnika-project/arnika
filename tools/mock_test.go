@@ -123,7 +123,7 @@ func TestDecKeysPostReturnsStoredKey(t *testing.T) {
 	}
 	keyID := encResp.Keys[0].KeyID
 
-	decBody := `{"key_IDs":["` + keyID + `"]}`
+	decBody := `{"key_IDs":[{"key_ID":"` + keyID + `"}]}`
 	decReq := httptest.NewRequest(http.MethodPost, "/api/v1/keys/CONSA/dec_keys", strings.NewReader(decBody))
 	decW := httptest.NewRecorder()
 	handleDecKeys(decW, decReq)
@@ -143,7 +143,7 @@ func TestDecKeysPostReturnsStoredKey(t *testing.T) {
 
 func TestDecKeysPostRejectsMultipleKeyIDs(t *testing.T) {
 	resetKeyStore()
-	body := `{"key_IDs":["id-1","id-2"]}`
+	body := `{"key_IDs":[{"key_ID":"id-1"},{"key_ID":"id-2"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys/CONSA/dec_keys", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
