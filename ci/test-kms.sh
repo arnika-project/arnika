@@ -25,6 +25,7 @@ run_case() {
   local method="$2"
   local url="$3"
   local data="$4"
+  local expected_code="${5:-}"
   local response code body
   printf '%s\n' "$label"
   if [[ -n "$data" ]]; then
@@ -36,7 +37,13 @@ run_case() {
   fi
   code="${response##*$'\n'}"
   body="${response%$'\n'"$code"}"
-  if [[ "$code" -ge 200 && "$code" -lt 300 ]]; then ((PASS++)); else ((FAIL++)); fi
+  local ok=false
+  if [[ -n "$expected_code" ]]; then
+    [[ "$code" -eq "$expected_code" ]] && ok=true
+  else
+    [[ "$code" -ge 200 && "$code" -lt 300 ]] && ok=true
+  fi
+  if $ok; then ((PASS++)); else ((FAIL++)); fi
   printf '%s\n%s\n---\n' "HTTP $code" "$body"
 }
 
@@ -49,13 +56,13 @@ fetch_key_id() {
   printf '%s' "$kid"
 }
 
-run_case '01: POST /status' 'POST' "$KMS/status" '{}'
+run_case '01: POST /status (expect 405)' 'POST' "$KMS/status" '{}' 405
 run_case '02: GET /status' 'GET' "$KMS/status" ''
 run_case '03: POST /enc_keys (empty body)' 'POST' "$KMS/enc_keys" '{}'
 run_case '04: GET /enc_keys' 'GET' "$KMS/enc_keys" ''
 run_case '05: POST /enc_keys?number=1&size=256' 'POST' "$KMS/enc_keys?number=1&size=256" '{}'
 run_case '06: GET /enc_keys?number=1&size=256' 'GET' "$KMS/enc_keys?number=1&size=256" ''
-run_case '07: GET /enc_keys?number=2&size=256' 'GET' "$KMS/enc_keys?number=2&size=256" ''
+run_case '07: GET /enc_keys?number=2&size=256 (expect 400)' 'GET' "$KMS/enc_keys?number=2&size=256" '' 400
 run_case '08: POST /enc_keys with {"number":1,"size":256}' 'POST' "$KMS/enc_keys" '{"number":1,"size":256}'
 run_case '09: GET /enc_keys with {"number":1,"size":256}' 'GET' "$KMS/enc_keys" '{"number":1,"size":256}'
 
