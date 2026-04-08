@@ -1,0 +1,78 @@
+name: MACsec Integration Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  macsec-integration:
+    name: MACsec + Arnika + QKD Simulator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout arnika
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 curl jq
+
+      - name: Build arnika and QKD simulator
+        run: |
+          go build -o build/arnika .
+          cd tools && go build -o ../build/qkd-simulator mock.go
+
+      - name: Set up network namespaces with MACsec
+        run: |
+          mkdir -p /tmp/macsec-test/node-a /tmp/macsec-test/node-b
+          sudo bash ci/macsec/setup-namespaces.sh
+
+      - name: Start QKD simulator
+        run: |
+          ./build/qkd-simulator &> /tmp/macsec-test/qkd-simulator.log &
+          echo $! > /tmp/macsec-test/qkd-simulator.pid
+          for i in $(seq 1 15); do
+            if curl -s http://192.168.100.1:8080/api/v1/keys/CONSB/enc_keys > /dev/null 2>&1; then
+              echo "QKD simulator is ready"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Start arnika nodes
+        run: |
+          sudo bash ci/macsec/start-nodes.sh
+
+      - name: Verify MACsec SA injection
+        run: |
+          sudo bash ci/macsec/verify.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "====== QKD Simulator Logs ======"
+          cat /tmp/macsec-test/qkd-simulator.log || true
+          echo "====== Node-A Arnika Logs ======"
+          cat /tmp/macsec-test/node-a/arnika.log || true
+          echo "====== Node-B Arnika Logs ======"
+          cat /tmp/macsec-test/node-b/arnika.log || true
+          echo "====== MACsec State (ns-a) ======"
+          sudo ip netns exec ns-a ip macsec show || true
+          echo "====== MACsec State (ns-b) ======"
+          sudo ip netns exec ns-b ip macsec show || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo ip netns del ns-a 2>/dev/null || true
+          sudo ip netns del ns-b 2>/dev/null || true
+          kill $(cat /tmp/macsec-test/qkd-simulator.pid 2>/dev/null) 2>/dev/null || true
+          sudo rm -rf /tmp/macsec-test

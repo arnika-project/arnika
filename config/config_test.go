@@ -55,9 +55,10 @@ func TestParse(t *testing.T) {
 		KMSURL:                 "https://example.com",
 		Interval:               time.Second * 10,       // Default value for Interval
 		KMSHTTPTimeout:         time.Second * 10,       // Default value for KMSHTTPTimeout
-		KMSBackoffMaxRetries:  5,                      // Default value for KMSBackoffMaxRetries
+		KMSBackoffMaxRetries:   5,                      // Default value for KMSBackoffMaxRetries
 		KMSBackoffBaseDelay:    time.Millisecond * 100, // Default value for KMSBackoffBaseDelay
 		KMSRetryInterval:       (time.Second * 10) / 2, // Default value for KMSRetryInterval
+		KeyHandler:             "wireguard",             // Default value for KeyHandler
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCPSKFile:             "", // Default value for PQCPSKFile

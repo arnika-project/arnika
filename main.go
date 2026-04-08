@@ -15,8 +15,8 @@ import (
 
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/kdf"
+	"github.com/arnika-project/arnika/keyhandler"
 	"github.com/arnika-project/arnika/kms"
-	wg "github.com/arnika-project/arnika/wireguard"
 )
 
 var (
@@ -137,15 +137,15 @@ func getPQCKey(pqcKeyFile string) (string, error) {
 	return scanner.Text(), nil
 }
 
-func setPSK(wireguard *wg.WireGuardHandler, qkd string, cfg *config.Config, logPrefix string) {
+func setPSK(handler keyhandler.Handler, qkd string, cfg *config.Config, logPrefix string) {
 	psk := qkd
 	msg := ""
 	defer func() {
 		if msg != "" {
 			log.Println(msg)
-			log.Printf("[ERROR] %s [STOP] configure random PSK to invalidate WireGuard session", logPrefix)
-			if err := wireguard.SetRandomPSK(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey); err != nil {
-				log.Printf("[ERROR] %s failed to configure random PSK: %v", logPrefix, err)
+			log.Printf("[ERROR] %s [STOP] configure random key to invalidate session", logPrefix)
+			if err := handler.Invalidate(); err != nil {
+				log.Printf("[ERROR] %s failed to invalidate key: %v", logPrefix, err)
 			}
 		}
 	}()
@@ -174,7 +174,6 @@ func setPSK(wireguard *wg.WireGuardHandler, qkd string, cfg *config.Config, logP
 					log.Printf("[WARNING] %s failed to decode PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
 				}
 			} else {
-				// a key derivation will happen, either with key or with all zeros
 				psk, err = kdf.DeriveKey(psk, pqc)
 				if err != nil {
 					msg = fmt.Sprintf("[ERROR] %s failed to derive key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
@@ -188,11 +187,11 @@ func setPSK(wireguard *wg.WireGuardHandler, qkd string, cfg *config.Config, logP
 		msg = fmt.Sprintf("[ERROR] %s no PSK available", logPrefix)
 		return
 	}
-	if err := wireguard.SetKey(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, psk); err != nil {
-		msg = fmt.Sprintf("[ERROR] %s failed to configure PSK on WireGuard interface: %v", logPrefix, err)
+	if err := handler.SetKey(psk); err != nil {
+		msg = fmt.Sprintf("[ERROR] %s failed to deliver PSK: %v", logPrefix, err)
 		return
 	}
-	log.Printf("[INFO] %s [OK] PSK configured on WireGuard interface: %s for peer: %s", logPrefix, cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	log.Printf("[INFO] %s [OK] PSK delivered via %s handler", logPrefix, cfg.KeyHandler)
 }
 
 func main() {
@@ -225,9 +224,21 @@ func main() {
 	result := make(chan string)
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
 	kmsServer := kms.NewKMSServer(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
-	wireguard, err := wg.NewWireGuardHandler()
+	var handler keyhandler.Handler
+	switch cfg.KeyHandler {
+	case "wireguard":
+		handler, err = keyhandler.NewWireGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	case "wolfguard":
+		handler, err = keyhandler.NewWolfGuard(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	case "macsec":
+		handler, err = keyhandler.NewMACsec(cfg.MACsecInterface, cfg.MACsecRxSCI)
+	case "file":
+		handler, err = keyhandler.NewFile(cfg.KeyOutputFile)
+	default:
+		log.Panicf("[ERROR] [STOP] Unknown key handler: %s", cfg.KeyHandler)
+	}
 	if err != nil {
-		log.Panicf("[ERROR] [STOP] Failed to create WireGuard handler: %v", err)
+		log.Panicf("[ERROR] [STOP] Failed to create key handler (%s): %v", cfg.KeyHandler, err)
 	}
 	go tcpServer(cfg.ListenAddress, result, done)
 	go func() {
@@ -243,7 +254,7 @@ func main() {
 				log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPPREFIX, r, cfg.KMSURL, err)
 				continue
 			}
-			setPSK(wireguard, key.GetKey(), cfg, BACKUPPREFIX)
+			setPSK(handler, key.GetKey(), cfg, BACKUPPREFIX)
 		}
 	}()
 	go func() {
@@ -276,7 +287,7 @@ func main() {
 					if err != nil {
 						log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", MASTERPREFIX, key.GetID(), cfg.ServerAddress, err)
 					}
-					setPSK(wireguard, key.GetKey(), cfg, MASTERPREFIX)
+					setPSK(handler, key.GetKey(), cfg, MASTERPREFIX)
 				}
 			}
 			<-ticker.C
