@@ -324,7 +324,7 @@ func parseEncKeysGetParams(r *http.Request) (int, int, error) {
 }
 
 func parseEncKeysPostBody(r *http.Request) (int, int, error) {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	request := EncKeysPostRequest{}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -352,7 +352,7 @@ func parseDecKeysRequest(r *http.Request) ([]string, error) {
 		}
 		return []string{keyID}, nil
 	case http.MethodPost:
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		request := DecKeysPostRequest{}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			return nil, fmt.Errorf("invalid JSON payload")
@@ -415,7 +415,7 @@ func readAndRestoreBody(r *http.Request) ([]byte, error) {
 		return nil, err
 	}
 
-	r.Body.Close()
+	_ = r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	return body, nil
