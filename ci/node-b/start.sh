@@ -23,10 +23,12 @@ ip link set wg0 up
 echo "Starting Arnika on node-b (BACKUP)..."
 LISTEN_ADDRESS=10.0.0.2:9998 \
 SERVER_ADDRESS=10.0.0.1:9998 \
+ARNIKA_ID=9999 \
 INTERVAL=5s \
 KMS_URL="http://192.168.101.1:8080/api/v1/keys/CONSB" \
 WIREGUARD_INTERFACE=wg0 \
 WIREGUARD_PEER_PUBLIC_KEY="$(cat /etc/arnika/node-a.pub)" \
+ARNIKA_PSK="mJNYzLNLRCl9jRRkP/Qsa74v4bem4BC+KbqQz+Ft9lQ=" \
 arnika &>> /tmp/arnika.log &
 
 echo "Node-b started successfully"

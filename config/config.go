@@ -1,6 +1,10 @@
+// Package config handles application configuration loading and validation.
 package config
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -13,9 +17,11 @@ type Config struct {
 	ListenAddress          string        // LISTEN_ADDRESS, Address to listen on for incoming connections
 	ServerAddress          string        // SERVER_ADDRESS, Address of the arnika server
 	ArnikaID               string        // ARNIKA_ID, up to 5-digit identifier (defaults to port number from ListenAddress)
+	ArnikaPSK              string        // ARNIKA_PSK, PSK to authenticate with the other peer
 	Certificate            string        // CERTIFICATE, Path to the client certificate file
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
+	ArnikaPeerTimeout      time.Duration // ARNIKA_PEER_TIMEOUT, TCP connection timeout for peer connections
 	KMSURL                 string        // KMS_URL, URL of the KMS server
 	KMSHTTPTimeout         time.Duration // KMS_HTTP_TIMEOUT, HTTP connection timeout
 	KMSBackoffMaxRetries   int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests
@@ -26,9 +32,12 @@ type Config struct {
 	WireguardPeerPublicKey string        // WIREGUARD_PEER_PUBLIC_KEY, Public key of the WireGuard peer
 	PQCPSKFile             string        // PQC_PSK_FILE, Path to the PQC PSK file
 	Mode                   string        // MODE, Operation mode ("QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired")
+	RateLimit              int           // RATE_LIMIT, Max requests per IP per window
+	RateWindow             time.Duration // RATE_WINDOW, Window duration for rate limiting
+	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
 }
 
-// Use PQC returns a boolean indicating whether the PQC PSK file is set in the Config struct.
+// UsePQC returns a boolean indicating whether the PQC PSK file is set in the Config struct.
 //
 // No parameters.
 // Returns a boolean value indicating whether the PQC PSK file is set.
@@ -44,13 +53,32 @@ func (c *Config) IsQKDRequired() bool {
 	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastQkdRequired"
 }
 
+// IsPrimary computes a deterministic role for the current interval using
+// HMAC-SHA256(ArnikaPSK, intervalNum). The first byte of the hash is XORed
+// with ArnikaID (parsed as int, truncated to uint8). The node whose result
+// has the lowest bit == 0 is PRIMARY for that interval. Because two peers
+// with different ArnikaIDs XOR different values, they get opposite results.
+func (c *Config) IsPrimary(intervalNum uint64) bool {
+	mac := hmac.New(sha256.New, []byte(c.ArnikaPSK))
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], intervalNum)
+	mac.Write(buf[:])
+	h := mac.Sum(nil)
+
+	id, _ := strconv.Atoi(c.ArnikaID) // always valid, checked during Parse
+	xored := h[0] ^ byte(id)
+	return xored&1 == 0
+}
+
 func (c *Config) PrintStartupConfig() {
 	fmt.Println("=== Arnika Configuration ===")
 	fmt.Printf("Arnika Mode:              %s\n", c.Mode)
 	fmt.Printf("Arnika Interval:          %s\n", c.Interval)
 	fmt.Printf("Arnika ID:                %s\n", c.ArnikaID)
+	fmt.Printf("Arnika PSK:               %s\n", c.ArnikaPSK)
 	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
 	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
+	fmt.Printf("Arnika Peer Timeout:			%s\n", c.ArnikaPeerTimeout)
 	fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
 	fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
 	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
@@ -81,6 +109,9 @@ func (c *Config) PrintStartupConfig() {
 
 	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
 	fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
+	fmt.Printf("Rate Limit:               %d\n", c.RateLimit)
+	fmt.Printf("Rate Window:              %s\n", c.RateWindow)
+	fmt.Printf("Max Clock Skew:           %s\n", c.MaxClockSkew)
 	fmt.Println("============================")
 }
 
@@ -169,6 +200,28 @@ func Parse() (*Config, error) {
 	if !config.UsePQC() && config.IsPQCRequired() {
 		return nil, fmt.Errorf("[ERROR] PQC PSK file missing as MODE is %s", config.Mode)
 	}
+	config.ArnikaPSK = getEnvOrDefault("ARNIKA_PSK", "")
+	config.ArnikaPeerTimeout, err = time.ParseDuration(getEnvOrDefault("ARNIKA_PEER_TIMEOUT", "500ms"))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse ARNIKA_PEER_TIMEOUT: %w", err)
+	}
+	rateLimitStr := getEnvOrDefault("RATE_LIMIT", "30")
+	config.RateLimit, err = strconv.Atoi(rateLimitStr)
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse RATE_LIMIT: %w", err)
+	}
+	rateWindowStr := getEnvOrDefault("RATE_WINDOW", "1m")
+	config.RateWindow, err = time.ParseDuration(rateWindowStr)
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse RATE_WINDOW: %w", err)
+	}
+	// Parse max clock skew config
+	maxClockSkewStr := getEnvOrDefault("MAX_CLOCK_SKEW", "1m")
+	maxClockSkew, err := time.ParseDuration(maxClockSkewStr)
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse MAX_CLOCK_SKEW: %w", err)
+	}
+	config.MaxClockSkew = maxClockSkew
 	return config, nil
 }
 

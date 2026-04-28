@@ -49,19 +49,24 @@ func TestParse(t *testing.T) {
 		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
 		ArnikaID:               "8080",
+		ArnikaPSK:              "", // Default value for ArnikaPSK
 		Certificate:            "", // Default value for Certificate
 		PrivateKey:             "", // Default value for PrivateKey
 		CACertificate:          "", // Default value for CACertificate
+		ArnikaPeerTimeout:      time.Millisecond * 500, // Actual default value for ArnikaPeerTimeout
 		KMSURL:                 "https://example.com",
-		Interval:               time.Second * 10,       // Default value for Interval
-		KMSHTTPTimeout:         time.Second * 10,       // Default value for KMSHTTPTimeout
-		KMSBackoffMaxRetries:  5,                      // Default value for KMSBackoffMaxRetries
-		KMSBackoffBaseDelay:    time.Millisecond * 100, // Default value for KMSBackoffBaseDelay
-		KMSRetryInterval:       (time.Second * 10) / 2, // Default value for KMSRetryInterval
+		KMSHTTPTimeout:         time.Second * 10,        // Actual default value for KMSHTTPTimeout
+		KMSBackoffMaxRetries:   5,                       // Actual default value for KMSBackoffMaxRetries
+		KMSBackoffBaseDelay:    time.Millisecond * 100,  // Actual default value for KMSBackoffBaseDelay
+		KMSRetryInterval:       time.Second * 5,         // Actual default value for KMSRetryInterval
+		Interval:               time.Second * 10,        // Actual default value for Interval
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCPSKFile:             "", // Default value for PQCPSKFile
 		Mode:                   "AtLeastQkdRequired",
+		RateLimit:              30,              // Real default value for RateLimit
+		RateWindow:             time.Minute,     // Real default value for RateWindow
+		MaxClockSkew:           time.Minute,     // Real default value for MaxClockSkew
 	}
 	result, err := Parse()
 	if err != nil {
@@ -118,7 +123,9 @@ func TestGetEnv(t *testing.T) {
 	}
 
 	// Test case 2: Testing when the environment variable does not exist
-	os.Unsetenv("TEST_ENV")
+	if err := os.Unsetenv("TEST_ENV"); err != nil {
+		t.Fatalf("failed to unset env var: %v", err)
+	}
 	result, err = getEnv("TEST_ENV")
 	expectedError := fmt.Errorf("[ERROR] failed to get environment variable: TEST_ENV")
 	if err.Error() != expectedError.Error() {
@@ -162,4 +169,28 @@ func TestIsQKDRequired(t *testing.T) {
 		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
 	}
 
+}
+
+func TestIsPrimary(t *testing.T) {
+	psk := "shared-secret-key"
+	nodeA := &Config{ArnikaID: "9999", ArnikaPSK: psk}
+	nodeB := &Config{ArnikaID: "9998", ArnikaPSK: psk}
+
+	// For each interval, the two nodes must get opposite roles
+	for i := uint64(0); i < 100; i++ {
+		a := nodeA.IsPrimary(i)
+		b := nodeB.IsPrimary(i)
+		if a == b {
+			t.Fatalf("interval %d: both nodes got the same role (IsPrimary=%v)", i, a)
+		}
+	}
+
+	// Deterministic: same input → same output
+	for i := uint64(0); i < 50; i++ {
+		first := nodeA.IsPrimary(i)
+		second := nodeA.IsPrimary(i)
+		if first != second {
+			t.Fatalf("interval %d: IsPrimary is not deterministic", i)
+		}
+	}
 }

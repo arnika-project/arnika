@@ -1,20 +1,23 @@
 # Dockerfile for Arnika test nodes
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 COPY . .
+
+ENV CGO_ENABLED=0
+ENV GOEXPERIMENT=runtimesecret
 
 RUN go build -o /arnika .
 
 FROM alpine:latest
 
 RUN apk add --no-cache \
-    bash \
-    wireguard-tools \
-    iproute2 \
-    iputils \
-    curl \
-    jq
+  bash \
+  wireguard-tools \
+  iproute2 \
+  iputils \
+  curl \
+  jq
 
 COPY --from=builder /arnika /usr/local/bin/arnika
 

@@ -1,9 +1,11 @@
 # Dockerfile for QKD Simulator (mock KMS server)
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 COPY tools/mock.go .
 COPY go.mod go.sum ./
+
+ENV CGO_ENABLED=0
 
 RUN go build -o /qkd-simulator mock.go
 
