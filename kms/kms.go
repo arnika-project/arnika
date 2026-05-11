@@ -87,7 +87,8 @@ type response struct {
 func NewKMSServer(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, kmsAuth *Auth) *KMSHandler {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			// InsecureSkipVerify: true, // removed as fix for GHSA-rc6v-5rmx-w5mv
+			MinVersion: tls.VersionTLS12,
 		},
 		Proxy: http.ProxyFromEnvironment,
 	}
