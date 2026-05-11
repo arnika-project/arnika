@@ -124,7 +124,7 @@ func udpServer(address string, psk []byte, result chan string, done chan bool, r
 //
 // Protocol flow:
 //  1. Send DATA (signed + encrypted keyID) -> Receive ACK
-func udpClient(address string, psk []byte, keyID string, timeout time.Duration) error {
+func udpClient(address string, psk []byte, keyID string, timeout time.Duration, maxClockSkew time.Duration) error {
 	if address == "" {
 		return fmt.Errorf("address is empty")
 	}
@@ -183,6 +183,15 @@ func udpClient(address string, psk []byte, keyID string, timeout time.Duration) 
 			return fmt.Errorf("authentication failed")
 		}
 		if ackPkt.Type != auth.PacketAck {
+			return fmt.Errorf("authentication failed")
+		}
+
+		now := time.Now().Unix()
+		diff := now - ackPkt.Timestamp
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > int64(maxClockSkew.Seconds()) {
 			return fmt.Errorf("authentication failed")
 		}
 

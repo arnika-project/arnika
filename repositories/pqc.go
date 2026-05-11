@@ -32,5 +32,8 @@ func (r *FilePQCRepository) GetNewKey() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode PQC key: %w", err)
 	}
+	if len(rawKey) == 0 {
+		return nil, fmt.Errorf("PQC key file is empty or contains only whitespace")
+	}
 	return rawKey, nil
 }

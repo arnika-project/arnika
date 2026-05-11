@@ -182,7 +182,7 @@ func main() {
 							continue
 						}
 						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress)
-						err = udpClient(cfg.ServerAddress, []byte(cfg.ArnikaPSK), *key.ID, cfg.ArnikaPeerTimeout)
+						err = udpClient(cfg.ServerAddress, []byte(cfg.ArnikaPSK), *key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
 						if err != nil {
 							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress, err)
 						}
