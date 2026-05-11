@@ -173,6 +173,12 @@ func setPSK(wireguard *wg.WireGuardHandler, qkd string, cfg *config.Config, logP
 				} else {
 					log.Printf("[WARNING] %s failed to decode PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
 				}
+			} else if len(pqc) == 0 {
+				if cfg.IsPQCRequired() {
+					msg = fmt.Sprintf("[ERROR] %s PQC key is empty. Abort since mode is set to %s", logPrefix, cfg.Mode)
+					return
+				}
+				log.Printf("[WARNING] %s PQC key is empty, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
 			} else {
 				// a key derivation will happen, either with key or with all zeros
 				psk, err = kdf.DeriveKey(psk, pqc)

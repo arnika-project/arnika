@@ -88,6 +88,53 @@ func TestParse(t *testing.T) {
 	}
 }
 
+
+
+func TestParse_PQCFilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	validKey := "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY2Nzg5MDE="
+	validFile := tmpDir + "/valid.key"
+	os.WriteFile(validFile, []byte(validKey), 0600)
+
+	t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
+	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
+	t.Setenv("KMS_URL", "https://example.com")
+	t.Setenv("WIREGUARD_INTERFACE", "wg0")
+	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+	t.Setenv("MODE", "AtLeastQkdRequired")
+
+	t.Setenv("PQC_PSK_FILE", validFile)
+	_, err := Parse()
+	if err != nil {
+		t.Errorf("Expected no error for 0600 permissions, got: %v", err)
+	}
+
+	insecureFile := tmpDir + "/insecure.key"
+	os.WriteFile(insecureFile, []byte(validKey), 0644)
+	t.Setenv("PQC_PSK_FILE", insecureFile)
+	_, err = Parse()
+	if err == nil {
+		t.Error("Expected an error for insecure permissions (0644)")
+	}
+
+	worldReadableFile := tmpDir + "/world.key"
+	os.WriteFile(worldReadableFile, []byte(validKey), 0647)
+	t.Setenv("PQC_PSK_FILE", worldReadableFile)
+	_, err = Parse()
+	if err == nil {
+		t.Error("Expected an error for world-readable permissions (0647)")
+	}
+
+	groupReadableFile := tmpDir + "/group.key"
+	os.WriteFile(groupReadableFile, []byte(validKey), 0660)
+	t.Setenv("PQC_PSK_FILE", groupReadableFile)
+	_, err = Parse()
+	if err == nil {
+		t.Error("Expected an error for group-readable permissions (0660)")
+	}
+}
+
 func TestGetEnvOrDefault(t *testing.T) {
 	// Test case 1: environment variable exists
 	t.Setenv("TEST_KEY", "test_value")

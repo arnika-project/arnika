@@ -145,8 +145,16 @@ func Parse() (*Config, error) {
 	}
 	config.PQCPSKFile = getEnvOrDefault("PQC_PSK_FILE", "")
 	if config.PQCPSKFile != "" {
-		if _, err := os.Stat(config.PQCPSKFile); os.IsNotExist(err) {
+		stat, err := os.Stat(config.PQCPSKFile)
+		if err != nil {
 			return nil, fmt.Errorf("[ERROR] failed to open PQC PSK file: %w", err)
+		}
+		if stat.Size() == 0 {
+			return nil, fmt.Errorf("[ERROR] PQC PSK file is empty")
+		}
+		mode := stat.Mode()
+		if mode&0077 != 0 {
+			return nil, fmt.Errorf("[ERROR] PQC PSK file has insecure permissions (group/world readable/writable): %o", mode&0777)
 		}
 	}
 	config.Mode = getEnvOrDefault("MODE", "AtLeastQkdRequired")

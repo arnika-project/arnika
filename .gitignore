@@ -13,3 +13,4 @@ ci/node-b/node-b.pub
 ci/node-b/node-a.pub
 tools/kms
 tools/mock
+/security
