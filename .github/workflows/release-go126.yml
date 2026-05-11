@@ -1,5 +1,5 @@
 # .github/workflows/release-go126.yml
-name: Release (Go 1.26.2)
+name: Release (Go 1.26)
 
 on:
   workflow_dispatch:
@@ -20,10 +20,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Go 1.26.2
+      - name: Set up Go 1.26
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.2'
+          go-version: '1.26'
 
       - name: Verify Go version
         run: go version
@@ -72,10 +72,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go 1.26.2
+      - name: Set up Go 1.26
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.2'
+          go-version: '1.26'
 
       - name: Verify Go version
         run: go version
@@ -167,7 +167,7 @@ jobs:
           body: |
             ## Release ${{ env.TAG }}
 
-            Built with **Go 1.26.2**.
+            Built with **Go 1.26**.
             All dependencies passed security audit (govulncheck + Nancy) and version verification.
           files: |
             arnika-v${{ env.VERSION }}-linux-amd64.tar.gz
