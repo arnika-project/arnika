@@ -98,7 +98,9 @@ func TestParse_PQCFilePermissions(t *testing.T) {
 
 	validKey := "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY2Nzg5MDE="
 	validFile := tmpDir + "/valid.key"
-	os.WriteFile(validFile, []byte(validKey), 0600)
+	if err := os.WriteFile(validFile, []byte(validKey), 0600); err != nil {
+		t.Fatalf("failed to create valid key file: %v", err)
+	}
 
 	t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
 	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
@@ -114,7 +116,9 @@ func TestParse_PQCFilePermissions(t *testing.T) {
 	}
 
 	insecureFile := tmpDir + "/insecure.key"
-	os.WriteFile(insecureFile, []byte(validKey), 0644)
+	if err := os.WriteFile(insecureFile, []byte(validKey), 0644); err != nil {
+		t.Fatalf("failed to create insecure key file: %v", err)
+	}
 	t.Setenv("PQC_PSK_FILE", insecureFile)
 	_, err = Parse()
 	if err == nil {
@@ -122,7 +126,9 @@ func TestParse_PQCFilePermissions(t *testing.T) {
 	}
 
 	worldReadableFile := tmpDir + "/world.key"
-	os.WriteFile(worldReadableFile, []byte(validKey), 0647)
+	if err := os.WriteFile(worldReadableFile, []byte(validKey), 0647); err != nil {
+		t.Fatalf("failed to create world-readable key file: %v", err)
+	}
 	t.Setenv("PQC_PSK_FILE", worldReadableFile)
 	_, err = Parse()
 	if err == nil {
@@ -130,7 +136,9 @@ func TestParse_PQCFilePermissions(t *testing.T) {
 	}
 
 	groupReadableFile := tmpDir + "/group.key"
-	os.WriteFile(groupReadableFile, []byte(validKey), 0660)
+	if err := os.WriteFile(groupReadableFile, []byte(validKey), 0660); err != nil {
+		t.Fatalf("failed to create group-readable key file: %v", err)
+	}
 	t.Setenv("PQC_PSK_FILE", groupReadableFile)
 	_, err = Parse()
 	if err == nil {
