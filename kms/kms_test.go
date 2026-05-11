@@ -104,7 +104,7 @@ func TestNewKMSServer(t *testing.T) {
 	if kmsHandler.conn.Transport == nil {
 		t.Errorf("Expected non-nil Transport")
 	}
-	if kmsHandler.conn.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify != true {
-		t.Errorf("Expected InsecureSkipVerify to be true")
+	if kmsHandler.conn.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify == true {
+		t.Errorf("Expected InsecureSkipVerify to be NOT true for security")
 	}
 }
