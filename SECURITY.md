@@ -39,7 +39,7 @@ release before reporting a vulnerability.
 
 Report security vulnerabilities via one of the following channels:
 
-- **GitHub Private Security Advisory** (preferred):  
+- **GitHub Private Security Advisory** (preferred):
   [https://github.com/arnika-project/arnika/security/advisories/new](https://github.com/arnika-project/arnika/security/advisories/new)
 
 - **Email**: Send a detailed report to the maintainers. Contact information is available in the
@@ -107,10 +107,6 @@ The following are **in scope** for security reports:
 - Spoofing, replay attacks, or tampering with key IDs transmitted over the Arnika TCP channel
 - Missing or misconfigured mTLS (`CERTIFICATE`, `PRIVATE_KEY`, `CA_CERTIFICATE`)
 
-### PQC Key File
-
-- `PQC_PSK_FILE`: insecure file permissions, symlink attacks, or file descriptor leakage from
-  Rosenpass integration
 
 ### Dependencies
 
@@ -122,6 +118,8 @@ The following are **in scope** for security reports:
 
 - Attacks that force a weaker operational mode (e.g., from `QkdAndPqcRequired` to
   `EitherQkdOrPqcRequired`)
+
+## Out of scope
 
 The following are **out of scope**:
 
@@ -135,6 +133,8 @@ The following are **out of scope**:
 - Theoretical attacks requiring physical access to the QKD optical channel
 - The KMS mock (`tools/kms`) is **not** intended for production; misconfigurations in
   development/test environments are out of scope
+- `PQC_PSK_FILE`: insecure file permissions, symlink attacks, or file descriptor leakage from
+  Rosenpass integration
 
 ---
 
@@ -189,11 +189,36 @@ Operation modes (`QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired`
 `EitherQkdOrPqcRequired`) define the minimum security level. Downgrade attacks that force a weaker
 mode are in scope.
 
+### PQC Key File & Directory Hardening
+
+The `PQC_PSK_FILE` mechanism reads PSK material from a file provided by Rosenpass or an external
+key provider. While setting the file to `0600` restricts access, this alone is insufficient if the
+parent directory remains writable by the Arnika process user.
+
+**Attack vector**: As demonstrated via [GHSA-rc6v-5rmx-w5m](https://github.com/arnika-project/arnika/security/advisories/GHSA-rc6v-5rmx-w5mv) , if an attacker has write access to the directory containing `PQC_PSK_FILE`, they
+can:
+
+- Delete the original file and replace it with attacker-controlled content
+- Create a symlink to a different file they control
+- Bypass application-level validation entirely
+
+**Mitigation**: The directory containing `PQC_PSK_FILE` must have permissions that prevent the
+Arnika process user from modifying its contents. Recommended: `0700` or `0750` owned by root, with
+the Arnika user having read access only.
+
+**Directory permissions**: The parent directory containing `PQC_PSK_FILE` must not be writable
+  by the Arnika process user. Even with `0600` on the file, if the directory is writable, an
+  attacker with access to that directory can delete/replace the file or symlink, bypassing file
+  permission protections entirely.
+
+This is a defense-in-depth measure complementary to the application-level validation that checks
+for empty or whitespace-only keys.
+
 ---
 
 ## Secure Deployment Checklist
 
-- [ ] Arnika runs as a **dedicated, unprivileged service user** (not root)  
+- [ ] Arnika runs as a **dedicated, unprivileged service user** (not root)
   > **Note:** Running Arnika as `root` is acceptable in testing, demo, or proof-of-concept
   > environments, and may be acceptable in production if the host is sufficiently hardened and
   > isolated (e.g., dedicated bare-metal node, strict MAC policy, no untrusted local users). In
@@ -208,6 +233,7 @@ mode are in scope.
 - [ ] `CERTIFICATE`, `PRIVATE_KEY`, and `CA_CERTIFICATE` are configured for mTLS between Arnika
   peers
 - [ ] `PQC_PSK_FILE` has permissions `0600` and is owned by the Arnika process user
+- [ ] The parent directory containing `PQC_PSK_FILE` is **not writable** by the Arnika process user
 - [ ] The KMS mock (`tools/kms`) is **not** deployed or reachable in production
 - [ ] WireGuard `INTERVAL` and Arnika `INTERVAL` are aligned (recommended: `120s`)
 - [ ] Go version `>= 1.22` (recommended: latest `1.24.x`) is used
