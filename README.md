@@ -20,6 +20,10 @@ Arnika integrates with WireGuard to establish quantum-resistant VPN connections,
 
 Arnika has been developed in scope of EU **EUROQCI** / **QCI-CAT** research program for the Use-Case **HSM BACKUP USING QKD** - https://qci-cat.at/hsm-backup-using-qkd
 
+## Contact
+
+If you want to contact us, feel free to join the public Matrix room `#arnika:matrix.org` ([https://matrix.to/#/#arnika:matrix.org](https://matrix.to/#/#arnika:matrix.org)) or send us an email at arnika@unbox.at .
+
 ## Quantum secure VPN
 
 ![Arnika Encapsulation Pipe, Figure 1](img/Arnika-Encapsulations-pipe.png)
@@ -51,7 +55,7 @@ _Figure 3_ shows the key path of 2 interconnected sites for the hyprid mode (C) 
 ![QKD | PQC functions post-quantum secure VPN, Figure 3](img/QKD-PQC-functions_post-quantum-secure-VPN.png)
 <br/>_Figure 3_
 
-The QKD key is obtained via ETSI014 from the QKDs embedded KMS and the PQC key is obtained via API or pointer/filedescriptor from a source such as **Rosenpass** or an alternative/already existing PQC function/implementation.
+The QKD key is obtained via ETSI014 from the QKDs embedded KMS and the PQC key is obtained via API or pointer/filedescriptor from a source such as **Rosenpass** or any alternative PQC function/implementation.
 
 
 Subsequently, the **KEY-CONTROL function** uses the **QKD key** and **PQC key** by using a **HKDF HMAC Key Derivation Function** with SHA3-256 as the hash function, to derive a single key from the two input keys (QKD, PQC).
@@ -85,9 +89,11 @@ The `Secure Application Entity` consists of following components running on a se
 
 WireGuard must be installed/setup separately before Arnika can be used. For further installation instructions, refer to the [WireGuard](https://www.wireguard.com/) homepage.
 
-### Rosenpass
+### PQC 
 
-Rosenpass is optional, Arnika can run without Rosenpass / PQC, then it will run in QKD mode only. For further installation instructions, refer to the [Rosenpass](https://rosenpass.eu/) homepage.
+PQC is optional, Arnika can run without PQC, then it will run in QKD mode only. 
+For further installation instructions, refer to the [Rosenpass](https://rosenpass.eu/) homepage.
+
 
 ### golang version
 
@@ -304,7 +310,7 @@ Arnika must be configured via environment variables, following are available:
 | INTERVAL                  | Interval between regular key requests to the KMS; should align with WireGuard rekey interval                 | 120s                                     |
 | WIREGUARD_INTERFACE       | Name of the WireGuard network interface to configure                                                         | qcicat0                                  |
 | WIREGUARD_PEER_PUBLIC_KEY | Public key of the WireGuard peer for secure association                                                      | 8978940b-fb48-4ebf-ad7d-ca36a987fc32     |
-| PQC_PSK_FILE              | File path containing the PQC-generated preshared key (from Rosenpass or similar)                             | /rosenpass/pqc.psk                       |
+| PQC_PSK_FILE              | File path containing the PQC-generated preshared key                              | /tmpfs/pqc.psk                       |
 | MODE                      | Operation mode: "QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", or "EitherQkdOrPqcRequired" | AtLeastQkdRequired                       |
 | ARNIKA_ID                 | Optional identifier (up to 5 digits); defaults to LISTEN_PORT; used for logging and identification           | 9998                                     |
 
@@ -316,8 +322,12 @@ Arnika must be configured via environment variables, following are available:
 
 ## CANCOM Converged Services GmbH (CCS)
 
-**Arnika** was developed by
-[CANCOM Converged Services](https://www.cancom.at/en/industry-focus/provider) as part of the [QCI-CAT](https://qci-cat.at/) project, and the source code was released under the [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) license.
+The initial **Arnika** prototype and earlier versions were developed within the research activities of [CANCOM Converged Services GmbH](https://www.cancom.at/en/industry-focus/provider) as part of the [QCI-CAT](https://qci-cat.at/) project, and the source code was released under the [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) license.
+
+
+## XBC Digital GmbH (XBC)
+
+In Q2 2026, the people behind **Arnika** moved to [XBC Digital GmbH](https://xbc-digital.com/quantum-communication), where the **Arnika project** is now actively maintained, supported and recent versions are being developed.
 
 
 ## WireGuard
@@ -347,20 +357,10 @@ Refer to [WireGuard](https://www.wireguard.com/) Homepage [https://www.wireguard
 
 ## Rosenpass
 
-The Rosenpass protocol provides a post-quantum-secure authenticated key exchange, based on the work [Post-quantum WireGuard (PQWG)](https://eprint.iacr.org/2020/379) by Hülsing, Ning, Schwabe, Weber, and Zimmermann, but also adds security against state disruption attacks CVE-2021-46873.
-
-While Rosenpass is designed with WireGuard in mind, it can be used as a stand-alone tool to exchange keys. Using this mode, it can be employed to secure other protocols against attacks from quantum computers. Rosenpass will provide a Post-Quantum Cryptography (PQC) key every 120 seconds.
-
-Rosenpass is using two different Key Encapsulation Mechanisms (KEMs) Classic McEliece and Kyber (refer to the presentation on Classic McEliece at the [Fifth NIST PQC workshop](https://classic.mceliece.org/talks/20240410.pdf)): Classic McEliece is used for long-term keys, the foundation of security for identifying and authenticating the server, as well as for encrypting data to achieve authenticity and confidentiality. Kyber is only used for forward secrecy. A break of the lattice system does not damage security unless the attacker can also steal secret keys through, e.g., hardware theft.
-
-Rosenpass was funded through NLnet with financial support from the European Commission's NGI Assure program and ProtoType Fund of the Open Knowledge Foundation Germany, financed by the Federal Ministry of Education and Research (BMBF).
-
 Refer to Rosenpass [homepage](https://rosenpass.eu/) and [whitepaper](https://rosenpass.eu/whitepaper.pdf) for more technical details.
-
 Rosenpass is free and open-source software (FOSS) and licensed under Apache 2.0 license.
 
-Many thanks to [Karo](https://github.com/koraa) and [Paul](https://github.com/aparcar) from the [**Rosenpass**](https://github.com/rosenpass/rosenpass) project.
-
+Many thanks to [Paul](https://github.com/aparcar) and [Karo](https://github.com/koraa) from the [**Rosenpass**](https://github.com/rosenpass/rosenpass) project.
 
 
 ## QCI-CAT
