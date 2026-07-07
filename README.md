@@ -22,7 +22,7 @@ Arnika has been developed in scope of EU **EUROQCI** / **QCI-CAT** research prog
 
 ## Contact
 
-If you want to contact us, feel free to join the public Matrix room `#arnika:matrix.org` ([https://matrix.to/#/#arnika:matrix.org](https://matrix.to/#/#arnika:matrix.org)) or send us an email at arnika@unbox.at .
+If you want to contact us, feel free to join the public **Matrix** room `#arnika:matrix.org` ([https://matrix.to/#/#arnika:matrix.org](https://matrix.to/#/#arnika:matrix.org)) or `arnika` channel on **IRC** `irc.oftc.net` or send us an email at arnika@unbox.at .
 
 ## Quantum secure VPN
 
