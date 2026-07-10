@@ -19,13 +19,6 @@ Arnika integrates with WireGuard to establish quantum-resistant VPN connections,
 
 Arnika has been developed in scope of EU **EUROQCI** / **QCI-CAT** research program for the Use-Case **HSM BACKUP USING QKD** - https://qci-cat.at/hsm-backup-using-qkd
 
-
-#### Status
-[![CI](https://github.com/arnika-project/arnika/actions/workflows/ci.yml/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/ci.yml)
-[![Release (Go 1.26)](https://github.com/arnika-project/arnika/actions/workflows/release-go126.yml/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/release-go126.yml)
-[![Dependency Graph](https://github.com/arnika-project/arnika/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/dependabot/update-graph)
-[![Dependabot Updates](https://github.com/arnika-project/arnika/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/dependabot/dependabot-updates)
-
 ## Contact
 
 If you want to contact us, feel free to join the public **Matrix** room `#arnika:matrix.org` ([https://matrix.to/#/#arnika:matrix.org](https://matrix.to/#/#arnika:matrix.org)) or `arnika` channel on **IRC** `irc.oftc.net` or send us an email at arnika@unbox.at .
@@ -386,3 +379,12 @@ This project has received funding from the [DIGITAL-2021-QCI-01 Digital European
 [AIT Austrian Institute of Technology (AIT)](https://www.ait.ac.at/) is Austria’s largest research and technology organization.
 The institute takes a leading position in the Austrian innovation system and a key role in Europe.
 With its expertise of handling large EU quantum communication projects such as [OPENQKD](https://openqkd.eu/), [AIT](https://www.ait.ac.at/) will coordinate [QCI-CAT](https://qci-cat.at/) from an administrative point, as well as act as the technical manager and project lead.
+
+
+
+## Status
+
+[![CI](https://github.com/arnika-project/arnika/actions/workflows/ci.yml/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/ci.yml)
+[![Release (Go 1.26)](https://github.com/arnika-project/arnika/actions/workflows/release-go126.yml/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/release-go126.yml)
+[![Dependency Graph](https://github.com/arnika-project/arnika/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/dependabot/update-graph)
+[![Dependabot Updates](https://github.com/arnika-project/arnika/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/dependabot/dependabot-updates)
