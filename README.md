@@ -8,7 +8,6 @@
     <h1> Arnika - Quantum secure VPN</h1>
 </div>
 
-
 **Arnika** is a compact, **lightweight external extension for Wireguard VPN**, engineered to incorporate symmetric keys as Pre-Shared Keys (**PSK**) into Wireguard. This integration ensures the establishment of a quantum-secure VPN (safeguarding against compromise of session keys).
 
 It gathers a 256-bit symmetric encryption key from a Key Management System (**KMS**) within a Quantum Key Distribution (**QKD**) infrastructure, shares the associated key ID with an Arnika peer, and configures an additional Pre-Shared Key (**PSK**) for Wireguard using the obtained key material.
@@ -19,6 +18,13 @@ Arnika offers an additional security layer for cryptography enthusiasts. It can 
 Arnika integrates with WireGuard to establish quantum-resistant VPN connections, adding a significant layer of security to your communication
 
 Arnika has been developed in scope of EU **EUROQCI** / **QCI-CAT** research program for the Use-Case **HSM BACKUP USING QKD** - https://qci-cat.at/hsm-backup-using-qkd
+
+
+#### Status
+[![CI](https://github.com/arnika-project/arnika/actions/workflows/ci.yml/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/ci.yml)
+[![Release (Go 1.26)](https://github.com/arnika-project/arnika/actions/workflows/release-go126.yml/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/release-go126.yml)
+[![Dependency Graph](https://github.com/arnika-project/arnika/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/dependabot/update-graph)
+[![Dependabot Updates](https://github.com/arnika-project/arnika/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/arnika-project/arnika/actions/workflows/dependabot/dependabot-updates)
 
 ## Contact
 
