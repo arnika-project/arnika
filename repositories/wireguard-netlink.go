@@ -39,11 +39,21 @@ func (r *WireguardNetlinkRepository) SetPSK(psk string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get device %s: %w", r.InterfaceName, err)
 	}
-	// verify that the peer public key exists
+	// verify that the peer public key exists.
+	//
+	// Scan for a match and report absence only after the whole list. The
+	// previous form returned on the first NON-match, so the check passed
+	// only when the interface had exactly one peer: a node with two
+	// neighbours failed on whichever peer was iterated first.
+	found := false
 	for _, peer := range peers.Peers {
-		if peer.PublicKey.String() != r.PeerPublicKey {
-			return fmt.Errorf("peer with public key %s not found on interface %s", r.PeerPublicKey, r.InterfaceName)
+		if peer.PublicKey.String() == r.PeerPublicKey {
+			found = true
+			break
 		}
+	}
+	if !found {
+		return fmt.Errorf("peer with public key %s not found on interface %s", r.PeerPublicKey, r.InterfaceName)
 	}
 	validPSK, err := wgtypes.ParseKey(psk)
 	if err != nil {
