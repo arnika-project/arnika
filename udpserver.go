@@ -21,7 +21,10 @@ import (
 //
 // Protocol flow:
 //  1. Client sends DATA packet (signed + encrypted payload) -> Server replies with ACK
-func udpServer(address string, psk []byte, result chan string, done chan bool, rateLimit int, rateWindow, maxClockSkew time.Duration) {
+//  2. Peer sends PQC packets (key agreement frames) -> handed to pqcInbound, never acked here
+//
+// dirIn is the direction the peer signs with; dirOut is this node's own.
+func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result chan string, done chan bool, pqcInbound chan<- []byte, rateLimit int, rateWindow, maxClockSkew time.Duration) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit,
 		syscall.SIGTERM,
@@ -76,7 +79,7 @@ func udpServer(address string, psk []byte, result chan string, done chan bool, r
 		}
 
 		// 3. Unmarshal + HMAC verify (cheap, before any decryption)
-		pkt, err := auth.UnmarshalPacket(psk, raw)
+		pkt, err := auth.UnmarshalPacket(psk, raw, dirIn)
 		if err != nil {
 			log.Printf("[WARNING] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
 			continue
@@ -93,29 +96,45 @@ func udpServer(address string, psk []byte, result chan string, done chan bool, r
 			continue
 		}
 
-		if pkt.Type != auth.PacketData {
+		// 5. Dispatch by type, decrypting only after all cheap checks pass
+		switch pkt.Type {
+		case auth.PacketData:
+			decrypted, err := auth.Decrypt(psk, pkt.Payload)
+			if err != nil {
+				log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+				log.Printf("[ERROR] %s authentication failed, psk mismatch or message corrupted", BACKUPLOGPREFIX)
+				continue
+			}
+
+			// 6. Send ACK
+			ack := &auth.Packet{
+				Type:      auth.PacketAck,
+				Timestamp: time.Now().Unix(),
+			}
+			ackB64 := base64.StdEncoding.EncodeToString(ack.Marshal(psk, dirOut))
+			_, _ = conn.WriteToUDP([]byte(ackB64), remoteAddr)
+
+			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, string(decrypted), remoteAddr)
+			result <- string(decrypted)
+
+		case auth.PacketPQC:
+			decrypted, err := auth.Decrypt(psk, pkt.Payload)
+			if err != nil {
+				log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+				continue
+			}
+			// Non-blocking: a slow or absent PQC consumer must never stall the
+			// QKD path. PQC frames carry their own kind=ack, so none is sent here.
+			select {
+			case pqcInbound <- decrypted:
+			default:
+				log.Printf("[DEBUG] %s pqc frame dropped (queue full)", BACKUPLOGPREFIX)
+			}
+
+		default:
 			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
 			continue
 		}
-
-		// 5. Decrypt payload (expensive, only after all cheap checks pass)
-		decrypted, err := auth.Decrypt(psk, pkt.Payload)
-		if err != nil {
-			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
-			log.Printf("[ERROR] %s authentication failed, psk mismatch or message corrupted", BACKUPLOGPREFIX)
-			continue
-		}
-
-		// 6. Send ACK
-		ack := &auth.Packet{
-			Type:      auth.PacketAck,
-			Timestamp: time.Now().Unix(),
-		}
-		ackB64 := base64.StdEncoding.EncodeToString(ack.Marshal(psk))
-		_, _ = conn.WriteToUDP([]byte(ackB64), remoteAddr)
-
-		log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, string(decrypted), remoteAddr)
-		result <- string(decrypted)
 	}
 }
 
@@ -124,7 +143,7 @@ func udpServer(address string, psk []byte, result chan string, done chan bool, r
 //
 // Protocol flow:
 //  1. Send DATA (signed + encrypted keyID) -> Receive ACK
-func udpClient(address string, psk []byte, keyID string, timeout time.Duration, maxClockSkew time.Duration) error {
+func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID string, timeout time.Duration, maxClockSkew time.Duration) error {
 	if address == "" {
 		return fmt.Errorf("address is empty")
 	}
@@ -154,7 +173,7 @@ func udpClient(address string, psk []byte, keyID string, timeout time.Duration, 
 			Timestamp: time.Now().Unix(),
 			Payload:   encrypted,
 		}
-		dataBytes := base64.StdEncoding.EncodeToString(dataPkt.Marshal(psk))
+		dataBytes := base64.StdEncoding.EncodeToString(dataPkt.Marshal(psk, dirOut))
 		_, err = conn.Write([]byte(dataBytes))
 		if err != nil {
 			return fmt.Errorf("failed to write DATA packet: %w", err)
@@ -178,7 +197,7 @@ func udpClient(address string, psk []byte, keyID string, timeout time.Duration, 
 		if err != nil {
 			return fmt.Errorf("authentication failed")
 		}
-		ackPkt, err := auth.UnmarshalPacket(psk, ackRaw)
+		ackPkt, err := auth.UnmarshalPacket(psk, ackRaw, dirIn)
 		if err != nil {
 			return fmt.Errorf("authentication failed")
 		}

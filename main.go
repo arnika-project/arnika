@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"github.com/arnika-project/arnika/auth"
 	"log"
+	"strconv"
 
 	"os"
 
@@ -129,7 +131,13 @@ func main() {
 	if err != nil {
 		log.Panicf("[ERROR] [STOP] Failed to create WireGuard repository: %v", err)
 	}
-	go udpServer(cfg.ListenAddress, []byte(cfg.ArnikaPSK), result, done, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
+	// Direction labels are derived from ARNIKA_ID parity, which the two peers
+	// are required to differ in; they make a reflected packet fail at its sender.
+	arnikaID, _ := strconv.Atoi(cfg.ArnikaID) // always valid, checked during Parse
+	dirOut, dirIn := auth.DirectionFor(arnikaID)
+	// A round needs at most 5 frames; 64 leaves ample headroom before drops.
+	pqcInbound := make(chan []byte, 64)
+	go udpServer(cfg.ListenAddress, []byte(cfg.ArnikaPSK), dirOut, dirIn, result, done, pqcInbound, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
 	go func() {
 		for {
 			r := <-result
@@ -182,7 +190,7 @@ func main() {
 							continue
 						}
 						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress)
-						err = udpClient(cfg.ServerAddress, []byte(cfg.ArnikaPSK), *key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
+						err = udpClient(cfg.ServerAddress, []byte(cfg.ArnikaPSK), dirOut, dirIn, *key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
 						if err != nil {
 							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress, err)
 						}
