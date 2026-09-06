@@ -35,19 +35,19 @@ type Config struct {
 	Interval               time.Duration // INTERVAL, Interval between key updates
 	WireGuardInterface     string        // WIREGUARD_INTERFACE, Name of the WireGuard interface to configure
 	WireguardPeerPublicKey string        // WIREGUARD_PEER_PUBLIC_KEY, Public key of the WireGuard peer
-	PQCPSKFile             string        // PQC_PSK_FILE, Path to the PQC PSK file
+	PQCEnabled             bool          // PQC_ENABLED, Enables the pqc-hpke key agreement with the peer
+	PQCRoundInterval       time.Duration // PQC_ROUND_INTERVAL, Period of the PQC key agreement
+	PQCRoundTimeout        time.Duration // PQC_ROUND_TIMEOUT, Per-round deadline, must be shorter than PQC_ROUND_INTERVAL
+	PQCMaxKeyAge           time.Duration // PQC_MAX_KEY_AGE, Staleness threshold for the agreed PQC key
 	Mode                   string        // MODE, Operation mode ("QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired")
 	RateLimit              int           // RATE_LIMIT, Max requests per IP per window
 	RateWindow             time.Duration // RATE_WINDOW, Window duration for rate limiting
 	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
 }
 
-// UsePQC returns a boolean indicating whether the PQC PSK file is set in the Config struct.
-//
-// No parameters.
-// Returns a boolean value indicating whether the PQC PSK file is set.
+// UsePQC reports whether the PQC key agreement is enabled.
 func (c *Config) UsePQC() bool {
-	return c.PQCPSKFile != ""
+	return c.PQCEnabled
 }
 
 func (c *Config) IsPQCRequired() bool {
@@ -106,10 +106,12 @@ func (c *Config) PrintStartupConfig() {
 		fmt.Println("CA Certificate:           (not configured)")
 	}
 	if c.UsePQC() {
-		fmt.Printf("PQC key provider:         ENABLED\n")
-		fmt.Printf("PQC key:                  %s\n", c.PQCPSKFile)
+		fmt.Printf("PQC key agreement:        ENABLED (pqc-hpke)\n")
+		fmt.Printf("PQC round interval:       %s\n", c.PQCRoundInterval)
+		fmt.Printf("PQC round timeout:        %s\n", c.PQCRoundTimeout)
+		fmt.Printf("PQC max key age:          %s\n", c.PQCMaxKeyAge)
 	} else {
-		fmt.Println("PQC key provider:        DISABLED")
+		fmt.Println("PQC key agreement:        DISABLED")
 	}
 
 	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
@@ -188,18 +190,32 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	config.PQCPSKFile = getEnvOrDefault("PQC_PSK_FILE", "")
-	if config.PQCPSKFile != "" {
-		fileInfo, err := os.Stat(config.PQCPSKFile)
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("[ERROR] failed to open PQC PSK file: %w", err)
+	// PQC key material is now agreed with the peer over HPKE and never touches
+	// disk, so there is no file path and no permission check.
+	config.PQCEnabled = getEnvOrDefault("PQC_ENABLED", "false") == "true"
+	config.PQCRoundInterval, err = time.ParseDuration(getEnvOrDefault("PQC_ROUND_INTERVAL", config.Interval.String()))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse PQC_ROUND_INTERVAL: %w", err)
+	}
+	config.PQCMaxKeyAge, err = time.ParseDuration(getEnvOrDefault("PQC_MAX_KEY_AGE", (2 * config.Interval).String()))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse PQC_MAX_KEY_AGE: %w", err)
+	}
+	config.PQCRoundTimeout, err = time.ParseDuration(getEnvOrDefault("PQC_ROUND_TIMEOUT", (config.Interval / 4).String()))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse PQC_ROUND_TIMEOUT: %w", err)
+	}
+	if config.PQCEnabled {
+		if config.PQCRoundInterval <= 0 {
+			return nil, fmt.Errorf("[ERROR] PQC_ROUND_INTERVAL must be positive, got %s", config.PQCRoundInterval)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("[ERROR] failed to stat PQC PSK file: %w", err)
+		// A round that outlives its interval would overlap the next one.
+		if config.PQCRoundTimeout <= 0 || config.PQCRoundTimeout >= config.PQCRoundInterval {
+			return nil, fmt.Errorf("[ERROR] PQC_ROUND_TIMEOUT (%s) must be positive and shorter than PQC_ROUND_INTERVAL (%s)",
+				config.PQCRoundTimeout, config.PQCRoundInterval)
 		}
-		perms := fileInfo.Mode().Perm()
-		if perms&0077 != 0 {
-			return nil, fmt.Errorf("[ERROR] PQC PSK file has insecure permissions %o: must be 0600 or stricter", perms)
+		if config.PQCMaxKeyAge <= 0 {
+			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE must be positive, got %s", config.PQCMaxKeyAge)
 		}
 	}
 	config.Mode = getEnvOrDefault("MODE", "AtLeastQkdRequired")
@@ -220,7 +236,7 @@ func Parse() (*Config, error) {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_RETRY_INTERVAL: %w", err)
 	}
 	if !config.UsePQC() && config.IsPQCRequired() {
-		return nil, fmt.Errorf("[ERROR] PQC PSK file missing as MODE is %s", config.Mode)
+		return nil, fmt.Errorf("[ERROR] PQC_ENABLED is false but MODE is %s, which requires a PQC key", config.Mode)
 	}
 	// ARNIKA_PSK is the sole authentication root for the peer protocol: an
 	// unset value makes the HMAC key SHA-256(""), a publicly computable

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -126,7 +127,6 @@ func main() {
 	skip := make(chan bool, 1)
 	result := make(chan string)
 	qkd := getQKDService(cfg)
-	pqc := getPQCService(cfg)
 	keyWriter, err := getKeyWriterService(cfg)
 	if err != nil {
 		log.Panicf("[ERROR] [STOP] Failed to create WireGuard repository: %v", err)
@@ -137,6 +137,21 @@ func main() {
 	dirOut, dirIn := auth.DirectionFor(arnikaID)
 	// A round needs at most 5 frames; 64 leaves ample headroom before drops.
 	pqcInbound := make(chan []byte, 64)
+	// The pqc-hpke reader agrees its key with the peer over the same socket.
+	// It is only constructed when enabled: with PQC off nothing is dialled and
+	// no agreement goroutine runs.
+	var pqc *services.KeyReaderService
+	if cfg.UsePQC() {
+		pqcService, pqcRepo, err := getPQCService(cfg, pqcInbound, dirOut)
+		if err != nil {
+			log.Panicf("[ERROR] [STOP] failed to create PQC key reader: %v", err)
+		}
+		pqc = pqcService
+		pqcCtx, cancelPQC := context.WithCancel(context.Background())
+		defer cancelPQC()
+		go pqcRepo.Run(pqcCtx)
+	}
+
 	go udpServer(cfg.ListenAddress, []byte(cfg.ArnikaPSK), dirOut, dirIn, result, done, pqcInbound, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
 	go func() {
 		for {

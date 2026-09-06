@@ -10,20 +10,16 @@ import (
 )
 
 func TestUsePQC(t *testing.T) {
-	// Test case 1: Config with PQCPSKFile set
-	c := &Config{PQCPSKFile: "psk_file"}
-	result := c.UsePQC()
-	expected := true
-	if result != expected {
-		t.Errorf("Expected %t, but got %t", expected, result)
+	// Test case 1: PQC key agreement enabled
+	c := &Config{PQCEnabled: true}
+	if !c.UsePQC() {
+		t.Error("Expected UsePQC to be true when PQCEnabled is set")
 	}
 
-	// Test case 2: Config with PQCPSKFile not set
+	// Test case 2: disabled by default
 	c = &Config{}
-	result = c.UsePQC()
-	expected = false
-	if result != expected {
-		t.Errorf("Expected %t, but got %t", expected, result)
+	if c.UsePQC() {
+		t.Error("Expected UsePQC to be false by default")
 	}
 }
 
@@ -118,7 +114,10 @@ func TestParse(t *testing.T) {
 		Interval:               time.Second * 10,       // Actual default value for Interval
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
-		PQCPSKFile:             "", // Default value for PQCPSKFile
+		PQCEnabled:             false,            // Default: PQC key agreement off
+		PQCRoundInterval:       time.Second * 10, // Defaults to INTERVAL
+		PQCMaxKeyAge:           time.Second * 20, // Defaults to 2 x INTERVAL
+		PQCRoundTimeout:        time.Millisecond * 2500,
 		Mode:                   "AtLeastQkdRequired",
 		RateLimit:              30,          // Real default value for RateLimit
 		RateWindow:             time.Minute, // Real default value for RateWindow
@@ -141,65 +140,17 @@ func TestParse(t *testing.T) {
 	}
 	t.Setenv("INTERVAL", "1m")
 
-	// Test case 4: PQC keyfile check
-	t.Setenv("PQC_PSK_FILE", "non_existent_file")
+	// Test case 4: PQC round timeout must be shorter than the round interval
+	t.Setenv("PQC_ENABLED", "true")
+	t.Setenv("PQC_ROUND_INTERVAL", "10s")
+	t.Setenv("PQC_ROUND_TIMEOUT", "10s")
 	_, err = Parse()
 	if err == nil {
-		t.Error("Expected an error for non-existent PQC keyfile")
+		t.Error("Expected an error when PQC_ROUND_TIMEOUT is not shorter than PQC_ROUND_INTERVAL")
 	}
-}
-
-func TestParse_PQCFilePermissions(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	validKey := "dGVzdGtleTEyMzQ1Njc4OTAxMjM0NTY2Nzg5MDE="
-	validFile := tmpDir + "/valid.key"
-	if err := os.WriteFile(validFile, []byte(validKey), 0600); err != nil {
-		t.Fatalf("failed to create valid key file: %v", err)
-	}
-
-	t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
-	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
-	t.Setenv("KMS_URL", "https://example.com")
-	t.Setenv("WIREGUARD_INTERFACE", "wg0")
-	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
-	t.Setenv("MODE", "AtLeastQkdRequired")
-	t.Setenv("ARNIKA_PSK", testArnikaPSK)
-
-	t.Setenv("PQC_PSK_FILE", validFile)
-	_, err := Parse()
-	if err != nil {
-		t.Errorf("Expected no error for 0600 permissions, got: %v", err)
-	}
-
-	insecureFile := tmpDir + "/insecure.key"
-	if err := os.WriteFile(insecureFile, []byte(validKey), 0644); err != nil {
-		t.Fatalf("failed to create insecure key file: %v", err)
-	}
-	t.Setenv("PQC_PSK_FILE", insecureFile)
-	_, err = Parse()
-	if err == nil {
-		t.Error("Expected an error for insecure permissions (0644)")
-	}
-
-	worldReadableFile := tmpDir + "/world.key"
-	if err := os.WriteFile(worldReadableFile, []byte(validKey), 0647); err != nil {
-		t.Fatalf("failed to create world-readable key file: %v", err)
-	}
-	t.Setenv("PQC_PSK_FILE", worldReadableFile)
-	_, err = Parse()
-	if err == nil {
-		t.Error("Expected an error for world-readable permissions (0647)")
-	}
-
-	groupReadableFile := tmpDir + "/group.key"
-	if err := os.WriteFile(groupReadableFile, []byte(validKey), 0660); err != nil {
-		t.Fatalf("failed to create group-readable key file: %v", err)
-	}
-	t.Setenv("PQC_PSK_FILE", groupReadableFile)
-	_, err = Parse()
-	if err == nil {
-		t.Error("Expected an error for group-readable permissions (0660)")
+	t.Setenv("PQC_ROUND_TIMEOUT", "2s")
+	if _, err = Parse(); err != nil {
+		t.Errorf("Expected a valid PQC configuration to parse, got %v", err)
 	}
 }
 
