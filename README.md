@@ -292,7 +292,7 @@ See [`KEYCONTROL.md`](KEYCONTROL.md) for the key writer architecture and
 Arnika Mode:              AtLeastQkdRequired
 Arnika Interval:          2m0s
 Arnika ID:                9999
-Arnika PSK:               <printed in cleartext - see note below>
+Arnika PSK:               (set, 44 bytes)
 Arnika Listen Address:    127.0.0.1:9999
 Arnika Peer Address:      127.0.0.1:9998
 Arnika Peer Timeout:			500ms
@@ -321,9 +321,8 @@ Max Clock Skew:           1m0s
 2026/01/22 18:04:55.399323 [INFO] BACKUP[9999] [RCV] received key_id ffffffff-8a32-4540-9b78-7d4e1afebb5f from 127.0.0.1:58927
 ```
 
-> [!CAUTION]
-> The startup banner prints the value of `ARNIKA_PSK` in **cleartext**. Treat Arnika's stdout and
-> its journal as sensitive, and redact that line before sharing logs.
+> [!NOTE]
+> The startup banner redacts `ARNIKA_PSK`, printing only its length.
 
 ## compile QKD KMS simulator
 
@@ -425,7 +424,7 @@ start without them.
 |---|---|---|---|
 | `LISTEN_ADDRESS` | ✅ | — | `host:port` Arnika listens on for the peer channel (UDP), e.g. `127.0.0.1:9999` |
 | `SERVER_ADDRESS` | ✅ | — | `host:port` of the remote Arnika peer — its `LISTEN_ADDRESS` |
-| `ARNIKA_PSK` | ⚠️ | _(empty)_ | Shared secret authenticating and encrypting the peer channel. **Must be identical on both peers and must be set** — see the warning below |
+| `ARNIKA_PSK` | ✅ | — | Shared secret authenticating and encrypting the peer channel, minimum 32 bytes. **Must be identical on both peers** — see the warning below |
 | `ARNIKA_ID` | ➖ | port from `LISTEN_ADDRESS` | Identifier (max 5 digits) used in logs and in PRIMARY/BACKUP election. The two peers' values **must differ in parity** — one odd, one even |
 | `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | Timeout waiting for the peer's ACK |
 | `INTERVAL` | ➖ | `10s` | Interval between key rotations. **Must be the same on both peers**; align with the WireGuard rekey interval (`120s`) |
@@ -434,12 +433,11 @@ start without them.
 | `MAX_CLOCK_SKEW` | ➖ | `1m` | Accepted timestamp deviation (replay protection). Requires clocks in sync between peers |
 
 > [!WARNING]
-> `ARNIKA_PSK` has **no secure default**. If it is unset, Arnika still starts, but both the HMAC
-> and AES keys of the peer channel derive from the empty string and are computable by anyone —
-> any host able to reach `LISTEN_ADDRESS` can inject or read key IDs. Generate it with
-> `openssl rand -base64 32`, distribute it out of band, and set the same value on both peers.
->
-> Note that the startup banner prints this value in cleartext.
+> `ARNIKA_PSK` is mandatory and has **no default**: Arnika refuses to start if it is unset or
+> shorter than 32 bytes. An empty value would derive both the HMAC and AES keys of the peer
+> channel from the empty string, making them computable by anyone able to reach
+> `LISTEN_ADDRESS`. Generate it with `openssl rand -base64 32`, distribute it out of band, and
+> set the same value on both peers. A chosen passphrase is not acceptable.
 
 ## Key reader — QKD / KMS (ETSI GS QKD 014)
 

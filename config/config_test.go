@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,9 +27,62 @@ func TestUsePQC(t *testing.T) {
 	}
 }
 
+// testArnikaPSK is 44 bytes, satisfying minArnikaPSKLen.
+const testArnikaPSK = "0123456789abcdef0123456789abcdef0123456789ab"
+
+func TestParse_ArnikaPSKValidation(t *testing.T) {
+	setValidEnv := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
+		t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
+		t.Setenv("KMS_URL", "https://example.com")
+		t.Setenv("WIREGUARD_INTERFACE", "wg0")
+		t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+		t.Setenv("MODE", "AtLeastQkdRequired")
+	}
+
+	t.Run("unset is fatal", func(t *testing.T) {
+		setValidEnv(t)
+		t.Setenv("ARNIKA_PSK", "")
+		if _, err := Parse(); err == nil {
+			t.Fatal("expected Parse to fail when ARNIKA_PSK is unset")
+		}
+	})
+
+	t.Run("too short is fatal", func(t *testing.T) {
+		setValidEnv(t)
+		t.Setenv("ARNIKA_PSK", strings.Repeat("a", minArnikaPSKLen-1))
+		if _, err := Parse(); err == nil {
+			t.Fatalf("expected Parse to fail for a %d-byte ARNIKA_PSK", minArnikaPSKLen-1)
+		}
+	})
+
+	t.Run("minimum length accepted", func(t *testing.T) {
+		setValidEnv(t)
+		t.Setenv("ARNIKA_PSK", strings.Repeat("a", minArnikaPSKLen))
+		if _, err := Parse(); err != nil {
+			t.Fatalf("expected Parse to accept a %d-byte ARNIKA_PSK, got %v", minArnikaPSKLen, err)
+		}
+	})
+}
+
+func TestRedactSecret(t *testing.T) {
+	if got := redactSecret(""); got != "(unset)" {
+		t.Errorf("redactSecret(\"\") = %q, want \"(unset)\"", got)
+	}
+	secret := "super-secret-value"
+	got := redactSecret(secret)
+	if strings.Contains(got, secret) {
+		t.Errorf("redactSecret leaked the secret: %q", got)
+	}
+	if want := "(set, 18 bytes)"; got != want {
+		t.Errorf("redactSecret(%q) = %q, want %q", secret, got, want)
+	}
+}
+
 func TestParse(t *testing.T) {
 	// Test case 1: Missing environment variable
-	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "KMS_URL", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY"} {
+	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "KMS_URL", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY", "ARNIKA_PSK"} {
 		_, err := Parse()
 		if err == nil {
 			t.Errorf("Expected an error for missing %s", mandatoryEnvVar)
@@ -43,30 +97,32 @@ func TestParse(t *testing.T) {
 	t.Setenv("WIREGUARD_INTERFACE", "wg0")
 	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
 	t.Setenv("MODE", "AtLeastQkdRequired")
+	// The loop above set a short placeholder; ARNIKA_PSK has a minimum length.
+	t.Setenv("ARNIKA_PSK", testArnikaPSK)
 
 	// Test case 2: All environment variables present
 	expectedConfig := &Config{
 		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
 		ArnikaID:               "8080",
-		ArnikaPSK:              "", // Default value for ArnikaPSK
-		Certificate:            "", // Default value for Certificate
-		PrivateKey:             "", // Default value for PrivateKey
-		CACertificate:          "", // Default value for CACertificate
+		ArnikaPSK:              testArnikaPSK,
+		Certificate:            "",                     // Default value for Certificate
+		PrivateKey:             "",                     // Default value for PrivateKey
+		CACertificate:          "",                     // Default value for CACertificate
 		ArnikaPeerTimeout:      time.Millisecond * 500, // Actual default value for ArnikaPeerTimeout
 		KMSURL:                 "https://example.com",
-		KMSHTTPTimeout:         time.Second * 10,        // Actual default value for KMSHTTPTimeout
-		KMSBackoffMaxRetries:   5,                       // Actual default value for KMSBackoffMaxRetries
-		KMSBackoffBaseDelay:    time.Millisecond * 100,  // Actual default value for KMSBackoffBaseDelay
-		KMSRetryInterval:       time.Second * 5,         // Actual default value for KMSRetryInterval
-		Interval:               time.Second * 10,        // Actual default value for Interval
+		KMSHTTPTimeout:         time.Second * 10,       // Actual default value for KMSHTTPTimeout
+		KMSBackoffMaxRetries:   5,                      // Actual default value for KMSBackoffMaxRetries
+		KMSBackoffBaseDelay:    time.Millisecond * 100, // Actual default value for KMSBackoffBaseDelay
+		KMSRetryInterval:       time.Second * 5,        // Actual default value for KMSRetryInterval
+		Interval:               time.Second * 10,       // Actual default value for Interval
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCPSKFile:             "", // Default value for PQCPSKFile
 		Mode:                   "AtLeastQkdRequired",
-		RateLimit:              30,              // Real default value for RateLimit
-		RateWindow:             time.Minute,     // Real default value for RateWindow
-		MaxClockSkew:           time.Minute,     // Real default value for MaxClockSkew
+		RateLimit:              30,          // Real default value for RateLimit
+		RateWindow:             time.Minute, // Real default value for RateWindow
+		MaxClockSkew:           time.Minute, // Real default value for MaxClockSkew
 	}
 	result, err := Parse()
 	if err != nil {
@@ -108,6 +164,7 @@ func TestParse_PQCFilePermissions(t *testing.T) {
 	t.Setenv("WIREGUARD_INTERFACE", "wg0")
 	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
 	t.Setenv("MODE", "AtLeastQkdRequired")
+	t.Setenv("ARNIKA_PSK", testArnikaPSK)
 
 	t.Setenv("PQC_PSK_FILE", validFile)
 	_, err := Parse()

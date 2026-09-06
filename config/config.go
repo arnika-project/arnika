@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+// minArnikaPSKLen is the minimum accepted length of ARNIKA_PSK. The
+// ~128-bit post-Grover authentication claim assumes 256 bits of real
+// entropy, which a human-chosen passphrase does not provide.
+const minArnikaPSKLen = 32
+
 // Config contains the configuration values for the arnika service.
 type Config struct {
 	ListenAddress          string        // LISTEN_ADDRESS, Address to listen on for incoming connections
@@ -75,7 +80,7 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Arnika Mode:              %s\n", c.Mode)
 	fmt.Printf("Arnika Interval:          %s\n", c.Interval)
 	fmt.Printf("Arnika ID:                %s\n", c.ArnikaID)
-	fmt.Printf("Arnika PSK:               %s\n", c.ArnikaPSK)
+	fmt.Printf("Arnika PSK:               %s\n", redactSecret(c.ArnikaPSK))
 	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
 	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
 	fmt.Printf("Arnika Peer Timeout:			%s\n", c.ArnikaPeerTimeout)
@@ -113,6 +118,15 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Rate Window:              %s\n", c.RateWindow)
 	fmt.Printf("Max Clock Skew:           %s\n", c.MaxClockSkew)
 	fmt.Println("============================")
+}
+
+// redactSecret keeps secret material out of the startup config dump, which is
+// written to stdout and from there into journals and log aggregation.
+func redactSecret(s string) string {
+	if s == "" {
+		return "(unset)"
+	}
+	return fmt.Sprintf("(set, %d bytes)", len(s))
 }
 
 // Parse parses the configuration values from environment variables and returns a Config pointer.
@@ -208,7 +222,18 @@ func Parse() (*Config, error) {
 	if !config.UsePQC() && config.IsPQCRequired() {
 		return nil, fmt.Errorf("[ERROR] PQC PSK file missing as MODE is %s", config.Mode)
 	}
+	// ARNIKA_PSK is the sole authentication root for the peer protocol: an
+	// unset value makes the HMAC key SHA-256(""), a publicly computable
+	// constant, and anyone can then inject valid packets.
 	config.ArnikaPSK = getEnvOrDefault("ARNIKA_PSK", "")
+	if config.ArnikaPSK == "" {
+		return nil, fmt.Errorf("[ERROR] ARNIKA_PSK is not set; refusing to start")
+	}
+	if len(config.ArnikaPSK) < minArnikaPSKLen {
+		return nil, fmt.Errorf(
+			"[ERROR] ARNIKA_PSK is %d bytes, minimum %d; generate with: openssl rand -base64 32",
+			len(config.ArnikaPSK), minArnikaPSKLen)
+	}
 	config.ArnikaPeerTimeout, err = time.ParseDuration(getEnvOrDefault("ARNIKA_PEER_TIMEOUT", "500ms"))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse ARNIKA_PEER_TIMEOUT: %w", err)

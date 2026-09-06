@@ -203,14 +203,14 @@ AES-256-GCM, using two keys derived from that secret with domain separation (`au
 - **`ARNIKA_PSK` MUST be set, identical on both peers, and secret.** It is not read from a file
   and not negotiated — there is no fallback and no alternative authentication mechanism for this
   channel.
-- **An unset `ARNIKA_PSK` is a critical misconfiguration.** The variable defaults to the empty
-  string and is not rejected at startup. Both derived keys then depend only on the empty string
-  and are trivially computable by anyone, so any host that can reach `LISTEN_ADDRESS` can inject
-  or decrypt key IDs. Arnika still starts and appears to work.
+- **Arnika refuses to start without it.** The variable is mandatory and must be at least 32 bytes;
+  a shorter or absent value is a startup error, not a warning. This is deliberate: an empty value
+  would make both derived keys depend only on the empty string and be trivially computable by
+  anyone, so any host able to reach `LISTEN_ADDRESS` could inject or decrypt key IDs.
 - **Generate it with a CSPRNG**, at least 32 bytes of entropy, e.g. `openssl rand -base64 32`.
-  Distribute it out of band and rotate it on both peers together.
-- **The startup banner prints `ARNIKA_PSK` in cleartext** (`Arnika PSK: …`). Treat Arnika's stdout
-  and journal as secret material, or redact it before sharing logs.
+  A human-chosen passphrase does not carry the entropy the security claim assumes. Distribute it
+  out of band and rotate it on both peers together.
+- **The startup banner redacts it**, printing `(set, N bytes)` rather than the value.
 - **Supporting controls on the same channel**: per-IP rate limiting (`RATE_LIMIT`, `RATE_WINDOW`,
   default 30/min) and timestamp replay protection (`MAX_CLOCK_SKEW`, default `1m`). Lowering
   `MAX_CLOCK_SKEW` reduces the replay window but requires closer clock synchronisation between
@@ -323,7 +323,7 @@ for empty or whitespace-only keys.
 - [ ] Dependency integrity is verified via `go.sum` before building from source
 - [ ] Arnika logs are monitored for PSK injection failures or fallback-to-zero-PSK events —
   these indicate loss of quantum protection
-- [ ] Arnika logs are treated as sensitive: the startup banner prints `ARNIKA_PSK` in cleartext
+- [ ] `ARNIKA_PSK` is at least 32 bytes of CSPRNG output (Arnika refuses to start otherwise)
 - [ ] Process is isolated with `ProtectSystem=strict`, `PrivateTmp=true`, and
   `NoNewPrivileges=true` in the systemd unit
 

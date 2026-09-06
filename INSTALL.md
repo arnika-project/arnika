@@ -25,7 +25,8 @@ and **Bob** joined by a single WireGuard tunnel.
 - Internet connectivity
 - Pre-generated Wireguard keys for both hosts (private keys, public keys, and PSK)
 - A shared Arnika peer secret (`ARNIKA_PSK`) — one value used on **both** hosts, generated with
-  `openssl rand -base64 32`
+  `openssl rand -base64 32`. It is mandatory and must be at least 32 bytes: Arnika refuses to
+  start otherwise, and a chosen passphrase is not acceptable
 - (Optional) PQC keys for PQC mode
 - (Optional) KMS certificates for KMS mode
 - Build tools to compile Arnika from source: `git`, `make` and a **Go 1.26+** toolchain — see
@@ -690,9 +691,8 @@ tmux attach -t <session>   # kms, arnika, wg or ping
   journalctl -u arnika
   ```
 
-  > [!CAUTION]
-  > Arnika's startup banner prints `ARNIKA_PSK` in cleartext, so treat this journal as sensitive
-  > and redact it before sharing.
+  > [!NOTE]
+  > The startup banner redacts `ARNIKA_PSK`, printing only its length.
 
 - Verify that key rotation and role election work:
 
