@@ -2,9 +2,14 @@ package repositories
 
 import (
 	"bytes"
+	"context"
 	"crypto/hpke"
 	"crypto/rand"
+	"fmt"
+	mrand "math/rand"
+	"sync"
 	"testing"
+	"time"
 )
 
 // --- frame layer ------------------------------------------------------------
@@ -355,4 +360,259 @@ func TestPQCConfirmTagProperties(t *testing.T) {
 	if pqcVerifyConfirm(key, 5, tag[:len(tag)-1]) {
 		t.Fatal("a truncated tag verified")
 	}
+}
+
+// --- transport and scheduler ------------------------------------------------
+
+// pqcPipe wires two repositories back to back over in-memory channels, with an
+// optional frame loss rate, so a full round can run without any network.
+type pqcPipe struct {
+	initiator, responder *PQCHPKERepository
+}
+
+func newPQCPipe(t *testing.T, lossPercent int, seed int64, timeout time.Duration) *pqcPipe {
+	t.Helper()
+
+	toInitiator := make(chan []byte, 64)
+	toResponder := make(chan []byte, 64)
+
+	rng := mrand.New(mrand.NewSource(seed))
+	var mu sync.Mutex
+	lossy := func(dst chan []byte) func([]byte) error {
+		return func(frame []byte) error {
+			mu.Lock()
+			drop := rng.Intn(100) < lossPercent
+			mu.Unlock()
+			if drop {
+				return nil // silently lost in transit, as a datagram would be
+			}
+			cp := make([]byte, len(frame))
+			copy(cp, frame)
+			select {
+			case dst <- cp:
+			default: // receiver's queue full: dropped, exactly as udpServer does
+			}
+			return nil
+		}
+	}
+
+	interval := 10 * time.Second
+	initiator, err := NewPQCHPKERepository(toInitiator, lossy(toResponder),
+		func(uint32) bool { return true }, interval, timeout, time.Minute)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+	responder, err := NewPQCHPKERepository(toResponder, lossy(toInitiator),
+		func(uint32) bool { return false }, interval, timeout, time.Minute)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+	return &pqcPipe{initiator: initiator, responder: responder}
+}
+
+// run executes one round on both ends concurrently and returns their errors.
+func (p *pqcPipe) run(t *testing.T, round uint32, wall time.Duration) (errInit, errResp error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), wall)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); errInit = p.initiator.RunRound(ctx, round) }()
+	go func() { defer wg.Done(); errResp = p.responder.RunRound(ctx, round) }()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(wall + 5*time.Second):
+		t.Fatal("round hung: RunRound did not return within the wall clock budget")
+	}
+	return errInit, errResp
+}
+
+func TestPQCRoundAgreesOverCleanPipe(t *testing.T) {
+	p := newPQCPipe(t, 0, 1, 3*time.Second)
+
+	errInit, errResp := p.run(t, 4242, 10*time.Second)
+	if errInit != nil {
+		t.Fatalf("initiator: %v", errInit)
+	}
+	if errResp != nil {
+		t.Fatalf("responder: %v", errResp)
+	}
+
+	keyA, err := p.initiator.GetNewKey()
+	if err != nil {
+		t.Fatalf("initiator GetNewKey: %v", err)
+	}
+	keyB, err := p.responder.GetNewKey()
+	if err != nil {
+		t.Fatalf("responder GetNewKey: %v", err)
+	}
+	if !bytes.Equal(keyA, keyB) {
+		t.Fatal("peers published different keys")
+	}
+	if len(keyA) != pqcKeyLen {
+		t.Fatalf("key is %d bytes, want %d", len(keyA), pqcKeyLen)
+	}
+}
+
+// TestPQCRoundUnderLoss asserts the property that matters operationally: with
+// frames going missing, a round either completes with matching keys or fails
+// cleanly. It must never hang, and it must never publish divergent keys.
+func TestPQCRoundUnderLoss(t *testing.T) {
+	for _, loss := range []int{1, 5, 20} {
+		t.Run(fmt.Sprintf("%d%%_loss", loss), func(t *testing.T) {
+			completed := 0
+			const rounds = 5
+			for i := range rounds {
+				p := newPQCPipe(t, loss, int64(loss*100+i), 2*time.Second)
+				errInit, errResp := p.run(t, uint32(1000+i), 8*time.Second)
+
+				keyA, errA := p.initiator.GetNewKey()
+				keyB, errB := p.responder.GetNewKey()
+
+				switch {
+				case errInit == nil && errResp == nil:
+					if errA != nil || errB != nil {
+						t.Fatalf("round reported success but a key is missing: %v / %v", errA, errB)
+					}
+					if !bytes.Equal(keyA, keyB) {
+						t.Fatal("both ends succeeded with different keys; confirmation did not hold")
+					}
+					completed++
+				default:
+					// A failed round must publish nothing on the failing side.
+					if errInit != nil && errA == nil {
+						t.Fatal("initiator failed the round but still published a key")
+					}
+					if errResp != nil && errB == nil {
+						t.Fatal("responder failed the round but still published a key")
+					}
+				}
+			}
+			t.Logf("%d%% loss: %d/%d rounds completed", loss, completed, rounds)
+			if loss <= 5 && completed == 0 {
+				t.Fatalf("no round completed at %d%% loss; retries are not recovering", loss)
+			}
+		})
+	}
+}
+
+func TestPQCGetNewKeyBeforeAnyRound(t *testing.T) {
+	p := newPQCPipe(t, 0, 2, time.Second)
+	if _, err := p.initiator.GetNewKey(); err == nil {
+		t.Fatal("expected an error before the first round has agreed a key")
+	}
+}
+
+func TestPQCGetNewKeyStale(t *testing.T) {
+	inbound := make(chan []byte, 1)
+	r, err := NewPQCHPKERepository(inbound, func([]byte) error { return nil },
+		func(uint32) bool { return true }, time.Second, 100*time.Millisecond, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+
+	key := make([]byte, pqcKeyLen)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	if err := r.publish(key); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if _, err := r.GetNewKey(); err != nil {
+		t.Fatalf("a fresh key must be returned: %v", err)
+	}
+
+	time.Sleep(80 * time.Millisecond) // now older than maxAge
+	if _, err := r.GetNewKey(); err == nil {
+		t.Fatal("expected a staleness error once the key exceeds maxAge")
+	}
+}
+
+func TestPQCPublishRejectsWrongLength(t *testing.T) {
+	inbound := make(chan []byte, 1)
+	r, err := NewPQCHPKERepository(inbound, func([]byte) error { return nil },
+		func(uint32) bool { return true }, time.Second, 100*time.Millisecond, time.Minute)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+	for _, n := range []int{0, 16, 31, 33, 64} {
+		if err := r.publish(make([]byte, n)); err == nil {
+			t.Fatalf("publish accepted a %d-byte key", n)
+		}
+	}
+}
+
+// TestPQCConcurrentRoundRejected asserts that only one round is ever active.
+func TestPQCConcurrentRoundRejected(t *testing.T) {
+	inbound := make(chan []byte, 1)
+	r, err := NewPQCHPKERepository(inbound, func([]byte) error { return nil },
+		func(uint32) bool { return false }, // responder: blocks waiting for a public key
+		time.Second, 700*time.Millisecond, time.Minute)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+
+	ctx := context.Background()
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_ = r.RunRound(ctx, 1)
+	}()
+	<-started
+	time.Sleep(100 * time.Millisecond) // let the first round take the slot
+
+	if err := r.RunRound(ctx, 2); err == nil {
+		t.Fatal("a second concurrent round was accepted; only one may be active")
+	}
+}
+
+func TestPQCConstructorValidation(t *testing.T) {
+	inbound := make(chan []byte, 1)
+	send := func([]byte) error { return nil }
+	role := func(uint32) bool { return true }
+
+	cases := []struct {
+		name                      string
+		inbound                   <-chan []byte
+		send                      func([]byte) error
+		role                      func(uint32) bool
+		interval, timeout, maxAge time.Duration
+	}{
+		{"nil inbound", nil, send, role, time.Second, time.Millisecond, time.Minute},
+		{"nil send", inbound, nil, role, time.Second, time.Millisecond, time.Minute},
+		{"nil role", inbound, send, nil, time.Second, time.Millisecond, time.Minute},
+		{"zero interval", inbound, send, role, 0, time.Millisecond, time.Minute},
+		{"timeout equals interval", inbound, send, role, time.Second, time.Second, time.Minute},
+		{"timeout exceeds interval", inbound, send, role, time.Second, 2 * time.Second, time.Minute},
+		{"zero maxAge", inbound, send, role, time.Second, time.Millisecond, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewPQCHPKERepository(tc.inbound, tc.send, tc.role, tc.interval, tc.timeout, tc.maxAge); err == nil {
+				t.Fatal("expected a constructor error")
+			}
+		})
+	}
+}
+
+func TestPQCRoundIndexIsClockDerived(t *testing.T) {
+	interval := 10 * time.Second
+	base := time.Unix(1_000_000_000, 0)
+
+	if got, want := pqcRoundIndex(base, interval), uint32(100_000_000); got != want {
+		t.Fatalf("round index = %d, want %d", got, want)
+	}
+	// Both peers must land on the same index anywhere inside the interval.
+	if pqcRoundIndex(base.Add(9*time.Second), interval) != pqcRoundIndex(base, interval) {
+		t.Fatal("the index changed inside a single interval")
+	}
+	if pqcRoundIndex(base.Add(10*time.Second), interval) == pqcRoundIndex(base, interval) {
+		t.Fatal("the index did not advance across an interval boundary")
+	}
+	// A sub-second interval must not divide by zero.
+	_ = pqcRoundIndex(base, time.Millisecond)
 }

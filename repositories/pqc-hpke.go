@@ -13,13 +13,18 @@
 package repositories
 
 import (
+	"context"
 	"crypto/hkdf"
 	"crypto/hpke"
 	"crypto/sha3"
 	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"runtime/secret"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -322,4 +327,390 @@ func pqcVerifyConfirm(pqcKey []byte, round uint32, peerTag []byte) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(want, peerTag) == 1
+}
+
+// ---------------------------------------------------------------------------
+// 3. Transport, round scheduler and the key reader surface
+// ---------------------------------------------------------------------------
+
+// pqcMaxSendAttempts mirrors udpClient's send-with-ack retry count.
+const pqcMaxSendAttempts = 3
+
+// pqcResult is one agreed key and the moment it was agreed.
+type pqcResult struct {
+	key []byte
+	at  time.Time
+}
+
+// PQCHPKERepository implements services.KeyReaderUnmanaged by running an HPKE
+// key agreement with the Arnika peer once per round. It replaces the
+// file-based Rosenpass reader; the key never touches disk.
+//
+// The adapter owns no socket. It receives already-verified, already-decrypted
+// frames on inbound and emits plaintext frames through send, both supplied by
+// the wiring, which keeps it testable without any network.
+type PQCHPKERepository struct {
+	inbound <-chan []byte
+	send    func([]byte) error
+
+	// isInitiator pins the role for a round. Arnika's role alternates per
+	// interval, so it is evaluated once at round start and held for the whole
+	// round: re-deriving it mid-round would flip initiator and responder in
+	// flight and fail the round intermittently.
+	isInitiator func(round uint32) bool
+
+	roundInterval time.Duration
+	roundTimeout  time.Duration
+	maxAge        time.Duration
+
+	latest atomic.Pointer[pqcResult]
+
+	mu     sync.Mutex
+	active bool // at most one round in flight
+}
+
+// NewPQCHPKERepository builds the adapter. Every dependency is an argument: it
+// reads no environment and opens no socket.
+func NewPQCHPKERepository(
+	inbound <-chan []byte,
+	send func([]byte) error,
+	isInitiator func(round uint32) bool,
+	roundInterval, roundTimeout, maxAge time.Duration,
+) (*PQCHPKERepository, error) {
+	if inbound == nil {
+		return nil, fmt.Errorf("pqc: inbound channel is nil")
+	}
+	if send == nil {
+		return nil, fmt.Errorf("pqc: send function is nil")
+	}
+	if isInitiator == nil {
+		return nil, fmt.Errorf("pqc: isInitiator function is nil")
+	}
+	if roundInterval <= 0 {
+		return nil, fmt.Errorf("pqc: round interval must be positive, got %s", roundInterval)
+	}
+	if roundTimeout <= 0 || roundTimeout >= roundInterval {
+		return nil, fmt.Errorf("pqc: round timeout %s must be positive and shorter than the round interval %s",
+			roundTimeout, roundInterval)
+	}
+	if maxAge <= 0 {
+		return nil, fmt.Errorf("pqc: max key age must be positive, got %s", maxAge)
+	}
+	return &PQCHPKERepository{
+		inbound:       inbound,
+		send:          send,
+		isInitiator:   isInitiator,
+		roundInterval: roundInterval,
+		roundTimeout:  roundTimeout,
+		maxAge:        maxAge,
+	}, nil
+}
+
+// pqcRoundIndex derives the round number from the clock, so it survives an
+// asymmetric restart. An in-memory counter would deadlock when one peer
+// restarts and the other does not.
+func pqcRoundIndex(t time.Time, interval time.Duration) uint32 {
+	secs := int64(interval.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	return uint32(t.Unix() / secs)
+}
+
+// GetNewKey implements services.KeyReaderUnmanaged.
+//
+// It reads an atomic register rather than a channel: it is called synchronously
+// from setPSK(), must never block, may be called more than once per round, and
+// needs the key's age. Staleness is reported as an error, leaving the decision
+// to setPSK()'s existing IsPQCRequired() branch - no new policy is added here.
+func (r *PQCHPKERepository) GetNewKey() ([]byte, error) {
+	v := r.latest.Load()
+	if v == nil {
+		return nil, fmt.Errorf("pqc-hpke: no key agreed yet")
+	}
+	if age := time.Since(v.at); age > r.maxAge {
+		return nil, fmt.Errorf("pqc-hpke: key stale (age %s, max %s)",
+			age.Truncate(time.Second), r.maxAge)
+	}
+	out := make([]byte, pqcKeyLen)
+	copy(out, v.key)
+	return out, nil
+}
+
+// publish installs a freshly agreed key and zeroes the one it supersedes.
+// Callers must not reach here before confirmation has succeeded.
+func (r *PQCHPKERepository) publish(key []byte) error {
+	if len(key) != pqcKeyLen {
+		return fmt.Errorf("pqc-hpke: refusing to publish %d-byte key, want %d", len(key), pqcKeyLen)
+	}
+	k := make([]byte, pqcKeyLen)
+	copy(k, key)
+	prev := r.latest.Swap(&pqcResult{key: k, at: time.Now()})
+	if prev != nil {
+		clear(prev.key)
+	}
+	return nil
+}
+
+// Run drives the round schedule until ctx is cancelled.
+func (r *PQCHPKERepository) Run(ctx context.Context) {
+	for {
+		now := time.Now()
+		secs := int64(r.roundInterval.Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		// Wake at the next round boundary, which both peers compute identically.
+		next := time.Unix((now.Unix()/secs+1)*secs, 0)
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		round := pqcRoundIndex(time.Now(), r.roundInterval)
+		if err := r.RunRound(ctx, round); err != nil {
+			log.Printf("[WARNING] pqc-hpke: round %d failed: %v", round, err)
+		}
+	}
+}
+
+// RunRound executes one complete agreement round. Nothing is published unless
+// the round completes through confirmation.
+func (r *PQCHPKERepository) RunRound(ctx context.Context, round uint32) error {
+	r.mu.Lock()
+	if r.active {
+		r.mu.Unlock()
+		return fmt.Errorf("pqc-hpke: round %d rejected, another round is already active", round)
+	}
+	r.active = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.active = false
+		r.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(ctx, r.roundTimeout)
+	defer cancel()
+
+	s := &pqcSession{
+		repo:    r,
+		round:   round,
+		re:      newPQCReassembler(),
+		pending: make(map[pqcKind][]byte),
+		acked:   make(map[pqcKind]bool),
+	}
+	s.re.SetRound(round)
+
+	// Pinned once, held for the whole round.
+	if r.isInitiator(round) {
+		return s.runInitiator(ctx)
+	}
+	return s.runResponder(ctx)
+}
+
+// pqcSession is the per-round state. Frames for other rounds never reach it.
+type pqcSession struct {
+	repo    *PQCHPKERepository
+	round   uint32
+	re      *pqcReassembler
+	pending map[pqcKind][]byte // completed messages not yet consumed
+	acked   map[pqcKind]bool   // kinds the peer has acknowledged
+}
+
+// pump reads one inbound frame and files the result.
+func (s *pqcSession) pump(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case raw, ok := <-s.repo.inbound:
+		if !ok {
+			return fmt.Errorf("pqc-hpke: inbound channel closed")
+		}
+		f, err := decodeFrame(raw)
+		if err != nil {
+			return nil // malformed frame: drop, keep waiting
+		}
+		msg, complete := s.re.Add(f)
+		if !complete {
+			return nil
+		}
+		if f.kind == pqcKindAck {
+			if len(msg) == 1 {
+				s.acked[pqcKind(msg[0])] = true
+			}
+			return nil
+		}
+		s.pending[f.kind] = msg
+		return nil
+	}
+}
+
+// waitFor blocks until a complete message of the given kind is available.
+func (s *pqcSession) waitFor(ctx context.Context, kind pqcKind) ([]byte, error) {
+	for {
+		if msg, ok := s.pending[kind]; ok {
+			delete(s.pending, kind)
+			return msg, nil
+		}
+		if err := s.pump(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// sendFrames emits every frame of a message.
+func (s *pqcSession) sendFrames(kind pqcKind, msg []byte) error {
+	frames, err := splitMessage(s.round, kind, msg)
+	if err != nil {
+		return err
+	}
+	for _, f := range frames {
+		if err := s.repo.send(f); err != nil {
+			return fmt.Errorf("pqc-hpke: send: %w", err)
+		}
+	}
+	return nil
+}
+
+// sendAck acknowledges a received message.
+func (s *pqcSession) sendAck(kind pqcKind) error {
+	return s.sendFrames(pqcKindAck, []byte{byte(kind)})
+}
+
+// sendWithAck sends a message and waits for the peer's ack, retrying the whole
+// message on timeout as udpClient does. HPKE is single-shot, so there is no
+// partial state to recover: an exhausted retry budget simply fails the round.
+func (s *pqcSession) sendWithAck(ctx context.Context, kind pqcKind, msg []byte) error {
+	attemptTimeout := s.repo.roundTimeout / pqcMaxSendAttempts
+	if attemptTimeout <= 0 {
+		attemptTimeout = s.repo.roundTimeout
+	}
+	for attempt := 1; attempt <= pqcMaxSendAttempts; attempt++ {
+		if err := s.sendFrames(kind, msg); err != nil {
+			return err
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		err := s.waitAck(attemptCtx, kind)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fmt.Errorf("pqc-hpke: no ack for kind %d after %d attempts", kind, pqcMaxSendAttempts)
+}
+
+// waitAck blocks until the peer acknowledges the given kind.
+func (s *pqcSession) waitAck(ctx context.Context, kind pqcKind) error {
+	for {
+		if s.acked[kind] {
+			delete(s.acked, kind)
+			return nil
+		}
+		if err := s.pump(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+// runInitiator is the HPKE recipient: it generates the key pair, receives the
+// encapsulation, and derives the key.
+func (s *pqcSession) runInitiator(ctx context.Context) error {
+	priv, pub, err := pqcInitiatorStart()
+	if err != nil {
+		return err
+	}
+
+	if err := s.sendWithAck(ctx, pqcKindPubKey, pub); err != nil {
+		return err
+	}
+
+	enc, err := s.waitFor(ctx, pqcKindEnc)
+	if err != nil {
+		return fmt.Errorf("pqc-hpke: waiting for encapsulation: %w", err)
+	}
+	if err := s.sendAck(pqcKindEnc); err != nil {
+		return err
+	}
+
+	key, err := pqcInitiatorFinish(priv, enc, s.round)
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	defer clear(enc)
+
+	return s.confirmAndPublish(ctx, key, true)
+}
+
+// runResponder is the HPKE sender: it encapsulates to the peer's public key.
+func (s *pqcSession) runResponder(ctx context.Context) error {
+	pub, err := s.waitFor(ctx, pqcKindPubKey)
+	if err != nil {
+		return fmt.Errorf("pqc-hpke: waiting for public key: %w", err)
+	}
+	if err := s.sendAck(pqcKindPubKey); err != nil {
+		return err
+	}
+
+	// The round comes from the received frames, never from the local clock.
+	enc, key, err := pqcResponderRespond(pub, s.round)
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	defer clear(enc)
+
+	if err := s.sendWithAck(ctx, pqcKindEnc, enc); err != nil {
+		return err
+	}
+
+	return s.confirmAndPublish(ctx, key, false)
+}
+
+// confirmAndPublish exchanges confirmation tags and publishes only if they
+// match. The initiator sends its tag first, mirroring the protocol flow.
+//
+// This gate exists because ML-KEM decapsulation never fails: without it two
+// peers could hold different keys and poison the WireGuard PSK an interval
+// later, with no error anywhere.
+func (s *pqcSession) confirmAndPublish(ctx context.Context, key []byte, initiator bool) error {
+	tag, err := pqcConfirmTag(key, s.round)
+	if err != nil {
+		return err
+	}
+
+	recv := func() ([]byte, error) { return s.waitFor(ctx, pqcKindConfirm) }
+
+	var peerTag []byte
+	if initiator {
+		if err := s.sendFrames(pqcKindConfirm, tag); err != nil {
+			return err
+		}
+		peerTag, err = recv()
+	} else {
+		peerTag, err = recv()
+		if err == nil {
+			err = s.sendFrames(pqcKindConfirm, tag)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("pqc-hpke: confirmation exchange: %w", err)
+	}
+
+	if !pqcVerifyConfirm(key, s.round, peerTag) {
+		return fmt.Errorf("pqc-hpke: key confirmation failed for round %d; nothing published", s.round)
+	}
+
+	if err := s.repo.publish(key); err != nil {
+		return err
+	}
+	log.Printf("[INFO] pqc-hpke: round %d agreed a fresh PQC key", s.round)
+	return nil
 }
