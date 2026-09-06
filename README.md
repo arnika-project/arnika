@@ -63,8 +63,8 @@ is allowed to fall back to if one key source fails:
 
 | Mode | `MODE` value | Key sources | Behaviour |
 |---|---|---|---|
-| (A) QKD | `AtLeastQkdRequired` _(default)_ | QKD, PQC optional | QKD key is mandatory; PQC is mixed in when `PQC_PSK_FILE` is set |
-| (B) PQC | `AtLeastPqcRequired` | PQC, QKD optional | PQC key is mandatory (`PQC_PSK_FILE` must be set) |
+| (A) QKD | `AtLeastQkdRequired` _(default)_ | QKD, PQC optional | QKD key is mandatory; PQC is mixed in when `PQC_ENABLED=true` |
+| (B) PQC | `AtLeastPqcRequired` | PQC, QKD optional | PQC key is mandatory (`PQC_ENABLED=true` required) |
 | (C) hybrid | `QkdAndPqcRequired` | QKD **and** PQC | Both keys mandatory — no fallback, the strictest mode |
 | — | `EitherQkdOrPqcRequired` | QKD **or** PQC | Either source alone is accepted; the weakest mode |
 
@@ -82,7 +82,7 @@ _Figure 3_ shows the key path of 2 interconnected sites for the hyprid mode (C) 
   </tr>
 </table>
 
-The QKD key is obtained via ETSI014 from the QKDs embedded KMS and the PQC key is obtained via API or pointer/filedescriptor from any alternative PQC function/implementation.
+The QKD key is obtained via ETSI014 from the QKDs embedded KMS. The PQC key is agreed by Arnika itself with its peer, using HPKE (RFC 9180) with the MLKEM1024-P384 hybrid KEM over the existing Arnika socket — see [`docs/pqc-hpke.md`](docs/pqc-hpke.md). Earlier releases read it from a file written by an external provider such as Rosenpass; that mechanism has been replaced.
 
 
 Subsequently, the **KEY-CONTROL function** uses the **QKD key** and **PQC key** by using a **HKDF HMAC Key Derivation Function** with SHA3-256 as the hash function, to derive a single key from the two input keys (QKD, PQC).
@@ -202,6 +202,7 @@ Go **1.26 or newer** is required (see `go.mod`).
 | Document | Contents |
 |---|---|
 | [`KEYCONTROL.md`](KEYCONTROL.md) | Developer guide for the key reader / key writer layer |
+| [`docs/pqc-hpke.md`](docs/pqc-hpke.md) | The PQC key agreement (HPKE) that replaces Rosenpass |
 | [`docs/`](docs/) | One document per key reader / key writer backend |
 | [`CODEFLOW.md`](CODEFLOW.md) | The inter-peer key exchange protocol, step by step |
 | [`KMS.md`](KMS.md) | The bundled ETSI GS QKD 014 KMS simulator |
@@ -469,8 +470,14 @@ start without them.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `PQC_PSK_FILE` | ➖ | _(none)_ | File holding the PQC key from an external provider. Enables PQC when set; permissions must be `0600` or stricter, and the parent directory must not be writable by the Arnika user |
+| `PQC_ENABLED` | ➖ | `false` | Enables the **pqc-hpke** key agreement: Arnika negotiates the PQC key with its peer over the existing socket, using HPKE (RFC 9180) with MLKEM1024-P384. No external daemon, no key on disk, no new port |
+| `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
+| `PQC_MAX_KEY_AGE` | ➖ | `2 × INTERVAL` | Staleness threshold for the agreed key |
+| `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline; must be shorter than `PQC_ROUND_INTERVAL` |
 | `MODE` | ➖ | `AtLeastQkdRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired` or `EitherQkdOrPqcRequired` — see the mode table above |
+
+`PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` must be identical on both peers.
+See [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for the full module document.
 
 ## Key writer — WireGuard
 

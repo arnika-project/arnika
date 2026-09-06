@@ -166,9 +166,12 @@ Run on both Alice and Bob:
 > [!NOTE]
 > Only required for Post-Quantum Cryptography (PQC) mode.
 
-Refer to the installation guide of your chosen PQC key provider. Arnika needs nothing from it but
-the path to the key file it writes, configured as `PQC_PSK_FILE`. The file must be `0600` or
-stricter, and its parent directory must not be writable by the Arnika user.
+**No external PQC provider is required.** Arnika agrees the PQC key with its peer itself, using
+HPKE (RFC 9180) over the socket it already binds: no daemon to install, no key on disk, no extra
+port. Set `PQC_ENABLED=true` on both peers and see [`docs/pqc-hpke.md`](docs/pqc-hpke.md).
+
+Earlier releases read the key from a file written by an external provider such as Rosenpass,
+configured with `PQC_PSK_FILE`. That mechanism has been removed; the variable is ignored.
 
 
 ## Build from Source
@@ -356,8 +359,8 @@ Run on both Alice and Bob:
   KMS_URL="https://<ALICE_KMS_SERVER>:7000/api/v1/keys/arnika-bob"
   WIREGUARD_INTERFACE="qcicat0"
   WIREGUARD_PEER_PUBLIC_KEY="<BOB_WIREGUARD_PUBLIC_KEY>"
-  # Uncomment if using PQC mode:
-  #PQC_PSK_FILE="/opt/pqc/key_out/pqc_psk"
+  # Uncomment to enable the PQC key agreement (must match on both peers):
+  #PQC_ENABLED="true"
   EOF
 
   sudo chmod 600 /opt/arnika/arnika.env
@@ -378,8 +381,8 @@ Run on both Alice and Bob:
   KMS_URL="https://<BOB_KMS_SERVER>:7000/api/v1/keys/arnika-alice"
   WIREGUARD_INTERFACE="qcicat0"
   WIREGUARD_PEER_PUBLIC_KEY="<ALICE_WIREGUARD_PUBLIC_KEY>"
-  # Uncomment if using PQC mode:
-  #PQC_PSK_FILE="/opt/pqc/key_out/pqc_psk"
+  # Uncomment to enable the PQC key agreement (must match on both peers):
+  #PQC_ENABLED="true"
   EOF
 
   sudo chmod 600 /opt/arnika/arnika.env

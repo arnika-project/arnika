@@ -104,7 +104,7 @@ signal.
 | Module | Kind | Adapter | Build tag | Platform | Document |
 |---|---|---|---|---|---|
 | `kms` | Reader (managed) | [`repositories/kms.go`](repositories/kms.go) | _(always compiled)_ | any | _pending_ — see [`KMS.md`](KMS.md) |
-| `pqc` | Reader (unmanaged) | [`repositories/pqc.go`](repositories/pqc.go) | _(always compiled)_ | any | _pending_ |
+| `pqc-hpke` | Reader (unmanaged) | [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) | _(always compiled)_ | any | [`docs/pqc-hpke.md`](docs/pqc-hpke.md) |
 | `wireguard-netlink` | Writer | [`repositories/wireguard-netlink.go`](repositories/wireguard-netlink.go) | _(default)_ / `wireguard_netlink` | linux _(compiles elsewhere, no device)_ | [`docs/wireguard-netlink.md`](docs/wireguard-netlink.md) |
 | `wireguard-netlink-netns` | Writer | [`repositories/wireguard-netlink-netns.go`](repositories/wireguard-netlink-netns.go) | `wireguard_netlink_netns` | linux | [`docs/wireguard-netlink-netns.md`](docs/wireguard-netlink-netns.md) |
 | `wireguard-mikrotik` | Writer | [`repositories/wireguard-mikrotik.go`](repositories/wireguard-mikrotik.go) | `wireguard_mikrotik` | any | [`docs/wireguard-mikrotik.md`](docs/wireguard-mikrotik.md) |
@@ -114,7 +114,7 @@ signal.
 
 | Concern | Port (service) | Adapter interface | Adapters (repositories) |
 |---|---|---|---|
-| Read keys | [`services/keyreader.go`](services/keyreader.go) `KeyReaderService` | `KeyReaderManaged`, `KeyReaderUnmanaged` | [`repositories/kms.go`](repositories/kms.go), [`repositories/pqc.go`](repositories/pqc.go) |
+| Read keys | [`services/keyreader.go`](services/keyreader.go) `KeyReaderService` | `KeyReaderManaged`, `KeyReaderUnmanaged` | [`repositories/kms.go`](repositories/kms.go), [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) |
 | Write keys | [`services/keywriter.go`](services/keywriter.go) `KeyWriterService` | `keyWriterRepository` (`SetPSK`, `InvalidateTunnel`) | [`repositories/wireguard-netlink.go`](repositories/wireguard-netlink.go), [`repositories/wireguard-mikrotik.go`](repositories/wireguard-mikrotik.go) |
 
 ---
@@ -199,7 +199,7 @@ writer.
 All readers are compiled into every binary and are wired in
 [`keyreader.go`](keyreader.go) (`getQKDService`, `getPQCService`). Which key
 material actually ends up in the PSK is decided **at runtime** by the `MODE`
-and `PQC_PSK_FILE` configuration — no rebuild required. This is appropriate
+and `PQC_ENABLED` configuration — no rebuild required. This is appropriate
 because the existing backends are lightweight (an HTTP client and a file
 reader) and users routinely switch modes on the same binary.
 
@@ -208,7 +208,7 @@ reader) and users routinely switch modes on the same binary.
 1. **Write the adapter** at `repositories/<module-name>.go` implementing either
    `KeyReaderManaged` or `KeyReaderUnmanaged`. Handle key material carefully:
    decode inside a `secret.Do(...)` block and `clear()` every intermediate
-   buffer, as [`repositories/pqc.go`](repositories/pqc.go) does.
+   buffer, as [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) does.
 2. **Add a constructor** `New<Backend>Repository(...)` that takes everything it
    needs as arguments — no global state, no direct `os.Getenv` in the adapter.
 3. **Wire it** in [`keyreader.go`](keyreader.go) with a `get<Backend>Service`

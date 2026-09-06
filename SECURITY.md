@@ -159,7 +159,10 @@ The following are **out of scope**:
 - Theoretical attacks requiring physical access to the QKD optical channel
 - The KMS mock (`tools/kms`) is **not** intended for production; misconfigurations in
   development/test environments are out of scope
-- `PQC_PSK_FILE`: insecure file permissions, symlink attacks, or file descriptor leakage from PQK key provider integration
+- Vulnerabilities in an external PQC key provider. Arnika no longer reads PQC key material from a
+  file, so the `PQC_PSK_FILE` attack surface described by
+  [GHSA-rc6v-5rmx-w5mv](https://github.com/arnika-project/arnika/security/advisories/GHSA-rc6v-5rmx-w5mv)
+  no longer exists (see [PQC Key Agreement](#pqc-key-agreement-pqc-hpke))
 
 ---
 
@@ -264,30 +267,58 @@ Operation modes (`QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired`
 `EitherQkdOrPqcRequired`) define the minimum security level. Downgrade attacks that force a weaker
 mode are in scope.
 
-### PQC Key File & Directory Hardening
+### PQC Key Agreement (`pqc-hpke`)
 
-The `PQC_PSK_FILE` mechanism reads PSK material from a file provided an external
-key provider. While setting the file to `0600` restricts access, this alone is insufficient if the
-parent directory remains writable by the Arnika process user.
+Arnika agrees the PQC key with its peer using HPKE (RFC 9180) with the MLKEM1024-P384 hybrid KEM,
+over the socket it already binds. See [`docs/pqc-hpke.md`](docs/pqc-hpke.md).
 
-**Attack vector**: As demonstrated via [GHSA-rc6v-5rmx-w5m](https://github.com/arnika-project/arnika/security/advisories/GHSA-rc6v-5rmx-w5mv) , if an attacker has write access to the directory containing `PQC_PSK_FILE`, they
-can:
+**This removes an entire attack surface.** Earlier releases read PQC key material from a file named
+by `PQC_PSK_FILE`, whose directory permissions were the subject of
+[GHSA-rc6v-5rmx-w5mv](https://github.com/arnika-project/arnika/security/advisories/GHSA-rc6v-5rmx-w5mv):
+an attacker able to write to that directory could replace the file or plant a symlink, bypassing
+application-level validation. There is now no file, no directory to harden, and no key at rest.
 
-- Delete the original file and replace it with attacker-controlled content
-- Create a symlink to a different file they control
-- Bypass application-level validation entirely
+What replaces it, and what to watch:
 
-**Mitigation**: The directory containing `PQC_PSK_FILE` must have permissions that prevent the
-Arnika process user from modifying its contents. Recommended: `0700` or `0750` owned by root, with
-the Arnika user having read access only.
+- **`ARNIKA_PSK` is the sole authentication root of the agreement.** There is no second,
+  independent factor: an attacker holding it can MITM the exchange. This is the same trust root
+  the QKD key-id exchange already depends on, so the PQC path is no weaker than the path beside
+  it — but it is not stronger either.
+- **Key confirmation is load-bearing and must not be removed.** FIPS 203 ML-KEM decapsulation
+  never fails: a malformed encapsulation yields a *pseudorandom* shared secret rather than an
+  error. Without the mandatory confirmation exchange the two peers would hold different keys
+  silently, poisoning the WireGuard PSK an interval later. Any change that weakens or skips it is
+  a high-severity finding.
+- **Quantum confidentiality rests on ML-KEM-1024 alone.** The P-384 half falls to Shor; it is
+  there to cover an ML-KEM *implementation* flaw exploited classically (the KyberSlash/Clangover
+  scenario), and to satisfy the hybrid requirement in the German and EU positions. QKD, when
+  present, is the only non-computational hedge.
+- **No new listener.** PQC frames ride the existing port as one additional packet type; outbound
+  frames go from a dialled socket to the pinned peer address, never to an observed source, so
+  there is no reflection primitive.
+- **`draft-ietf-hpke-pq` is not yet an RFC.** Pin the Go version and re-verify interoperability on
+  upgrade.
 
-**Directory permissions**: The parent directory containing `PQC_PSK_FILE` must not be writable
-  by the Arnika process user. Even with `0600` on the file, if the directory is writable, an
-  attacker with access to that directory can delete/replace the file or symlink, bypassing file
-  permission protections entirely.
+### `ARNIKA_PSK` Rotation
 
-This is a defense-in-depth measure complementary to the application-level validation that checks
-for empty or whitespace-only keys.
+`auth.Encrypt` uses a random 96-bit nonce under the static key `SHA-256(ARNIKA_PSK)`. NIST
+SP 800-38D bounds random-IV AES-GCM near 2^32 invocations per key. Arnika sends a handful of
+packets per interval per direction, so a 120-second interval stays many orders of magnitude below
+that bound — but the limit is real, and long-lived deployments should rotate `ARNIKA_PSK`
+periodically. Rotation is a coordinated restart of both peers with the new value; there is no
+in-band rotation protocol.
+
+### Unscannable Is Not Unfingerprintable
+
+Every authentication failure in the read loop is a bare drop: no reply, no ICMP, no error. A
+scanner receives nothing, and the port is dark.
+
+Passive classification is a different matter. The envelope's type byte and 8-byte Unix timestamp
+are authenticated but **not encrypted**, and the payload is base64, so deep packet inspection can
+still recognise Arnika traffic and distinguish its packet types. WireGuard has the same property
+with its cleartext message-type byte. The PQC agreement adds one new type value and a short burst
+of larger datagrams once per interval. Claims about this port should say *unscannable*, not
+*unfingerprintable*.
 
 ---
 
@@ -314,8 +345,9 @@ for empty or whitespace-only keys.
   client-certificate authentication (these do not apply to the inter-peer channel)
 - [ ] For the MikroTik key writer: `MIKROTIK_CA_CERTIFICATE` is set, `MIKROTIK_TLS_INSECURE` is
   **not** enabled, and the router account is restricted to writing the peer PSK
-- [ ] `PQC_PSK_FILE` has permissions `0600` and is owned by the Arnika process user
-- [ ] The parent directory containing `PQC_PSK_FILE` is **not writable** by the Arnika process user
+- [ ] If the PQC key agreement is used: `PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` are
+  identical on both peers, and `PQC_ROUND_TIMEOUT` is shorter than `PQC_ROUND_INTERVAL`
+- [ ] `ARNIKA_PSK` rotation is scheduled for long-lived deployments
 - [ ] The KMS mock (`tools/kms`) is **not** deployed or reachable in production
 - [ ] WireGuard `INTERVAL` and Arnika `INTERVAL` are aligned (recommended: `120s`)
 - [ ] Go version `>= 1.26` is used, with `GOEXPERIMENT=runtimesecret` set for every `go` command

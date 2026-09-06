@@ -98,6 +98,49 @@ sequenceDiagram
 
 ---
 
+## PQC Key Agreement Round (`pqc-hpke`)
+
+When `PQC_ENABLED=true`, a second exchange runs over the same socket as one
+additional packet type (`PacketPQC`), producing the PQC half of the PSK. It is
+independent of the QKD flow above: `setPSK()` simply consumes whichever key is
+current.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Idle
+  Idle --> AwaitEnc: round due (initiator) - keypair generated, public key sent
+  Idle --> Encapsulating: public key received (responder)
+  Encapsulating --> AwaitConfirm: enc sent, key derived
+  Encapsulating --> Failed: malformed public key
+  AwaitEnc --> Deriving: enc received and reassembled
+  AwaitEnc --> Failed: round deadline exceeded
+  Deriving --> AwaitConfirm: Export succeeded, 32 bytes, tag sent
+  Deriving --> Failed: NewRecipient or Export error
+  AwaitConfirm --> Publishing: peer tag matches (constant-time)
+  AwaitConfirm --> Failed: tag mismatch - divergent keys
+  AwaitConfirm --> Failed: round deadline exceeded
+  Publishing --> Idle: publish, zero the private key and enc
+  Failed --> Idle: log, keep the previous key until PQC_MAX_KEY_AGE
+```
+
+Three properties are worth stating explicitly:
+
+- **Nothing is published before confirmation succeeds.** ML-KEM decapsulation
+  never fails - a malformed encapsulation returns a pseudorandom key rather than
+  an error - so the confirmation exchange is the only thing standing between a
+  corrupted message and a silently divergent PSK.
+- **The role is pinned at round start** from the round index. It is the same
+  `IsPrimary` derivation used for the interval, evaluated once and held: it
+  alternates per interval, so re-deriving it mid-round would flip initiator and
+  responder in flight.
+- **A failed round publishes nothing.** The previous key stays live until
+  `PQC_MAX_KEY_AGE`, after which `GetNewKey()` errors and the existing `Mode`
+  logic decides. No new fail-closed policy is introduced.
+
+See [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for the full module document.
+
+---
+
 ## References
 
 - **Packet Structure & Marshalling:**

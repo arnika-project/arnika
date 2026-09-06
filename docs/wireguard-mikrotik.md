@@ -307,7 +307,7 @@ is the enforced minimum either way.
 
 The usual Arnika settings (`KMS_URL`, `CERTIFICATE`, `PRIVATE_KEY`,
 `CA_CERTIFICATE`, `LISTEN_ADDRESS`, `SERVER_ADDRESS`, `ARNIKA_ID`, `INTERVAL`,
-`MODE`, `PQC_PSK_FILE`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
+`MODE`, `PQC_ENABLED`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
 [Part 4, Step 4](#step-4--environment-and-certificate-mount) shows a complete
 working set in RouterOS form.
 
