@@ -13,8 +13,13 @@
 package repositories
 
 import (
+	"crypto/hkdf"
+	"crypto/hpke"
+	"crypto/sha3"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
+	"runtime/secret"
 )
 
 // ---------------------------------------------------------------------------
@@ -193,4 +198,128 @@ func (r *pqcReassembler) Add(f pqcFrame) (msg []byte, complete bool) {
 	}
 	delete(r.parts, f.kind)
 	return out, true
+}
+
+// ---------------------------------------------------------------------------
+// 2. HPKE core
+// ---------------------------------------------------------------------------
+
+const (
+	// pqcExporterContext is the HPKE exporter context. Both peers must use the
+	// identical string or they derive different keys.
+	pqcExporterContext = "arnika-pqc-hpke-v1"
+
+	// pqcKeyLen is the size of the agreed PQC key, matching the QKD key so the
+	// two combine cleanly in kdf.DeriveKey.
+	pqcKeyLen = 32
+
+	// pqcConfirmTagLen is ample: an attacker gets one guess per round.
+	pqcConfirmTagLen = 16
+)
+
+// pqcSuite is the ciphersuite. ExportOnly is deliberate: this module needs key
+// derivation only, and that variant makes Seal and Open return errors by
+// construction, so the context can never be misused for message encryption.
+func pqcSuite() (hpke.KEM, hpke.KDF, hpke.AEAD) {
+	return hpke.MLKEM1024P384(), hpke.HKDFSHA384(), hpke.ExportOnly()
+}
+
+// pqcRoundInfo binds protocol version and round index into the HPKE key
+// schedule. Both peers must compute the same value, so the responder takes the
+// round from the received frames and never from its own clock.
+func pqcRoundInfo(round uint32) []byte {
+	return binary.BigEndian.AppendUint32([]byte(pqcExporterContext+"|"), round)
+}
+
+// pqcInitiatorStart generates the per-round key pair. Called by the initiator,
+// which is the HPKE recipient. A fresh pair every round is what provides
+// forward secrecy.
+func pqcInitiatorStart() (hpke.PrivateKey, []byte, error) {
+	kem, _, _ := pqcSuite()
+	priv, err := kem.GenerateKey()
+	if err != nil {
+		return nil, nil, fmt.Errorf("pqc: keygen: %w", err)
+	}
+	return priv, priv.PublicKey().Bytes(), nil
+}
+
+// pqcResponderRespond encapsulates to the peer's public key and exports the
+// shared key. Called by the responder, which is the HPKE sender.
+//
+// round MUST come from the received frames, never from the local clock.
+func pqcResponderRespond(pubBytes []byte, round uint32) (enc, key []byte, err error) {
+	kem, kdf, aead := pqcSuite()
+	pub, err := kem.NewPublicKey(pubBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pqc: bad peer public key: %w", err)
+	}
+	enc, sender, err := hpke.NewSender(pub, kdf, aead, pqcRoundInfo(round))
+	if err != nil {
+		return nil, nil, fmt.Errorf("pqc: encapsulate: %w", err)
+	}
+	secret.Do(func() {
+		key, err = sender.Export(pqcExporterContext, pqcKeyLen)
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("pqc: export: %w", err)
+	}
+	if len(key) != pqcKeyLen {
+		return nil, nil, fmt.Errorf("pqc: export returned %d bytes, want %d", len(key), pqcKeyLen)
+	}
+	return enc, key, nil
+}
+
+// pqcInitiatorFinish decapsulates and exports the same key.
+//
+// Note that this cannot detect a corrupted encapsulation: FIPS 203 ML-KEM uses
+// implicit rejection, so decapsulation of a malformed ciphertext returns a
+// pseudorandom shared secret rather than an error. Divergence is caught by the
+// confirmation exchange below, never here.
+func pqcInitiatorFinish(priv hpke.PrivateKey, enc []byte, round uint32) (key []byte, err error) {
+	_, kdf, aead := pqcSuite()
+	recip, err := hpke.NewRecipient(enc, priv, kdf, aead, pqcRoundInfo(round))
+	if err != nil {
+		return nil, fmt.Errorf("pqc: decapsulate: %w", err)
+	}
+	secret.Do(func() {
+		key, err = recip.Export(pqcExporterContext, pqcKeyLen)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pqc: export: %w", err)
+	}
+	if len(key) != pqcKeyLen {
+		return nil, fmt.Errorf("pqc: export returned %d bytes, want %d", len(key), pqcKeyLen)
+	}
+	return key, nil
+}
+
+// pqcConfirmTag proves possession of the agreed key without revealing it. The
+// tag is round-bound, so one from an earlier round cannot be replayed.
+//
+// REQUIRED, not belt-and-braces. ML-KEM decapsulation never fails, so without
+// this check a corrupted encapsulation leaves the two peers holding different
+// keys with no error raised anywhere, and the divergence surfaces one interval
+// later as an unexplained WireGuard handshake failure. Do not remove as
+// redundant.
+func pqcConfirmTag(pqcKey []byte, round uint32) ([]byte, error) {
+	info := string(binary.BigEndian.AppendUint32([]byte("arnika-pqc-hpke-confirm-v1|"), round))
+	var tag []byte
+	var err error
+	secret.Do(func() {
+		tag, err = hkdf.Key(sha3.New256, pqcKey, nil, info, pqcConfirmTagLen)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pqc: confirm tag: %w", err)
+	}
+	return tag, nil
+}
+
+// pqcVerifyConfirm gates publication. Callers MUST NOT publish a key before
+// this returns true.
+func pqcVerifyConfirm(pqcKey []byte, round uint32, peerTag []byte) bool {
+	want, err := pqcConfirmTag(pqcKey, round)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(want, peerTag) == 1
 }

@@ -2,6 +2,7 @@ package repositories
 
 import (
 	"bytes"
+	"crypto/hpke"
 	"crypto/rand"
 	"testing"
 )
@@ -179,4 +180,179 @@ func FuzzDecodeFrame(f *testing.F) {
 		r.SetRound(frame.round)
 		r.Add(frame) // must not panic
 	})
+}
+
+// --- HPKE core --------------------------------------------------------------
+
+// TestPQCAgreementDerivesIdenticalKeys runs both roles in one process.
+func TestPQCAgreementDerivesIdenticalKeys(t *testing.T) {
+	const round = 12345
+
+	priv, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	if len(pub) != 1665 {
+		t.Fatalf("public key is %d bytes, expected 1665 for MLKEM1024-P384", len(pub))
+	}
+
+	enc, keyResponder, err := pqcResponderRespond(pub, round)
+	if err != nil {
+		t.Fatalf("responderRespond: %v", err)
+	}
+	if len(enc) != 1665 {
+		t.Fatalf("encapsulation is %d bytes, expected 1665", len(enc))
+	}
+
+	keyInitiator, err := pqcInitiatorFinish(priv, enc, round)
+	if err != nil {
+		t.Fatalf("initiatorFinish: %v", err)
+	}
+
+	if len(keyInitiator) != pqcKeyLen {
+		t.Fatalf("key is %d bytes, want %d", len(keyInitiator), pqcKeyLen)
+	}
+	if !bytes.Equal(keyInitiator, keyResponder) {
+		t.Fatal("initiator and responder derived different keys")
+	}
+}
+
+// TestPQCRoundBindingSeparatesKeys asserts that a delayed message from another
+// round cannot produce usable material.
+func TestPQCRoundBindingSeparatesKeys(t *testing.T) {
+	priv, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	enc, keyResponder, err := pqcResponderRespond(pub, 100)
+	if err != nil {
+		t.Fatalf("responderRespond: %v", err)
+	}
+
+	// The initiator believes it is a different round.
+	keyInitiator, err := pqcInitiatorFinish(priv, enc, 101)
+	if err != nil {
+		return // rejecting outright is also acceptable
+	}
+	if bytes.Equal(keyInitiator, keyResponder) {
+		t.Fatal("a round mismatch produced the same key; info is not bound to the round")
+	}
+	// And the mismatch must be caught before publication.
+	tag, err := pqcConfirmTag(keyResponder, 100)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	if pqcVerifyConfirm(keyInitiator, 101, tag) {
+		t.Fatal("confirmation accepted a cross-round key")
+	}
+}
+
+func TestPQCRejectsMalformedPeerMaterial(t *testing.T) {
+	priv, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+
+	t.Run("malformed public key", func(t *testing.T) {
+		for _, bad := range [][]byte{nil, {}, make([]byte, 10), make([]byte, 1664), make([]byte, 1666)} {
+			if _, _, err := pqcResponderRespond(bad, 1); err == nil {
+				t.Fatalf("accepted a %d-byte public key", len(bad))
+			}
+		}
+	})
+
+	t.Run("truncated encapsulation", func(t *testing.T) {
+		enc, _, err := pqcResponderRespond(pub, 1)
+		if err != nil {
+			t.Fatalf("responderRespond: %v", err)
+		}
+		if _, err := pqcInitiatorFinish(priv, enc[:len(enc)-1], 1); err == nil {
+			t.Fatal("accepted a truncated encapsulation")
+		}
+	})
+}
+
+// TestPQCSealIsRefused asserts the ExportOnly instantiation cannot be misused
+// for message encryption.
+func TestPQCSealIsRefused(t *testing.T) {
+	kem, kdf, aead := pqcSuite()
+	priv, err := kem.GenerateKey()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	_, sender, err := hpke.NewSender(priv.PublicKey(), kdf, aead, pqcRoundInfo(1))
+	if err != nil {
+		t.Fatalf("NewSender: %v", err)
+	}
+	if _, err := sender.Seal(nil, []byte("payload")); err == nil {
+		t.Fatal("Seal succeeded under ExportOnly; the suite is not export-only")
+	}
+}
+
+// TestPQCConfirmationCatchesImplicitRejection is the load-bearing test for
+// ML-KEM implicit rejection: a corrupted encapsulation must produce no error
+// from decapsulation, and must be caught by the confirmation exchange instead.
+func TestPQCConfirmationCatchesImplicitRejection(t *testing.T) {
+	const round = 77
+
+	priv, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	enc, keyResponder, err := pqcResponderRespond(pub, round)
+	if err != nil {
+		t.Fatalf("responderRespond: %v", err)
+	}
+
+	corrupted := bytes.Clone(enc)
+	corrupted[len(corrupted)/2] ^= 0xff
+
+	keyInitiator, err := pqcInitiatorFinish(priv, corrupted, round)
+	if err != nil {
+		t.Skipf("decapsulation rejected the corrupted enc outright (%v); implicit rejection did not apply here", err)
+	}
+
+	// This is the whole point: no error, but the keys differ.
+	if bytes.Equal(keyInitiator, keyResponder) {
+		t.Fatal("corrupting the encapsulation did not change the derived key")
+	}
+
+	responderTag, err := pqcConfirmTag(keyResponder, round)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	if pqcVerifyConfirm(keyInitiator, round, responderTag) {
+		t.Fatal("confirmation accepted divergent keys; the PSK would have been poisoned silently")
+	}
+}
+
+func TestPQCConfirmTagProperties(t *testing.T) {
+	key := make([]byte, pqcKeyLen)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+
+	tag, err := pqcConfirmTag(key, 5)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	if len(tag) != pqcConfirmTagLen {
+		t.Fatalf("tag is %d bytes, want %d", len(tag), pqcConfirmTagLen)
+	}
+	if bytes.Contains(tag, key[:8]) {
+		t.Fatal("the tag leaks key material")
+	}
+	if !pqcVerifyConfirm(key, 5, tag) {
+		t.Fatal("a matching key and round failed verification")
+	}
+	if pqcVerifyConfirm(key, 6, tag) {
+		t.Fatal("a tag from another round verified; tags are not round-bound")
+	}
+	other := make([]byte, pqcKeyLen)
+	if pqcVerifyConfirm(other, 5, tag) {
+		t.Fatal("a different key verified against the tag")
+	}
+	if pqcVerifyConfirm(key, 5, tag[:len(tag)-1]) {
+		t.Fatal("a truncated tag verified")
+	}
 }
