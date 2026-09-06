@@ -82,7 +82,7 @@ _Figure 3_ shows the key path of 2 interconnected sites for the hyprid mode (C) 
   </tr>
 </table>
 
-The QKD key is obtained via ETSI014 from the QKDs embedded KMS. The PQC key is agreed by Arnika itself with its peer, using HPKE (RFC 9180) with the MLKEM1024-P384 hybrid KEM over the existing Arnika socket — see [`docs/pqc-hpke.md`](docs/pqc-hpke.md). Earlier releases read it from a file written by an external provider such as Rosenpass; that mechanism has been replaced.
+The QKD key is obtained via ETSI014 from the QKDs embedded KMS. The PQC key is agreed by Arnika itself with its peer, using HPKE (RFC 9180) with the MLKEM1024-P384 hybrid KEM over the existing Arnika socket — see [`docs/pqc-hpke.md`](docs/pqc-hpke.md). Earlier releases read it from a file written by an external PQC provider; that mechanism has been replaced.
 
 
 Subsequently, the **KEY-CONTROL function** uses the **QKD key** and **PQC key** by using a **HKDF HMAC Key Derivation Function** with SHA3-256 as the hash function, to derive a single key from the two input keys (QKD, PQC).
@@ -202,7 +202,7 @@ Go **1.26 or newer** is required (see `go.mod`).
 | Document | Contents |
 |---|---|
 | [`KEYCONTROL.md`](KEYCONTROL.md) | Developer guide for the key reader / key writer layer |
-| [`docs/pqc-hpke.md`](docs/pqc-hpke.md) | The PQC key agreement (HPKE) that replaces Rosenpass |
+| [`docs/pqc-hpke.md`](docs/pqc-hpke.md) | The PQC key agreement (HPKE) that replaces the external PQC provider |
 | [`docs/`](docs/) | One document per key reader / key writer backend |
 | [`CODEFLOW.md`](CODEFLOW.md) | The inter-peer key exchange protocol, step by step |
 | [`KMS.md`](KMS.md) | The bundled ETSI GS QKD 014 KMS simulator |

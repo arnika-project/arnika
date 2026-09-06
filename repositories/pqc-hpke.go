@@ -1,9 +1,9 @@
 // Package repositories - pqc-hpke key reader.
 //
 // This adapter derives the 32-byte PQC key by running an HPKE (RFC 9180) key
-// agreement directly with the Arnika peer, replacing the file-based Rosenpass
-// reader. It has no build tag and no platform constraint: it compiles, vets,
-// lints and tests on every platform.
+// agreement directly with the Arnika peer, replacing the reader that took the
+// PQC key via file from an external PQC provider. It has no build tag and no
+// platform constraint: it compiles, vets, lints and tests on every platform.
 //
 // The file is organised in three sections:
 //
@@ -343,8 +343,8 @@ type pqcResult struct {
 }
 
 // PQCHPKERepository implements services.KeyReaderUnmanaged by running an HPKE
-// key agreement with the Arnika peer once per round. It replaces the
-// file-based Rosenpass reader; the key never touches disk.
+// key agreement with the Arnika peer once per round. It replaces reading the
+// PQC key via file from an external PQC provider; the key never touches disk.
 //
 // The adapter owns no socket. It receives already-verified, already-decrypted
 // frames on inbound and emits plaintext frames through send, both supplied by

@@ -170,8 +170,8 @@ Run on both Alice and Bob:
 HPKE (RFC 9180) over the socket it already binds: no daemon to install, no key on disk, no extra
 port. Set `PQC_ENABLED=true` on both peers and see [`docs/pqc-hpke.md`](docs/pqc-hpke.md).
 
-Earlier releases read the key from a file written by an external provider such as Rosenpass,
-configured with `PQC_PSK_FILE`. That mechanism has been removed; the variable is ignored.
+Earlier releases read the key via file from an external PQC provider, configured with
+`PQC_PSK_FILE`. That mechanism has been removed; the variable is ignored.
 
 
 ## Build from Source

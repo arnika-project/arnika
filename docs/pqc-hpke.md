@@ -2,8 +2,8 @@
 
 The **pqc-hpke** key reader derives Arnika's 32-byte PQC key by running an HPKE
 (RFC 9180) key agreement directly with the Arnika peer, over the socket Arnika
-already owns. It replaces the file-based Rosenpass reader: no external daemon,
-no key on disk, no new port.
+already owns. It replaces reading the PQC key via file from an external PQC
+provider: no external daemon, no key on disk, no new port.
 
 ## Table of Contents
 
@@ -14,7 +14,7 @@ no key on disk, no new port.
 - [Part 2 — Configuration Reference](#part-2--configuration-reference)
 - [Part 3 — Compile](#part-3--compile)
 - [Part 4 — Run](#part-4--run)
-- [Migrating from Rosenpass](#migrating-from-rosenpass)
+- [Migrating from an External PQC Provider](#migrating-from-an-external-pqc-provider)
 - [Testing the Module](#testing-the-module)
 - [Security Notes](#security-notes)
 - [References](#references)
@@ -32,7 +32,7 @@ no key on disk, no new port.
 | Ciphersuite | MLKEM1024-P384 · HKDF-SHA384 · ExportOnly |
 | Dependencies | Go standard library only (`crypto/hpke`, `crypto/hkdf`, `crypto/sha3`) |
 | Key at rest | none |
-| Replaces | Rosenpass / `PQC_PSK_FILE` |
+| Replaces | External PQC provider via `PQC_PSK_FILE` |
 
 ## How the Module Works
 
@@ -212,9 +212,9 @@ Confirm the PSK rotates on the interface:
 sudo wg show qcicat0 preshared-keys
 ```
 
-## Migrating from Rosenpass
+## Migrating from an External PQC Provider
 
-1. Stop and disable the Rosenpass service on both hosts.
+1. Stop and disable the external PQC provider on both hosts.
 2. Remove `PQC_PSK_FILE` from the Arnika environment; it no longer exists and is
    ignored.
 3. Set `PQC_ENABLED=true` on both peers.
@@ -224,8 +224,8 @@ sudo wg show qcicat0 preshared-keys
    key per direction.
 6. Watch for `pqc-hpke: round … agreed a fresh PQC key` on both ends.
 
-The key material Rosenpass wrote is no longer read. Delete the key files and
-their directory once the tunnel is confirmed working.
+The key material the external provider wrote is no longer read. Delete the key
+files and their directory once the tunnel is confirmed working.
 
 ## Testing the Module
 
