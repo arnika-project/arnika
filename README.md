@@ -63,8 +63,8 @@ is allowed to fall back to if one key source fails:
 
 | Mode | `MODE` value | Key sources | Behaviour |
 |---|---|---|---|
-| (A) QKD | `AtLeastQkdRequired` _(default)_ | QKD, PQC optional | QKD key is mandatory; PQC is mixed in when `PQC_ENABLED=true` |
-| (B) PQC | `AtLeastPqcRequired` | PQC, QKD optional | PQC key is mandatory (`PQC_ENABLED=true` required) |
+| (A) QKD | `AtLeastQkdRequired` _(default)_ | QKD, PQC optional | QKD key is mandatory; PQC is mixed in unless `PQC_ENABLED=false` |
+| (B) PQC | `AtLeastPqcRequired` | PQC, QKD optional | PQC key is mandatory, so `PQC_ENABLED` must stay enabled |
 | (C) hybrid | `QkdAndPqcRequired` | QKD **and** PQC | Both keys mandatory — no fallback, the strictest mode |
 | — | `EitherQkdOrPqcRequired` | QKD **or** PQC | Either source alone is accepted; the weakest mode |
 
@@ -471,14 +471,17 @@ start without them.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `PQC_ENABLED` | ➖ | `false` | Enables the **pqc-hpke** key agreement: Arnika negotiates the PQC key with its peer over the existing socket, using HPKE (RFC 9180) with MLKEM1024-P384. No external daemon, no key on disk, no new port |
+| `PQC_ENABLED` | ➖ | `true` | The **pqc-hpke** key agreement: Arnika negotiates the PQC key with its peer over the existing socket, using HPKE (RFC 9180) with MLKEM1024-P384. No external daemon, no key on disk, no new port. **On by default** — set `false` to run QKD-only |
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
 | `PQC_MAX_KEY_AGE` | ➖ | `2 × INTERVAL` | Staleness threshold for the agreed key |
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline; must be shorter than `PQC_ROUND_INTERVAL` |
 | `MODE` | ➖ | `AtLeastQkdRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired` or `EitherQkdOrPqcRequired` — see the mode table above |
 
 `PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` must be identical on both peers.
-See [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for the full module document.
+Because the agreement is on by default, a peer that runs with it disabled while
+its partner does not will never contribute PQC material, and the outcome then
+depends on `MODE`. See [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for the full
+module document.
 
 ## Key writer — WireGuard
 

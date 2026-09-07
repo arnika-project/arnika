@@ -114,7 +114,7 @@ func TestParse(t *testing.T) {
 		Interval:               time.Second * 10,       // Actual default value for Interval
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
-		PQCEnabled:             false,            // Default: PQC key agreement off
+		PQCEnabled:             true,             // Default: PQC key agreement on
 		PQCRoundInterval:       time.Second * 10, // Defaults to INTERVAL
 		PQCMaxKeyAge:           time.Second * 20, // Defaults to 2 x INTERVAL
 		PQCRoundTimeout:        time.Millisecond * 2500,

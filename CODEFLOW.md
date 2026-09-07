@@ -102,7 +102,7 @@ sequenceDiagram
 
 ## PQC Key Agreement Round (`pqc-hpke`)
 
-When `PQC_ENABLED=true`, a second exchange runs over the same socket as one
+Unless `PQC_ENABLED=false`, a second exchange runs over the same socket as one
 additional packet type (`PacketPQC`), producing the PQC half of the PSK. It is
 independent of the QKD flow above: `setPSK()` simply consumes whichever key is
 current.

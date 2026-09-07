@@ -24,7 +24,7 @@ provider: no external daemon, no key on disk, no new port.
 | Property | Value |
 |---|---|
 | Kind | Key reader (unmanaged) |
-| Selection | Runtime, via `PQC_ENABLED` |
+| Selection | Runtime, via `PQC_ENABLED` — **enabled by default** |
 | Build tag | _(none — always compiled)_ |
 | Platform | any |
 | Adapter | [`repositories/pqc-hpke.go`](../repositories/pqc-hpke.go) |
@@ -131,13 +131,19 @@ Requirements:
 
 | Env var | Required | Default | Description |
 |---|---|---|---|
-| `PQC_ENABLED` | ➖ | `false` | Enables the PQC key agreement |
+| `PQC_ENABLED` | ➖ | `true` | The PQC key agreement. **On by default**: set `false` to run QKD-only |
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
 | `PQC_MAX_KEY_AGE` | ➖ | `2 × INTERVAL` | Staleness threshold; one round of loss tolerance |
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline. **Must be shorter than `PQC_ROUND_INTERVAL`**, or rounds would overlap; this is rejected at startup |
 
 These must be **identical on both peers**: `PQC_ENABLED`, `PQC_ROUND_INTERVAL`
 and `MODE`. `INTERVAL` must already match for role election to work.
+
+The agreement runs unless it is switched off, so an upgraded deployment starts
+negotiating PQC material without any configuration change. Until the first
+round completes, `GetNewKey()` has nothing to return and `MODE` decides what
+happens — with the default `AtLeastQkdRequired` that is a warning and a
+fallback to the QKD key alone.
 
 `MODE` decides what happens when the PQC key is missing or stale — unchanged
 from the file-based reader:
@@ -217,7 +223,8 @@ sudo wg show qcicat0 preshared-keys
 1. Stop and disable the external PQC provider on both hosts.
 2. Remove `PQC_PSK_FILE` from the Arnika environment; it no longer exists and is
    ignored.
-3. Set `PQC_ENABLED=true` on both peers.
+3. Nothing to enable: `PQC_ENABLED` defaults to `true`. Set it to `false` only
+   to opt out of PQC entirely.
 4. Confirm `ARNIKA_PSK` is set, identical, and at least 32 bytes.
 5. Restart **both peers together.** A peer running the new build cannot
    authenticate one running an older build: the envelope now derives its HMAC

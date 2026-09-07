@@ -168,7 +168,8 @@ Run on both Alice and Bob:
 
 **No external PQC provider is required.** Arnika agrees the PQC key with its peer itself, using
 HPKE (RFC 9180) over the socket it already binds: no daemon to install, no key on disk, no extra
-port. Set `PQC_ENABLED=true` on both peers and see [`docs/pqc-hpke.md`](docs/pqc-hpke.md).
+port. It is **enabled by default** on both peers — see
+[`docs/pqc-hpke.md`](docs/pqc-hpke.md). Set `PQC_ENABLED="false"` to run QKD-only.
 
 Earlier releases read the key via file from an external PQC provider, configured with
 `PQC_PSK_FILE`. That mechanism has been removed; the variable is ignored.
@@ -359,8 +360,9 @@ Run on both Alice and Bob:
   KMS_URL="https://<ALICE_KMS_SERVER>:7000/api/v1/keys/arnika-bob"
   WIREGUARD_INTERFACE="qcicat0"
   WIREGUARD_PEER_PUBLIC_KEY="<BOB_WIREGUARD_PUBLIC_KEY>"
-  # Uncomment to enable the PQC key agreement (must match on both peers):
-  #PQC_ENABLED="true"
+  # The PQC key agreement is on by default; uncomment to run QKD-only
+  # (must match on both peers):
+  #PQC_ENABLED="false"
   EOF
 
   sudo chmod 600 /opt/arnika/arnika.env
@@ -381,8 +383,9 @@ Run on both Alice and Bob:
   KMS_URL="https://<BOB_KMS_SERVER>:7000/api/v1/keys/arnika-alice"
   WIREGUARD_INTERFACE="qcicat0"
   WIREGUARD_PEER_PUBLIC_KEY="<ALICE_WIREGUARD_PUBLIC_KEY>"
-  # Uncomment to enable the PQC key agreement (must match on both peers):
-  #PQC_ENABLED="true"
+  # The PQC key agreement is on by default; uncomment to run QKD-only
+  # (must match on both peers):
+  #PQC_ENABLED="false"
   EOF
 
   sudo chmod 600 /opt/arnika/arnika.env

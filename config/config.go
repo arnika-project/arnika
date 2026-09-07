@@ -201,7 +201,7 @@ func Parse() (*Config, error) {
 	}
 	// PQC key material is now agreed with the peer over HPKE and never touches
 	// disk, so there is no file path and no permission check.
-	config.PQCEnabled = getEnvOrDefault("PQC_ENABLED", "false") == "true"
+	config.PQCEnabled = getEnvOrDefault("PQC_ENABLED", "true") == "true"
 	config.PQCRoundInterval, err = time.ParseDuration(getEnvOrDefault("PQC_ROUND_INTERVAL", config.Interval.String()))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse PQC_ROUND_INTERVAL: %w", err)

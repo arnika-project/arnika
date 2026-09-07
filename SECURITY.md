@@ -365,8 +365,9 @@ of larger datagrams once per interval. Claims about this port should say *unscan
   client-certificate authentication (these do not apply to the inter-peer channel)
 - [ ] For the MikroTik key writer: `MIKROTIK_CA_CERTIFICATE` is set, `MIKROTIK_TLS_INSECURE` is
   **not** enabled, and the router account is restricted to writing the peer PSK
-- [ ] If the PQC key agreement is used: `PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` are
-  identical on both peers, and `PQC_ROUND_TIMEOUT` is shorter than `PQC_ROUND_INTERVAL`
+- [ ] The PQC key agreement is on by default: `PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` are
+  identical on both peers, and `PQC_ROUND_TIMEOUT` is shorter than `PQC_ROUND_INTERVAL`. Disabling
+  it with `PQC_ENABLED=false` leaves the PSK dependent on QKD alone
 - [ ] `ARNIKA_PSK` rotation is scheduled for long-lived deployments
 - [ ] The KMS mock (`tools/kms`) is **not** deployed or reachable in production
 - [ ] WireGuard `INTERVAL` and Arnika `INTERVAL` are aligned (recommended: `120s`)
