@@ -74,12 +74,12 @@ if [ "$PSK_A" = "$PSK_B" ]; then
 
     # Check Arnika logs
     echo ""
-    echo "Node-A Arnika logs (last 10 lines):"
-    docker exec clab-arnika-ci-test-node-a tail -n 10 /tmp/arnika.log || echo "No logs available"
+    echo "Node-A Arnika logs (last 20 lines):"
+    docker exec clab-arnika-ci-test-node-a tail -n 20 /tmp/arnika.log || echo "No logs available"
 
     echo ""
-    echo "Node-B Arnika logs (last 10 lines):"
-    docker exec clab-arnika-ci-test-node-b tail -n 10 /tmp/arnika.log || echo "No logs available"
+    echo "Node-B Arnika logs (last 20 lines):"
+    docker exec clab-arnika-ci-test-node-b tail -n 20 /tmp/arnika.log || echo "No logs available"
 
     exit 0
 else
