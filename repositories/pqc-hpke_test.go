@@ -784,3 +784,113 @@ func TestPQCRunAgreesAKeyBeforeTheFirstBoundary(t *testing.T) {
 	}
 	t.Fatalf("no key within 6s at a %s interval: the startup round did not run", interval)
 }
+
+// TestPQCNextRoundServesAFutureBoundary pins the scheduling decision. Both
+// peers derive it from the clock alone, so it must never name a boundary that
+// has passed, never sleep into the past, and depend on nothing finer than which
+// interval the caller is in.
+func TestPQCNextRoundServesAFutureBoundary(t *testing.T) {
+	const interval = 5 * time.Second
+	const timeout = 1250 * time.Millisecond
+
+	// Walk a whole interval in 10 ms steps, crossing the ideal start instant.
+	base := time.Unix(1788781835, 0) // a boundary, from the CI run
+	for off := 0; off < 5000; off += 10 {
+		now := base.Add(time.Duration(off) * time.Millisecond)
+		round, wake := pqcNextRound(now, interval, timeout)
+
+		boundary := time.Unix(int64(round)*5, 0)
+		if !boundary.After(now) {
+			t.Fatalf("at +%dms round %d serves boundary %s, which is not in the future", off, round, boundary)
+		}
+		if wake.Before(now) {
+			t.Fatalf("at +%dms the wake %s is in the past", off, wake)
+		}
+		if wake.After(boundary) {
+			t.Fatalf("at +%dms the wake %s is after the boundary %s", off, wake, boundary)
+		}
+		// Every instant in one interval must map to the same round, so two peers
+		// that are merely milliseconds apart cannot disagree.
+		if want := uint32(base.Unix()/5 + 1); round != want {
+			t.Fatalf("at +%dms round=%d, want %d: the choice depends on more than the interval", off, round, want)
+		}
+	}
+}
+
+// TestPQCNextRoundAgreesAcrossPeers asserts two peers whose clocks differ by
+// less than the read gap still target the same round.
+func TestPQCNextRoundAgreesAcrossPeers(t *testing.T) {
+	const interval = 5 * time.Second
+	const timeout = 1250 * time.Millisecond
+	base := time.Unix(1788781838, 688_000_000) // node-A's start, from the CI run
+
+	roundA, _ := pqcNextRound(base, interval, timeout)
+	roundB, _ := pqcNextRound(base.Add(62*time.Millisecond), interval, timeout) // node-B, 62 ms later
+	if roundA != roundB {
+		t.Fatalf("peers 62ms apart targeted different rounds: %d vs %d", roundA, roundB)
+	}
+}
+
+// TestPQCRoundSurvivesTransientSendFailure reproduces the startup case from CI:
+// the peer's listener was not bound yet, so the first writes failed with ICMP
+// port-unreachable and the whole round was thrown away. A failed write must
+// cost a retry instead.
+func TestPQCRoundSurvivesTransientSendFailure(t *testing.T) {
+	toInitiator := make(chan []byte, 64)
+	toResponder := make(chan []byte, 64)
+
+	deliver := func(dst chan []byte) func([]byte) error {
+		return func(frame []byte) error {
+			cp := make([]byte, len(frame))
+			copy(cp, frame)
+			select {
+			case dst <- cp:
+			default:
+			}
+			return nil
+		}
+	}
+
+	var mu sync.Mutex
+	remaining := 2 // both frames of the initiator's first message fail
+	initiatorSend := func(frame []byte) error {
+		mu.Lock()
+		if remaining > 0 {
+			remaining--
+			mu.Unlock()
+			return fmt.Errorf("write udp 10.0.0.1:46886->10.0.0.2:9998: write: connection refused")
+		}
+		mu.Unlock()
+		return deliver(toResponder)(frame)
+	}
+
+	const interval = 10 * time.Second
+	initiator, err := NewPQCHPKERepository(toInitiator, initiatorSend,
+		func(uint32) bool { return true }, interval, 3*time.Second, time.Minute)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+	responder, err := NewPQCHPKERepository(toResponder, deliver(toInitiator),
+		func(uint32) bool { return false }, interval, 3*time.Second, time.Minute)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+
+	p := &pqcPipe{initiator: initiator, responder: responder}
+	errInit, errResp := p.run(t, 357756367, 15*time.Second)
+	if errInit != nil || errResp != nil {
+		t.Fatalf("a round must survive two failed writes: %v / %v", errInit, errResp)
+	}
+
+	keyA, err := p.initiator.GetNewKey()
+	if err != nil {
+		t.Fatalf("initiator GetNewKey: %v", err)
+	}
+	keyB, err := p.responder.GetNewKey()
+	if err != nil {
+		t.Fatalf("responder GetNewKey: %v", err)
+	}
+	if !bytes.Equal(keyA, keyB) {
+		t.Fatal("peers published different keys")
+	}
+}
