@@ -259,7 +259,7 @@ Which peer requests a new key in a given interval is decided locally by
 ### KMS Client Certificates (`CERTIFICATE`, `PRIVATE_KEY`, `CA_CERTIFICATE`)
 
 These three variables configure **client-certificate authentication towards the KMS only**
-(`repositories/kms.go`, wired in `keyreader.go`). They are used for the ETSI GS QKD 014 HTTPS
+(`repositories/kms.go`, wired in `qkdkms.go`). They are used for the ETSI GS QKD 014 HTTPS
 connection and for nothing else — in particular they do not protect the inter-peer channel.
 
 They are **all-or-nothing**: if any one of them is empty, client-certificate authentication is

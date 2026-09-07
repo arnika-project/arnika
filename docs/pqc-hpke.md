@@ -121,7 +121,7 @@ bounds how long a lone key can be used.
 | Concern | Location |
 |---|---|
 | Frame layer, HPKE core, transport, scheduler | [`repositories/pqc-hpke.go`](../repositories/pqc-hpke.go) |
-| Wiring, envelope sealing, peer socket | [`keyreader.go`](../keyreader.go) |
+| Wiring, envelope sealing, peer socket | [`pqchpke.go`](../pqchpke.go) |
 | Packet type and dispatch | [`auth/auth.go`](../auth/auth.go), [`udpserver.go`](../udpserver.go) |
 | Configuration | [`config/config.go`](../config/config.go) |
 
