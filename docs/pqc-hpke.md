@@ -260,7 +260,16 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
   only non-computational hedge.
 - **Forward secrecy** per round: no long-term key material exists in this path.
 - **No key at rest.** The agreed key lives in process memory only and is zeroed
-  when superseded.
+  when superseded. The zeroing and the read in `GetNewKey` are serialised by
+  `keyMu`: an `atomic.Pointer` orders the pointer but not the bytes behind it, so
+  with one the supersede could zero a buffer a caller was still copying out of
+  and hand it an all-zero key.
+- **The per-round HPKE private key is not zeroed.** `hpke.PrivateKey` exposes no
+  destroy method, so the decapsulation key stays in the heap until the GC
+  reclaims it. It is per-round and useless without that round's encapsulation off
+  the wire, and anyone able to read Arnika's heap can read the published key
+  directly. `hardenProcess()` is what keeps the heap unreadable: `PR_SET_DUMPABLE=0`,
+  `RLIMIT_CORE=0` and `mlockall`, see [`CODEFLOW.md`](../CODEFLOW.md).
 - **Denial of service:** nothing reaches `crypto/hpke` before HMAC verification
   and AEAD decryption succeed, so an unauthenticated packet costs one
   HMAC-SHA256. Frames go only to the pinned peer address, never to an observed

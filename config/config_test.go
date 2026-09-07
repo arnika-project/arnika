@@ -63,11 +63,11 @@ func TestParse_ArnikaPSKValidation(t *testing.T) {
 }
 
 func TestRedactSecret(t *testing.T) {
-	if got := redactSecret(""); got != "(unset)" {
-		t.Errorf("redactSecret(\"\") = %q, want \"(unset)\"", got)
+	if got := redactSecret(nil); got != "(unset)" {
+		t.Errorf("redactSecret(nil) = %q, want \"(unset)\"", got)
 	}
 	secret := "super-secret-value"
-	got := redactSecret(secret)
+	got := redactSecret([]byte(secret))
 	if strings.Contains(got, secret) {
 		t.Errorf("redactSecret leaked the secret: %q", got)
 	}
@@ -101,7 +101,7 @@ func TestParse(t *testing.T) {
 		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
 		ArnikaID:               "8080",
-		ArnikaPSK:              testArnikaPSK,
+		ArnikaPSK:              []byte(testArnikaPSK),
 		Certificate:            "",                     // Default value for Certificate
 		PrivateKey:             "",                     // Default value for PrivateKey
 		CACertificate:          "",                     // Default value for CACertificate
@@ -233,7 +233,7 @@ func TestIsQKDRequired(t *testing.T) {
 }
 
 func TestIsPrimary(t *testing.T) {
-	psk := "shared-secret-key"
+	psk := []byte("shared-secret-key")
 	nodeA := &Config{ArnikaID: "9999", ArnikaPSK: psk}
 	nodeB := &Config{ArnikaID: "9998", ArnikaPSK: psk}
 

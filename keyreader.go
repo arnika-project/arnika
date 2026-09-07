@@ -35,7 +35,7 @@ func pqcSender(cfg *config.Config, dirOut auth.Direction) (func([]byte) error, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial peer %s: %w", cfg.ServerAddress, err)
 	}
-	psk := []byte(cfg.ArnikaPSK)
+	psk := cfg.ArnikaPSK
 
 	return func(frame []byte) error {
 		encrypted, err := auth.Encrypt(psk, frame)

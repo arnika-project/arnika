@@ -546,6 +546,69 @@ func TestPQCPublishRejectsWrongLength(t *testing.T) {
 	}
 }
 
+// TestPQCPublishDoesNotCorruptConcurrentGetNewKey pins the fix for a data race
+// between the round goroutine and the rekeying goroutine.
+//
+// publish() zeroes the buffer it supersedes, and GetNewKey() copies out of the
+// buffer it has taken a reference to. While the register was an atomic.Pointer
+// the two were ordered on the pointer but not on the bytes behind it, so a
+// publish landing between GetNewKey's load and its copy zeroed the array being
+// read and returned 32 zero bytes - which nothing downstream rejects, and which
+// kdf.DeriveKey folds straight into the WireGuard PSK.
+//
+// The defaults put both callers on the same clock boundary (PQC_ROUND_INTERVAL
+// defaults to INTERVAL), so this is not a far-fetched interleaving. Before the
+// fix this test failed within a few hundred iterations; -race alone does not
+// catch it, because the atomic Swap/Load supplied a partial happens-before edge.
+func TestPQCPublishDoesNotCorruptConcurrentGetNewKey(t *testing.T) {
+	r, err := NewPQCHPKERepository(make(chan []byte, 1), func([]byte) error { return nil },
+		func(uint32) bool { return true }, time.Minute, time.Second, time.Hour)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+
+	want := make([]byte, pqcKeyLen)
+	if _, err := rand.Read(want); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	if err := r.publish(want); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+
+	const iterations = 20000
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			if err := r.publish(want); err != nil {
+				t.Errorf("publish: %v", err)
+				return
+			}
+		}
+	}()
+	corrupted := 0
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			got, err := r.GetNewKey()
+			if err != nil {
+				t.Errorf("GetNewKey: %v", err)
+				return
+			}
+			if !bytes.Equal(got, want) {
+				corrupted++
+			}
+		}
+	}()
+	wg.Wait()
+
+	if corrupted != 0 {
+		t.Fatalf("GetNewKey returned a corrupted key %d times out of %d: publish zeroed a buffer that was still being read",
+			corrupted, iterations)
+	}
+}
+
 // TestPQCConcurrentRoundRejected asserts that only one round is ever active.
 func TestPQCConcurrentRoundRejected(t *testing.T) {
 	inbound := make(chan []byte, 1)

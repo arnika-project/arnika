@@ -6,6 +6,7 @@ require (
 	github.com/containernetworking/plugins v1.9.1
 	github.com/google/uuid v1.6.0
 	golang.org/x/crypto v0.52.0
+	golang.org/x/sys v0.45.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20230429144221-925a1e7659e6
 )
 
@@ -17,6 +18,5 @@ require (
 	github.com/mdlayher/socket v0.5.1 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173 // indirect
 )

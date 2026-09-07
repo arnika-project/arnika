@@ -22,7 +22,7 @@ type Config struct {
 	ListenAddress          string        // LISTEN_ADDRESS, Address to listen on for incoming connections
 	ServerAddress          string        // SERVER_ADDRESS, Address of the arnika server
 	ArnikaID               string        // ARNIKA_ID, up to 5-digit identifier (defaults to port number from ListenAddress)
-	ArnikaPSK              string        // ARNIKA_PSK, PSK to authenticate with the other peer
+	ArnikaPSK              []byte        // ARNIKA_PSK, PSK to authenticate with the other peer
 	Certificate            string        // CERTIFICATE, Path to the client certificate file
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
@@ -64,7 +64,7 @@ func (c *Config) IsQKDRequired() bool {
 // has the lowest bit == 0 is PRIMARY for that interval. Because two peers
 // with different ArnikaIDs XOR different values, they get opposite results.
 func (c *Config) IsPrimary(intervalNum uint64) bool {
-	mac := hmac.New(sha256.New, []byte(c.ArnikaPSK))
+	mac := hmac.New(sha256.New, c.ArnikaPSK)
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], intervalNum)
 	mac.Write(buf[:])
@@ -124,11 +124,20 @@ func (c *Config) PrintStartupConfig() {
 
 // redactSecret keeps secret material out of the startup config dump, which is
 // written to stdout and from there into journals and log aggregation.
-func redactSecret(s string) string {
-	if s == "" {
+func redactSecret(b []byte) string {
+	if len(b) == 0 {
 		return "(unset)"
 	}
-	return fmt.Sprintf("(set, %d bytes)", len(s))
+	return fmt.Sprintf("(set, %d bytes)", len(b))
+}
+
+// ZeroSecrets wipes the secret material held on the Config.
+//
+// ArnikaPSK is a []byte and not a string precisely so that this is possible:
+// Go strings are immutable, so a secret held as one stays in the heap for the
+// process lifetime with no way to overwrite it.
+func (c *Config) ZeroSecrets() {
+	clear(c.ArnikaPSK)
 }
 
 // Parse parses the configuration values from environment variables and returns a Config pointer.
@@ -241,8 +250,13 @@ func Parse() (*Config, error) {
 	// ARNIKA_PSK is the sole authentication root for the peer protocol: an
 	// unset value makes the HMAC key SHA-256(""), a publicly computable
 	// constant, and anyone can then inject valid packets.
-	config.ArnikaPSK = getEnvOrDefault("ARNIKA_PSK", "")
-	if config.ArnikaPSK == "" {
+	//
+	// Held as []byte, not string: every consumer needs bytes, so a string field
+	// would mean a fresh, unclearable heap copy of the authentication root on
+	// every interval and every PQC round. One conversion here, cleared by
+	// ZeroSecrets, replaces all of them.
+	config.ArnikaPSK = []byte(getEnvOrDefault("ARNIKA_PSK", ""))
+	if len(config.ArnikaPSK) == 0 {
 		return nil, fmt.Errorf("[ERROR] ARNIKA_PSK is not set; refusing to start")
 	}
 	if len(config.ArnikaPSK) < minArnikaPSKLen {

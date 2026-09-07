@@ -94,7 +94,9 @@ sequenceDiagram
 - **AES-256-GCM:** Used for encrypting key material (`Encrypt`, `Decrypt`), keyed by `ARNIKA_PSK` (`deriveKey`).
 - **Rate Limiting:** Per-IP token bucket checked before any crypto — `RATE_LIMIT` packets per `RATE_WINDOW`, default 30 per minute.
 - **Timestamp Validation:** Replay protection over a ±`MAX_CLOCK_SKEW` window, default ±1m.
-- **Zeroization:** All sensitive key material is handled inside `runtime/secret.Do` blocks to minimize memory exposure. This requires `GOEXPERIMENT=runtimesecret` at build time.
+- **Zeroization:** All sensitive key material is handled inside `runtime/secret.Do` blocks to minimize memory exposure. This requires `GOEXPERIMENT=runtimesecret` at build time. `secret.Do` erases registers, stack and unreachable heap allocations **only on `linux/amd64` and `linux/arm64`**; on every other platform it just calls its function. `main()` probes this at startup (`secret.Enabled()` from inside a `Do` block, since it reports the nesting depth) and logs a warning when the erasure is inert, so a build for an unsupported `GOARCH` cannot silently look hardened.
+- **Process hardening:** `hardenProcess()` (`hardening_linux.go`) runs before the configuration is read, so `ARNIKA_PSK` never exists in an exposed process. It sets `PR_SET_DUMPABLE=0` (no core dump; `/proc/<pid>/{mem,environ,maps}` become root-owned and `ptrace` attach needs `CAP_SYS_PTRACE`), `RLIMIT_CORE=0` (a piped `kernel.core_pattern` ignores the dumpable flag), and `mlockall(MCL_CURRENT|MCL_FUTURE)` to keep key material out of swap. Each step is best effort and failures are logged, not fatal: a container without `CAP_IPC_LOCK` must still rekey its tunnel. `mlockall` needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`, since the limit is charged against locked address space and Go reserves ~1.2 GB of arena; a refused lock is safe because `MCL_FUTURE` only takes effect once `mlockall` succeeds.
+- **Secret lifetime:** `ARNIKA_PSK` is held as `[]byte` on `config.Config`, not `string`: Go strings are immutable, so a secret held as one cannot be overwritten and every consumer needing bytes would leave a fresh unclearable heap copy behind on each interval and each PQC round. `main()` drops the variable from the environment with `os.Unsetenv` after parsing and wipes the field via `cfg.ZeroSecrets()` on shutdown. `os.Unsetenv` prevents inheritance by a child process but does **not** scrub `/proc/<pid>/environ`, which reflects the environment as of `execve`; `PR_SET_DUMPABLE=0` is what makes that unreadable.
 
 ---
 
@@ -119,11 +121,11 @@ stateDiagram-v2
   AwaitConfirm --> Publishing: peer tag matches (constant-time)
   AwaitConfirm --> Failed: tag mismatch - divergent keys
   AwaitConfirm --> Failed: round deadline exceeded
-  Publishing --> Idle: publish, zero the private key and enc
+  Publishing --> Idle: publish, zero the exported key and enc
   Failed --> Idle: log, keep the previous key until PQC_MAX_KEY_AGE
 ```
 
-Three properties are worth stating explicitly:
+Four properties are worth stating explicitly:
 
 - **Nothing is published before confirmation succeeds.** ML-KEM decapsulation
   never fails - a malformed encapsulation returns a pseudorandom key rather than
@@ -136,6 +138,15 @@ Three properties are worth stating explicitly:
 - **A failed round publishes nothing.** The previous key stays live until
   `PQC_MAX_KEY_AGE`, after which `GetNewKey()` errors and the existing `Mode`
   logic decides. No new fail-closed policy is introduced.
+- **The HPKE private key is not zeroed, because it cannot be.** The round zeroes
+  the exported 32-byte key and the encapsulation, and `publish` zeroes the key it
+  supersedes. The per-round decapsulation key is not zeroable: `hpke.PrivateKey`
+  exposes only `KEM()`, `Bytes()` and `PublicKey()`, with no destroy method, so
+  it stays in the heap until the GC reclaims it. Recovering it would additionally
+  require the round's encapsulation off the wire, and an attacker who can read
+  Arnika's heap can read the published key directly, so this widens no realistic
+  attack. See [Security Mechanisms in Code](#security-mechanisms-in-code) for the
+  process hardening that keeps the heap unreadable in the first place.
 
 See [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for the full module document.
 

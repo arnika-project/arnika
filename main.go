@@ -11,6 +11,7 @@ import (
 
 	"os"
 
+	"runtime"
 	"runtime/secret"
 	"time"
 
@@ -103,9 +104,36 @@ func main() {
 		flag.Usage()
 		os.Exit(0)
 	}
+
+	// Harden before the configuration is read, so ARNIKA_PSK never exists in a
+	// process that can be core-dumped, ptraced by its own user, or swapped out.
+	for _, err := range hardenProcess() {
+		log.Printf("[WARNING] process hardening incomplete: %v", err)
+	}
+	// runtime/secret erases registers, stack and unreachable heap allocations,
+	// but only on linux/amd64 and linux/arm64; everywhere else secret.Do simply
+	// calls its function. Enabled() reports the Do nesting depth, so it has to
+	// be asked from inside a Do block.
+	secretErasure := false
+	secret.Do(func() { secretErasure = secret.Enabled() })
+	if !secretErasure {
+		log.Printf("[WARNING] runtime/secret erasure is inert on %s/%s: key material is not wiped from registers, stack or freed heap",
+			runtime.GOOS, runtime.GOARCH)
+	}
+
 	cfg, err := config.Parse()
 	if err != nil {
 		log.Fatalf("[ERROR] failed to parse config: %v", err)
+	}
+	// The PSK now lives in cfg.ArnikaPSK, which ZeroSecrets can wipe. Drop the
+	// runtime's environment copy so it is neither inherited by a child process
+	// nor echoed by an accidental os.Environ() dump.
+	//
+	// This does NOT scrub /proc/<pid>/environ, which reflects the environment as
+	// of execve and is not writable from here; PR_SET_DUMPABLE above is what
+	// keeps that unreadable.
+	if err := os.Unsetenv("ARNIKA_PSK"); err != nil {
+		log.Printf("[WARNING] failed to drop ARNIKA_PSK from the environment: %v", err)
 	}
 	cfg.PrintStartupConfig()
 	var colorStart, colorEnd string
@@ -152,7 +180,7 @@ func main() {
 		go pqcRepo.Run(pqcCtx)
 	}
 
-	go udpServer(cfg.ListenAddress, []byte(cfg.ArnikaPSK), dirOut, dirIn, result, done, pqcInbound, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
+	go udpServer(cfg.ListenAddress, cfg.ArnikaPSK, dirOut, dirIn, result, done, pqcInbound, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
 	go func() {
 		for {
 			r := <-result
@@ -205,7 +233,7 @@ func main() {
 							continue
 						}
 						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress)
-						err = udpClient(cfg.ServerAddress, []byte(cfg.ArnikaPSK), dirOut, dirIn, *key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
+						err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, *key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
 						if err != nil {
 							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress, err)
 						}
@@ -218,4 +246,5 @@ func main() {
 		}
 	}()
 	<-done
+	cfg.ZeroSecrets()
 }

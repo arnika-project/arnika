@@ -23,7 +23,6 @@ import (
 	"log"
 	"runtime/secret"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -363,7 +362,14 @@ type PQCHPKERepository struct {
 	roundTimeout  time.Duration
 	maxAge        time.Duration
 
-	latest atomic.Pointer[pqcResult]
+	// keyMu guards latest and the zeroing of the buffer it supersedes.
+	//
+	// An atomic.Pointer is not enough here: it orders the pointer, not the bytes
+	// behind it. With one, publish() could zero the superseded buffer while
+	// GetNewKey() was still copying out of it after its own Load, handing the
+	// caller an all-zero 32-byte "key" that nothing downstream rejects.
+	keyMu  sync.RWMutex
+	latest *pqcResult
 
 	mu     sync.Mutex
 	active bool // at most one round in flight
@@ -419,12 +425,19 @@ func pqcRoundIndex(t time.Time, interval time.Duration) uint32 {
 
 // GetNewKey implements services.KeyReaderUnmanaged.
 //
-// It reads an atomic register rather than a channel: it is called synchronously
-// from setPSK(), must never block, may be called more than once per round, and
-// needs the key's age. Staleness is reported as an error, leaving the decision
-// to setPSK()'s existing IsPQCRequired() branch - no new policy is added here.
+// It reads a register rather than a channel: it is called synchronously from
+// setPSK(), may be called more than once per round, and needs the key's age.
+// Staleness is reported as an error, leaving the decision to setPSK()'s existing
+// IsPQCRequired() branch - no new policy is added here.
+//
+// The read lock is held only for a 32-byte copy, and the sole writer holds the
+// write lock for a copy plus a clear, so this cannot block for a meaningful
+// amount of time even though it is on the synchronous rekeying path.
 func (r *PQCHPKERepository) GetNewKey() ([]byte, error) {
-	v := r.latest.Load()
+	r.keyMu.RLock()
+	defer r.keyMu.RUnlock()
+
+	v := r.latest
 	if v == nil {
 		return nil, fmt.Errorf("pqc-hpke: no key agreed yet")
 	}
@@ -439,13 +452,24 @@ func (r *PQCHPKERepository) GetNewKey() ([]byte, error) {
 
 // publish installs a freshly agreed key and zeroes the one it supersedes.
 // Callers must not reach here before confirmation has succeeded.
+//
+// The swap and the clear both happen under the write lock. Zeroing the
+// superseded buffer outside it would race a GetNewKey() that had already taken
+// its reference, and hand that caller an all-zero key: sync.RWMutex.Lock waits
+// for every outstanding reader, so once it is held no reader can still be
+// reading prev.key.
 func (r *PQCHPKERepository) publish(key []byte) error {
 	if len(key) != pqcKeyLen {
 		return fmt.Errorf("pqc-hpke: refusing to publish %d-byte key, want %d", len(key), pqcKeyLen)
 	}
 	k := make([]byte, pqcKeyLen)
 	copy(k, key)
-	prev := r.latest.Swap(&pqcResult{key: k, at: time.Now()})
+
+	r.keyMu.Lock()
+	defer r.keyMu.Unlock()
+
+	prev := r.latest
+	r.latest = &pqcResult{key: k, at: time.Now()}
 	if prev != nil {
 		clear(prev.key)
 	}

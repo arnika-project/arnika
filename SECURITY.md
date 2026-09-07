@@ -196,6 +196,26 @@ Key implications for security:
 - **No PSK is persisted to disk.** Key material is held in memory only during the active rekeying
   window and passed directly to the kernel via Netlink. Any path that causes the PSK to be logged
   or written to disk is a high-severity finding.
+- **Two implicit paths to disk are closed at startup, not by policy.** Memory-only is not the same
+  as disk-free: a core dump and the swap file both write the heap out. `hardenProcess()`
+  (`hardening_linux.go`) therefore sets `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0` and
+  `mlockall(MCL_CURRENT|MCL_FUTURE)` before the configuration is read, so `ARNIKA_PSK` never exists
+  in a process that can be dumped, swapped, or `ptrace`d by its own user. Each step is best effort:
+  a container without `CAP_IPC_LOCK` logs a warning and keeps running, so **check the startup log**
+  if these guarantees matter to your deployment.
+- **Swap protection needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`.** A finite `RLIMIT_MEMLOCK`
+  does not work and cannot be tuned around: the limit is charged against locked *address space*,
+  and the Go runtime reserves roughly 1.2 GB of heap arena, so `mlockall` returns `ENOMEM` for
+  anything short of unlimited. Verified in a container on `golang:1.27`: `VmLck` 1261164 kB with
+  `CAP_IPC_LOCK`, `ENOMEM` without it even at a 1 GiB limit. A refused lock is safe, not merely
+  tolerated, because `MCL_FUTURE` only takes effect once `mlockall` succeeds and so cannot turn a
+  later mapping into a fatal out-of-memory. The other two steps still apply.
+- **`ARNIKA_PSK` remains visible in `/proc/<pid>/environ` to root.** It is dropped from the Go
+  runtime's environment after parsing, so it is not inherited by a child process, but the kernel's
+  copy reflects the environment as of `execve` and cannot be rewritten from inside the process.
+  `PR_SET_DUMPABLE=0` is what restricts that file to root. Passing the secret via a systemd
+  credential or a `LoadCredential=` file rather than the environment removes the exposure entirely;
+  a same-uid process cannot read it either way once the process is non-dumpable.
 
 ### Inter-Peer Channel Authentication (`ARNIKA_PSK`)
 
