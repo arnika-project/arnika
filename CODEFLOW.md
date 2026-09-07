@@ -118,9 +118,11 @@ stateDiagram-v2
   AwaitEnc --> Failed: round deadline exceeded
   Deriving --> AwaitConfirm: Export succeeded, 32 bytes, tag sent
   Deriving --> Failed: NewRecipient or Export error
-  AwaitConfirm --> Publishing: peer tag matches (constant-time)
+  AwaitConfirm --> AwaitConfirmAck: peer tag matches (constant-time)
   AwaitConfirm --> Failed: tag mismatch - divergent keys
   AwaitConfirm --> Failed: round deadline exceeded
+  AwaitConfirmAck --> Publishing: own tag acknowledged by the peer
+  AwaitConfirmAck --> Failed: no acknowledgement after three attempts
   Publishing --> Idle: publish, zero the exported key and enc
   Failed --> Idle: log, keep the previous key until PQC_MAX_KEY_AGE
 ```
@@ -130,7 +132,9 @@ Four properties are worth stating explicitly:
 - **Nothing is published before confirmation succeeds.** ML-KEM decapsulation
   never fails - a malformed encapsulation returns a pseudorandom key rather than
   an error - so the confirmation exchange is the only thing standing between a
-  corrupted message and a silently divergent PSK.
+  corrupted message and a silently divergent PSK. Both tags are acknowledged, so
+  a single lost confirm fails the round on both sides instead of committing on
+  one.
 - **The role is pinned at round start** from the round index. It is the same
   `IsPrimary` derivation used for the interval, evaluated once and held: it
   alternates per interval, so re-deriving it mid-round would flip initiator and

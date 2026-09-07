@@ -63,9 +63,9 @@ is allowed to fall back to if one key source fails:
 
 | Mode | `MODE` value | Key sources | Behaviour |
 |---|---|---|---|
-| (A) QKD | `AtLeastQkdRequired` _(default)_ | QKD, PQC optional | QKD key is mandatory; PQC is mixed in unless `PQC_ENABLED=false` |
+| (A) QKD | `AtLeastQkdRequired` | QKD, PQC optional | QKD key is mandatory; PQC is mixed in unless `PQC_ENABLED=false` |
 | (B) PQC | `AtLeastPqcRequired` | PQC, QKD optional | PQC key is mandatory, so `PQC_ENABLED` must stay enabled |
-| (C) hybrid | `QkdAndPqcRequired` | QKD **and** PQC | Both keys mandatory — no fallback, the strictest mode |
+| (C) hybrid | `QkdAndPqcRequired` _(default)_ | QKD **and** PQC | Both keys mandatory — no fallback, the strictest mode |
 | — | `EitherQkdOrPqcRequired` | QKD **or** PQC | Either source alone is accepted; the weakest mode |
 
 Regardless of the selected mode, WireGuard always receives a single 256bit (32byte) key as PSK which is used for WireGuard internal `MixKeyAndHash()` using **HKDF**.
@@ -291,7 +291,7 @@ See [`KEYCONTROL.md`](KEYCONTROL.md) for the key writer architecture and
 ```shell
 ./build/arnika
 === Arnika Configuration ===
-Arnika Mode:              AtLeastQkdRequired
+Arnika Mode:              QkdAndPqcRequired
 Arnika Interval:          2m0s
 Arnika ID:                9999
 Arnika PSK:               (set, 44 bytes)
@@ -475,7 +475,7 @@ start without them.
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
 | `PQC_MAX_KEY_AGE` | ➖ | `2 × INTERVAL` | Staleness threshold for the agreed key |
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline; must be shorter than `PQC_ROUND_INTERVAL` |
-| `MODE` | ➖ | `AtLeastQkdRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired` or `EitherQkdOrPqcRequired` — see the mode table above |
+| `MODE` | ➖ | `QkdAndPqcRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired` or `EitherQkdOrPqcRequired` — see the mode table above. The default is the **strictest** mode: both key sources are mandatory and there is no fallback |
 
 `PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` must be identical on both peers.
 Because the agreement is on by default, a peer that runs with it disabled while

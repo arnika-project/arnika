@@ -70,11 +70,31 @@ This looks redundant — both peers export from one HPKE context, so they
 "cannot" disagree. Implicit rejection is precisely the case where that intuition
 fails. Do not remove the check.
 
+The tag is a function of `(key, round)` alone, so both peers compute the same
+value and reach the same verdict; the only asymmetry is a lost frame. **Both
+tags are therefore acknowledged.** Without that, the responder published as soon
+as it had verified, and one lost confirm left it holding a key the initiator did
+not have — the very divergence the exchange exists to prevent. The initiator
+also keeps answering retries briefly after publishing, so a lost acknowledgement
+costs a retry rather than the round.
+
+A residual remains, as it must for any last message: the final acknowledgement
+is itself unacknowledged, so an exhausted retry budget can still leave the two
+sides one round apart. The next round reconverges them, and `PQC_MAX_KEY_AGE`
+bounds how long a lone key can be used.
+
 ### Round scheduling
 
 - The round index is derived from the clock, `unix / PQC_ROUND_INTERVAL`, so it
   survives an asymmetric restart. An in-memory counter would deadlock when one
   peer restarts and the other does not.
+- **A round runs immediately at startup.** Waiting for the first boundary left
+  the first rekey with no key at all — a "failed to retrieve PQC key" warning
+  and a fallback for one whole interval. This round only completes if both peers
+  start inside the same interval, so a failure is expected and logged at INFO.
+- **Later rounds are scheduled to finish before their boundary**, by waking one
+  round timeout early, so a key for that boundary exists rather than being
+  published at it.
 - **The role is pinned once at round start** and held for the whole round.
   Arnika's PRIMARY/BACKUP role alternates per interval, so re-deriving it
   mid-round would flip initiator and responder in flight and fail the round
@@ -84,6 +104,17 @@ fails. Do not remove the check.
 - Messages are sent with an ack and three retries. HPKE is single-shot, so an
   exhausted retry budget has no partial state to recover: the round fails and
   the next one proceeds.
+
+> [!IMPORTANT]
+> **Scheduling does not align the two peers' reads.** Arnika's rekey instant is
+> independent of the round boundary, so if a publish lands between the two
+> peers' `setPSK` calls, one derives the PSK from round *N* and the other from
+> *N−1*, and the tunnel drops until the next rekey. The probability is the read
+> gap divided by the interval — a few tens of milliseconds over
+> `PQC_ROUND_INTERVAL` — and it does not depend on where in the interval the
+> publish sits, so no schedule can remove it. Closing it needs the peers to
+> agree on *which* round's key a given rekey uses. That is an open design
+> question, not a settled part of this module.
 
 ## How the Module Is Constructed
 
@@ -142,15 +173,17 @@ and `MODE`. `INTERVAL` must already match for role election to work.
 The agreement runs unless it is switched off, so an upgraded deployment starts
 negotiating PQC material without any configuration change. Until the first
 round completes, `GetNewKey()` has nothing to return and `MODE` decides what
-happens — with the default `AtLeastQkdRequired` that is a warning and a
-fallback to the QKD key alone.
+happens — and with the default `QkdAndPqcRequired` that is **not** a warning
+but an abort: the interval is failed and the tunnel invalidated with a random
+PSK. This is why a round runs at startup rather than waiting for the first
+boundary.
 
 `MODE` decides what happens when the PQC key is missing or stale — unchanged
 from the file-based reader:
 
 | `MODE` | PQC key unavailable |
 |---|---|
-| `QkdAndPqcRequired` | Fatal for the interval; the tunnel is invalidated |
+| `QkdAndPqcRequired` _(default)_ | Fatal for the interval; the tunnel is invalidated |
 | `AtLeastPqcRequired` | Fatal for the interval |
 | `AtLeastQkdRequired` | Falls back to the QKD key alone |
 | `EitherQkdOrPqcRequired` | Falls back to whichever source answered |
@@ -254,6 +287,9 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
 | **`TestPQCConfirmationCatchesImplicitRejection`** | **A corrupted encapsulation raises no error from decapsulation and is caught by confirmation** |
 | `TestPQCRoundUnderLoss` | 1%, 5% and 20% frame loss: completes or fails cleanly, never hangs |
 | `TestPQCConcurrentRoundRejected` | Only one round is ever active |
+| **`TestPQCLostConfirmDoesNotPublishAlone`** | **A lost confirm fails the round on both sides rather than committing on one** |
+| `TestPQCLostConfirmAckStillConverges` | A lost confirm-ack costs a retry, not the round |
+| `TestPQCRunAgreesAKeyBeforeTheFirstBoundary` | The startup round runs without waiting for a boundary |
 
 ## Security Notes
 

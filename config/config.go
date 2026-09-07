@@ -227,7 +227,7 @@ func Parse() (*Config, error) {
 			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE must be positive, got %s", config.PQCMaxKeyAge)
 		}
 	}
-	config.Mode = getEnvOrDefault("MODE", "AtLeastQkdRequired")
+	config.Mode = getEnvOrDefault("MODE", "QkdAndPqcRequired")
 	if config.Mode != "QkdAndPqcRequired" && config.Mode != "AtLeastQkdRequired" && config.Mode != "AtLeastPqcRequired" && config.Mode != "EitherQkdOrPqcRequired" {
 		return nil, fmt.Errorf("[ERROR] invalid MODE value: %s", config.Mode)
 	}
