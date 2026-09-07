@@ -78,7 +78,7 @@ func TestRedactSecret(t *testing.T) {
 
 func TestParse(t *testing.T) {
 	// Test case 1: Missing environment variable
-	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "KMS_URL", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY", "ARNIKA_PSK"} {
+	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY", "ARNIKA_PSK"} {
 		_, err := Parse()
 		if err == nil {
 			t.Errorf("Expected an error for missing %s", mandatoryEnvVar)
@@ -253,5 +253,39 @@ func TestIsPrimary(t *testing.T) {
 		if first != second {
 			t.Fatalf("interval %d: IsPrimary is not deterministic", i)
 		}
+	}
+}
+
+// TestValidateKeySources covers the compile-time/runtime mismatches: a MODE or
+// PQC_ENABLED that the readers built into the binary cannot serve. KMS_URL is
+// mandatory here rather than in Parse, because only the caller knows whether a
+// QKD reader was compiled in.
+func TestValidateKeySources(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		qkd     bool
+		wantErr bool
+	}{
+		{"both readers, default mode", Config{KMSURL: "https://kms.example", Mode: "QkdAndPqcRequired", PQCEnabled: true}, true, false},
+		{"both readers, qkd mode", Config{KMSURL: "https://kms.example", Mode: "AtLeastQkdRequired", PQCEnabled: true}, true, false},
+		{"qkd reader without KMS_URL", Config{Mode: "AtLeastQkdRequired", PQCEnabled: true}, true, true},
+		{"qkd_none with KMS_URL", Config{KMSURL: "https://kms.example", Mode: "AtLeastPqcRequired", PQCEnabled: true}, false, true},
+		{"qkd_none, pqc required", Config{Mode: "AtLeastPqcRequired", PQCEnabled: true}, false, false},
+		{"qkd_none, qkd required", Config{Mode: "AtLeastQkdRequired", PQCEnabled: true}, false, true},
+		{"qkd_none, both required (the MODE default)", Config{Mode: "QkdAndPqcRequired", PQCEnabled: true}, false, true},
+		{"qkd_none, either mode", Config{Mode: "EitherQkdOrPqcRequired", PQCEnabled: true}, false, true},
+		{"qkd_none, pqc disabled", Config{Mode: "AtLeastPqcRequired"}, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.ValidateKeySources(tc.qkd)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected an error for %s", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %s: %v", tc.name, err)
+			}
+		})
 	}
 }

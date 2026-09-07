@@ -24,8 +24,8 @@ provider: no external daemon, no key on disk, no new port.
 | Property | Value |
 |---|---|
 | Kind | Key reader (unmanaged) |
-| Selection | Runtime, via `PQC_ENABLED` — **enabled by default** |
-| Build tag | _(none — always compiled)_ |
+| Selection | Runtime, via `PQC_ENABLED`, **enabled by default** |
+| Build tag | _(none, the sole PQC backend, always compiled)_ |
 | Platform | any |
 | Adapter | [`repositories/pqc-hpke.go`](../repositories/pqc-hpke.go) |
 | Tests | [`repositories/pqc-hpke_test.go`](../repositories/pqc-hpke_test.go) |

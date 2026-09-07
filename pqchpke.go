@@ -1,6 +1,11 @@
+// Wiring for the pqc-hpke key reader (PQC, unmanaged). The only PQC backend, so
+// it carries no build tag yet: a second one gets its own file plus the family
+// constraint `pqc_hpke || !pqc_<other>` here. See KEYCONTROL.md.
+
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -11,13 +16,6 @@ import (
 	"github.com/arnika-project/arnika/repositories"
 	"github.com/arnika-project/arnika/services"
 )
-
-func getQKDService(cfg *config.Config) *services.KeyReaderService {
-	kmsAuth := repositories.NewKMSClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
-	kmsRepo := repositories.NewHTTPKMSRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
-	var managed services.KeyReaderManaged = kmsRepo
-	return services.NewKeyReaderService(&managed)
-}
 
 // pqcSender seals a plaintext PQC frame in the Arnika envelope and sends it to
 // the peer.
@@ -56,8 +54,11 @@ func pqcSender(cfg *config.Config, dirOut auth.Direction) (func([]byte) error, e
 }
 
 // getPQCService wires the pqc-hpke key reader. It returns the reader service
-// used by setPSK and the repository whose Run drives the agreement rounds.
-func getPQCService(cfg *config.Config, inbound <-chan []byte, dirOut auth.Direction) (*services.KeyReaderService, *repositories.PQCHPKERepository, error) {
+// used by setPSK and the round driver main.go runs in its own goroutine. The
+// driver is returned as a function, not as the concrete repository, so that a
+// second PQC backend can be wired behind its own build tag without touching
+// main.go.
+func getPQCService(cfg *config.Config, inbound <-chan []byte, dirOut auth.Direction) (*services.KeyReaderService, func(context.Context), error) {
 	send, err := pqcSender(cfg, dirOut)
 	if err != nil {
 		return nil, nil, err
@@ -78,5 +79,5 @@ func getPQCService(cfg *config.Config, inbound <-chan []byte, dirOut auth.Direct
 	}
 
 	var unmanaged services.KeyReaderUnmanaged = pqcRepo
-	return services.NewKeyReaderService(&unmanaged), pqcRepo, nil
+	return services.NewKeyReaderService(&unmanaged), pqcRepo.Run, nil
 }

@@ -54,6 +54,42 @@ func (c *Config) IsPQCRequired() bool {
 	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastPqcRequired"
 }
 
+// ValidateKeySources rejects a configuration the compiled-in key readers
+// cannot serve. Readers are selected by build tag (see KEYCONTROL.md), so a
+// binary can lack the reader a MODE demands; catching that here keeps the
+// failure at startup instead of at the first rotation, where it would only
+// invalidate the tunnel.
+//
+// Parameters:
+//   - qkdCompiled: the wiring constant of the QKD family, true unless the
+//     binary was built with qkd_none. Callers pass the constant, never a
+//     configuration value.
+//
+// Returns nil if this binary can serve cfg. Returns an error if KMS_URL is
+// missing while a QKD reader is compiled in, if KMS_URL is set while it is
+// not, or if MODE or PQC_ENABLED name key material this binary cannot produce.
+// Call it directly after Parse, before any key is due.
+func (c *Config) ValidateKeySources(qkdCompiled bool) error {
+	if qkdCompiled && c.KMSURL == "" {
+		return fmt.Errorf("[ERROR] KMS_URL is not set")
+	}
+	if !qkdCompiled {
+		if c.KMSURL != "" {
+			return fmt.Errorf("[ERROR] KMS_URL is set but this binary was built without a QKD key reader (build tag qkd_none)")
+		}
+		// Only AtLeastPqcRequired is servable: a QKD-requiring mode fails every
+		// interval, and EitherQkdOrPqcRequired would permit running with no key
+		// material at all. Both only ever invalidate the tunnel.
+		if c.IsQKDRequired() || !c.IsPQCRequired() {
+			return fmt.Errorf("[ERROR] this binary was built without a QKD key reader (build tag qkd_none), which requires MODE=AtLeastPqcRequired, got %s", c.Mode)
+		}
+		if !c.UsePQC() {
+			return fmt.Errorf("[ERROR] this binary was built without a QKD key reader (build tag qkd_none), so PQC_ENABLED must not be false")
+		}
+	}
+	return nil
+}
+
 func (c *Config) IsQKDRequired() bool {
 	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastQkdRequired"
 }
@@ -84,11 +120,15 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
 	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
 	fmt.Printf("Arnika Peer Timeout:			%s\n", c.ArnikaPeerTimeout)
-	fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
-	fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
-	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
-	fmt.Printf("KMS Backoff Base Delay:   %s\n", c.KMSBackoffBaseDelay)
-	fmt.Printf("KMS Retry Interval:       %s\n", c.KMSRetryInterval)
+	if c.KMSURL != "" {
+		fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
+		fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
+		fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
+		fmt.Printf("KMS Backoff Base Delay:   %s\n", c.KMSBackoffBaseDelay)
+		fmt.Printf("KMS Retry Interval:       %s\n", c.KMSRetryInterval)
+	} else {
+		fmt.Println("QKD key reader:           NOT COMPILED IN (build tag qkd_none)")
+	}
 
 	if c.Certificate != "" {
 		fmt.Printf("Client Certificate:       %s\n", c.Certificate)
@@ -177,10 +217,7 @@ func Parse() (*Config, error) {
 	config.Certificate = getEnvOrDefault("CERTIFICATE", "")
 	config.PrivateKey = getEnvOrDefault("PRIVATE_KEY", "")
 	config.CACertificate = getEnvOrDefault("CA_CERTIFICATE", "")
-	config.KMSURL, err = getEnv("KMS_URL")
-	if err != nil {
-		return nil, err
-	}
+	config.KMSURL = getEnvOrDefault("KMS_URL", "")
 	kmsHTTPTimeout, err := time.ParseDuration(getEnvOrDefault("KMS_HTTP_TIMEOUT", "10s"))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_HTTP_TIMEOUT: %w", err)

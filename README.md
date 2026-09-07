@@ -275,18 +275,21 @@ CGO_ENABLED=0 GOEXPERIMENT=runtimesecret go build -trimpath -ldflags "-w -s -ext
 
 The result is a single binary `arnika` located in the new created subdirecory `build` (`build/arnika`).
 
-`make build` selects the **netlink** key writer, which installs the PSK into a local kernel
-WireGuard interface. The key writer is chosen at compile time via build tags:
+`make build` selects the **netlink** key writer plus the KMS key reader, both chosen at
+compile time via build tags, one tag per family:
 
 ```bash
-make build                                  # netlink (default)
-make build-netlink                          # netlink (explicit)
-make build-mikrotik                         # MikroTik RouterOS REST API
-make build BUILD_TAGS=wireguard_mikrotik    # same, long form
+make build                                             # all defaults: netlink + kms + pqc-hpke
+make build-netlink                                     # netlink writer (explicit)
+make build-mikrotik                                    # MikroTik RouterOS REST API writer
+make build-pqc-only                                    # qkd_none: no KMS client, 40 % smaller
+make build BUILD_TAGS="wireguard_mikrotik qkd_none"    # long form, any combination
 ```
 
-See [`KEYCONTROL.md`](KEYCONTROL.md) for the key writer architecture and
-[`docs/`](docs/) for the individual backends.
+The full tag list, including the namespaced netlink writer
+(`wireguard_netlink_netns`), is the build tag reference in
+[`KEYCONTROL.md`](KEYCONTROL.md#build-tag-reference); see [`docs/`](docs/) for
+the individual backends.
 
 ```shell
 ./build/arnika
@@ -445,7 +448,7 @@ start without them.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `KMS_URL` | ✅ | — | KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA` |
+| `KMS_URL` | ✅ | — | KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA`. Must be **unset** in a `qkd_none` (PQC-only) build |
 | `KMS_HTTP_TIMEOUT` | ➖ | `10s` | HTTP timeout for KMS requests |
 | `KMS_BACKOFF_MAX_RETRIES` | ➖ | `5` | Retry attempts per failed KMS request |
 | `KMS_BACKOFF_BASE_DELAY` | ➖ | `100ms` | First backoff delay; grows exponentially per retry |
@@ -476,6 +479,12 @@ start without them.
 | `PQC_MAX_KEY_AGE` | ➖ | `2 × INTERVAL` | Staleness threshold for the agreed key |
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline; must be shorter than `PQC_ROUND_INTERVAL` |
 | `MODE` | ➖ | `QkdAndPqcRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired` or `EitherQkdOrPqcRequired` — see the mode table above. The default is the **strictest** mode: both key sources are mandatory and there is no fallback |
+
+These settings choose between the readers **compiled into** the binary. The QKD
+reader is selected by build tag (`qkd_kms` / `qkd_none`), and a `MODE` that
+demands a reader the binary does not have is rejected at startup. A `qkd_none` build carries no KMS client at all, which
+makes it about 40 % smaller, exchanges no `key_id`, and rotates the PSK once per
+PQC round instead. See [`KEYCONTROL.md`](KEYCONTROL.md).
 
 `PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` must be identical on both peers.
 Because the agreement is on by default, a peer that runs with it disabled while

@@ -107,6 +107,14 @@ additional packet type (`PacketPQC`), producing the PQC half of the PSK. It is
 independent of the QKD flow above: `setPSK()` simply consumes whichever key is
 current.
 
+In a binary built with `qkd_none` this exchange is the *only* key source: there
+is no `key_id` message and no PRIMARY/BACKUP alternation. `main()` installs the
+PSK once per round, at the midpoint of the window in which `Run` never
+publishes, which is `nextPQCInstall`. Both peers derive that instant from the
+wall clock, so unlike the QKD rekey instant it is the same on both sides and
+cannot straddle a publish. See [`KEYCONTROL.md`](KEYCONTROL.md) for the reader
+build tags.
+
 ```mermaid
 stateDiagram-v2
   [*] --> Idle
