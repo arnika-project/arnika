@@ -335,6 +335,16 @@ func pqcVerifyConfirm(pqcKey []byte, round uint32, peerTag []byte) bool {
 // pqcMaxSendAttempts mirrors udpClient's send-with-ack retry count.
 const pqcMaxSendAttempts = 3
 
+// pqcSendRetryDelay spaces retries of a failed write. A UDP send can fail with
+// ICMP port-unreachable simply because the peer has not bound its socket yet,
+// which is routine when both peers start at once, so the delay is short.
+const pqcSendRetryDelay = 50 * time.Millisecond
+
+// pqcStartupGrace lets a peer starting at the same moment bind its listener
+// before the startup round tries to reach it. The startup round is the one
+// round with no earlier round to fall back on.
+const pqcStartupGrace = 100 * time.Millisecond
+
 // pqcResult is one agreed key and the moment it was agreed.
 type pqcResult struct {
 	key []byte
@@ -423,6 +433,31 @@ func pqcRoundIndex(t time.Time, interval time.Duration) uint32 {
 	return uint32(t.Unix() / secs)
 }
 
+// pqcNextRound returns the round to serve next and the moment to start it.
+//
+// The round is always the boundary that follows now, so it is in the future by
+// construction and never a boundary that has already passed. Both peers derive
+// it from the clock alone, and the only input is which interval each is in -
+// nothing finer.
+//
+// If the ideal start has passed the round begins immediately rather than being
+// skipped. Skipping looked tidier but made the choice depend on which side of
+// the wake instant each peer happened to evaluate: two peers milliseconds apart
+// then picked different rounds, and the one that ran alone burned an interval.
+// Starting late costs part of the round's budget; disagreeing costs the round.
+func pqcNextRound(now time.Time, interval, timeout time.Duration) (round uint32, wake time.Time) {
+	secs := int64(interval.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	idx := now.Unix()/secs + 1
+	wake = time.Unix(idx*secs, 0).Add(-timeout)
+	if wake.Before(now) {
+		wake = now
+	}
+	return uint32(idx), wake
+}
+
 // GetNewKey implements services.KeyReaderUnmanaged.
 //
 // It reads a register rather than a channel: it is called synchronously from
@@ -499,6 +534,12 @@ func (r *PQCHPKERepository) Run(ctx context.Context) {
 		secs = 1
 	}
 
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(pqcStartupGrace):
+	}
+
 	// Best effort: this only completes if both peers start inside the same
 	// interval, so a failure here is expected and not worth alarming about.
 	startup := pqcRoundIndex(time.Now(), r.roundInterval)
@@ -510,33 +551,17 @@ func (r *PQCHPKERepository) Run(ctx context.Context) {
 		return
 	}
 
-	nextIdx := time.Now().Unix()/secs + 1
 	for {
-		wake := time.Unix(nextIdx*secs, 0).Add(-r.roundTimeout)
-		if d := time.Until(wake); d > 0 {
-			timer := time.NewTimer(d)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-		} else if ctx.Err() != nil {
+		round, wake := pqcNextRound(time.Now(), r.roundInterval, r.roundTimeout)
+		timer := time.NewTimer(time.Until(wake))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
 			return
+		case <-timer.C:
 		}
-
-		// Indexed by the boundary this round serves, which both peers compute
-		// identically from the clock.
-		round := uint32(nextIdx)
 		if err := r.RunRound(ctx, round); err != nil {
 			log.Printf("[WARNING] pqc-hpke: round %d failed: %v", round, err)
-		}
-
-		nextIdx++
-		// If a round overran its boundary, skip forward rather than chasing
-		// boundaries that have already passed.
-		if cur := time.Now().Unix()/secs + 1; nextIdx < cur {
-			nextIdx = cur
 		}
 	}
 }
@@ -640,9 +665,30 @@ func (s *pqcSession) sendFrames(kind pqcKind, msg []byte) error {
 	return nil
 }
 
+// sendFramesRetrying tolerates a transient write failure.
+//
+// A failed write must cost a retry, not the round: at startup the peer's
+// listener may be milliseconds behind ours, and the kernel reports that as
+// ICMP port-unreachable on the next send. Returning it immediately threw away
+// a round that one retry would have completed.
+func (s *pqcSession) sendFramesRetrying(ctx context.Context, kind pqcKind, msg []byte) error {
+	var err error
+	for attempt := 1; attempt <= pqcMaxSendAttempts; attempt++ {
+		if err = s.sendFrames(kind, msg); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pqcSendRetryDelay):
+		}
+	}
+	return err
+}
+
 // sendAck acknowledges a received message.
-func (s *pqcSession) sendAck(kind pqcKind) error {
-	return s.sendFrames(pqcKindAck, []byte{byte(kind)})
+func (s *pqcSession) sendAck(ctx context.Context, kind pqcKind) error {
+	return s.sendFramesRetrying(ctx, pqcKindAck, []byte{byte(kind)})
 }
 
 // sendWithAck sends a message and waits for the peer's ack, retrying the whole
@@ -659,7 +705,7 @@ func (s *pqcSession) attemptTimeout() time.Duration {
 func (s *pqcSession) sendWithAck(ctx context.Context, kind pqcKind, msg []byte) error {
 	attemptTimeout := s.attemptTimeout()
 	for attempt := 1; attempt <= pqcMaxSendAttempts; attempt++ {
-		if err := s.sendFrames(kind, msg); err != nil {
+		if err := s.sendFramesRetrying(ctx, kind, msg); err != nil {
 			return err
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
@@ -696,7 +742,7 @@ func (s *pqcSession) serviceConfirmRetries(ctx context.Context, grace time.Durat
 	for {
 		if _, ok := s.pending[pqcKindConfirm]; ok {
 			delete(s.pending, pqcKindConfirm)
-			if err := s.sendAck(pqcKindConfirm); err != nil {
+			if err := s.sendAck(ctx, pqcKindConfirm); err != nil {
 				return
 			}
 			continue
@@ -723,7 +769,7 @@ func (s *pqcSession) runInitiator(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("pqc-hpke: waiting for encapsulation: %w", err)
 	}
-	if err := s.sendAck(pqcKindEnc); err != nil {
+	if err := s.sendAck(ctx, pqcKindEnc); err != nil {
 		return err
 	}
 
@@ -743,7 +789,7 @@ func (s *pqcSession) runResponder(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("pqc-hpke: waiting for public key: %w", err)
 	}
-	if err := s.sendAck(pqcKindPubKey); err != nil {
+	if err := s.sendAck(ctx, pqcKindPubKey); err != nil {
 		return err
 	}
 
@@ -794,7 +840,7 @@ func (s *pqcSession) confirmAndPublish(ctx context.Context, key []byte, initiato
 			return fmt.Errorf("pqc-hpke: confirmation exchange: %w", err)
 		}
 		// Tell the responder its tag arrived; it publishes on this.
-		if err := s.sendAck(pqcKindConfirm); err != nil {
+		if err := s.sendAck(ctx, pqcKindConfirm); err != nil {
 			return err
 		}
 		if !pqcVerifyConfirm(key, s.round, peerTag) {
@@ -816,7 +862,7 @@ func (s *pqcSession) confirmAndPublish(ctx context.Context, key []byte, initiato
 		if err != nil {
 			return fmt.Errorf("pqc-hpke: confirmation exchange: %w", err)
 		}
-		if err := s.sendAck(pqcKindConfirm); err != nil {
+		if err := s.sendAck(ctx, pqcKindConfirm); err != nil {
 			return err
 		}
 		// Verify before answering, so a mismatch never sends a tag back.
