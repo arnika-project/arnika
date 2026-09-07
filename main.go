@@ -37,6 +37,7 @@ var (
 	PRIMARYLOGPREFIX string
 	BACKUPLOGPREFIX  string
 	ARNIKALOGPREFIX  string
+	PQCHPKELOGPREFIX string
 )
 
 // setPSK derives the pre-shared key for this rotation and installs it through
@@ -209,6 +210,7 @@ func main() {
 	PRIMARYLOGPREFIX = fmt.Sprintf("%sPRIMARY[%s]%s", colorStart, cfg.ArnikaID, colorEnd)
 	BACKUPLOGPREFIX = fmt.Sprintf("%sBACKUP[%s]%s", colorStart, cfg.ArnikaID, colorEnd)
 	ARNIKALOGPREFIX = fmt.Sprintf("ARNIKA[%s]", cfg.ArnikaID)
+	PQCHPKELOGPREFIX = fmt.Sprintf("%sPQC-HPKE[%s]%s", colorStart, cfg.ArnikaID, colorEnd)
 	interval := cfg.Interval
 	done := make(chan bool)
 	skip := make(chan bool, 1)

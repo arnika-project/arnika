@@ -71,7 +71,7 @@ func getPQCService(cfg *config.Config, inbound <-chan []byte, dirOut auth.Direct
 	}
 
 	pqcRepo, err := repositories.NewPQCHPKERepository(
-		inbound, send, isInitiator,
+		PQCHPKELOGPREFIX, inbound, send, isInitiator,
 		cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge,
 	)
 	if err != nil {

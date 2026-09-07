@@ -241,7 +241,7 @@ PQC max key age:          4m0s
 A successful round logs:
 
 ```
-[INFO] pqc-hpke: round 13845672 agreed a fresh PQC key
+[INFO] PQC-HPKE[9999] [OK] round 13845672 agreed a fresh PQC key
 [INFO] PRIMARY[9999] [OK] HKDF derivation completed for QKD+PQC key
 ```
 
@@ -262,7 +262,7 @@ sudo wg show qcicat0 preshared-keys
 5. Restart **both peers together.** A peer running the new build cannot
    authenticate one running an older build: the envelope now derives its HMAC
    key per direction.
-6. Watch for `pqc-hpke: round … agreed a fresh PQC key` on both ends.
+6. Watch for `PQC-HPKE[…] [OK] round … agreed a fresh PQC key` on both ends.
 
 The key material the external provider wrote is no longer read. Delete the key
 files and their directory once the tunnel is confirmed working.

@@ -61,7 +61,7 @@ kms| 2026/09/07 15:30:09 [CONF] debug logging enabled=true (set DEBUG=true to en
 kms| 2026/09/07 15:30:10 [DEBUG] [REQ] method=POST path=/api/v1/keys/CONSA/enc_keys
 a1|  2026/09/07 15:30:11 [INFO] PRIMARY[9998] [SND] send key_id ffffffff-…
 a2|  2026/09/07 15:30:11 [INFO] BACKUP[9999] [RCV] received key_id ffffffff-…
-a1|  2026/09/07 15:30:11 [INFO] pqc-hpke: round 357756369 agreed a fresh PQC key
+a1|  2026/09/07 15:30:11 [INFO] PQC-HPKE[9998] [OK] round 357756369 agreed a fresh PQC key
 ```
 
 The simulator needs `DEBUG=true` for its request and response logging, and

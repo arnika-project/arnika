@@ -372,6 +372,11 @@ type PQCHPKERepository struct {
 	roundTimeout  time.Duration
 	maxAge        time.Duration
 
+	// logPrefix identifies this reader in the log, in the same
+	// NAME[ARNIKA_ID] form the rest of Arnika uses. Supplied by the wiring,
+	// which is where the node's identity and its colour live.
+	logPrefix string
+
 	// keyMu guards latest and the zeroing of the buffer it supersedes.
 	//
 	// An atomic.Pointer is not enough here: it orders the pointer, not the bytes
@@ -388,6 +393,7 @@ type PQCHPKERepository struct {
 // NewPQCHPKERepository builds the adapter. Every dependency is an argument: it
 // reads no environment and opens no socket.
 func NewPQCHPKERepository(
+	logPrefix string,
 	inbound <-chan []byte,
 	send func([]byte) error,
 	isInitiator func(round uint32) bool,
@@ -412,7 +418,11 @@ func NewPQCHPKERepository(
 	if maxAge <= 0 {
 		return nil, fmt.Errorf("pqc: max key age must be positive, got %s", maxAge)
 	}
+	if logPrefix == "" {
+		logPrefix = "PQC-HPKE"
+	}
 	return &PQCHPKERepository{
+		logPrefix:     logPrefix,
 		inbound:       inbound,
 		send:          send,
 		isInitiator:   isInitiator,
@@ -544,8 +554,8 @@ func (r *PQCHPKERepository) Run(ctx context.Context) {
 	// interval, so a failure here is expected and not worth alarming about.
 	startup := pqcRoundIndex(time.Now(), r.roundInterval)
 	if err := r.RunRound(ctx, startup); err != nil {
-		log.Printf("[INFO] pqc-hpke: startup round %d did not complete (%v); the first scheduled round follows",
-			startup, err)
+		log.Printf("[INFO] %s [FAIL] startup round %d did not complete (%v); the first scheduled round follows",
+			r.logPrefix, startup, err)
 	}
 	if ctx.Err() != nil {
 		return
@@ -561,7 +571,7 @@ func (r *PQCHPKERepository) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 		if err := r.RunRound(ctx, round); err != nil {
-			log.Printf("[WARNING] pqc-hpke: round %d failed: %v", round, err)
+			log.Printf("[WARNING] %s [FAIL] round %d failed: %v", r.logPrefix, round, err)
 		}
 	}
 }
@@ -849,7 +859,7 @@ func (s *pqcSession) confirmAndPublish(ctx context.Context, key []byte, initiato
 		if err := s.repo.publish(key); err != nil {
 			return err
 		}
-		log.Printf("[INFO] pqc-hpke: round %d agreed a fresh PQC key", s.round)
+		log.Printf("[INFO] %s [OK] round %d agreed a fresh PQC key", s.repo.logPrefix, s.round)
 		// Our ack is the last message and is itself unacknowledged. Stay and
 		// answer retries for a while: otherwise a single lost ack would leave
 		// the responder retrying into silence and failing a round we have
@@ -878,6 +888,6 @@ func (s *pqcSession) confirmAndPublish(ctx context.Context, key []byte, initiato
 	if err := s.repo.publish(key); err != nil {
 		return err
 	}
-	log.Printf("[INFO] pqc-hpke: round %d agreed a fresh PQC key", s.round)
+	log.Printf("[INFO] %s [OK] round %d agreed a fresh PQC key", s.repo.logPrefix, s.round)
 	return nil
 }

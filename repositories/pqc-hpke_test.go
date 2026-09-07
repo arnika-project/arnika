@@ -412,12 +412,12 @@ func newPQCPipeDropping(t *testing.T, drop func(fromInitiator bool, f pqcFrame) 
 		}
 	}
 
-	initiator, err := NewPQCHPKERepository(toInitiator, path(toResponder, true),
+	initiator, err := NewPQCHPKERepository("PQC-HPKE[test-a]", toInitiator, path(toResponder, true),
 		func(uint32) bool { return true }, interval, timeout, time.Minute)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
 	}
-	responder, err := NewPQCHPKERepository(toResponder, path(toInitiator, false),
+	responder, err := NewPQCHPKERepository("PQC-HPKE[test-b]", toResponder, path(toInitiator, false),
 		func(uint32) bool { return false }, interval, timeout, time.Minute)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
@@ -524,7 +524,7 @@ func TestPQCGetNewKeyBeforeAnyRound(t *testing.T) {
 
 func TestPQCGetNewKeyStale(t *testing.T) {
 	inbound := make(chan []byte, 1)
-	r, err := NewPQCHPKERepository(inbound, func([]byte) error { return nil },
+	r, err := NewPQCHPKERepository("PQC-HPKE[test]", inbound, func([]byte) error { return nil },
 		func(uint32) bool { return true }, time.Second, 100*time.Millisecond, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
@@ -549,7 +549,7 @@ func TestPQCGetNewKeyStale(t *testing.T) {
 
 func TestPQCPublishRejectsWrongLength(t *testing.T) {
 	inbound := make(chan []byte, 1)
-	r, err := NewPQCHPKERepository(inbound, func([]byte) error { return nil },
+	r, err := NewPQCHPKERepository("PQC-HPKE[test]", inbound, func([]byte) error { return nil },
 		func(uint32) bool { return true }, time.Second, 100*time.Millisecond, time.Minute)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
@@ -576,7 +576,7 @@ func TestPQCPublishRejectsWrongLength(t *testing.T) {
 // fix this test failed within a few hundred iterations; -race alone does not
 // catch it, because the atomic Swap/Load supplied a partial happens-before edge.
 func TestPQCPublishDoesNotCorruptConcurrentGetNewKey(t *testing.T) {
-	r, err := NewPQCHPKERepository(make(chan []byte, 1), func([]byte) error { return nil },
+	r, err := NewPQCHPKERepository("PQC-HPKE[test]", make(chan []byte, 1), func([]byte) error { return nil },
 		func(uint32) bool { return true }, time.Minute, time.Second, time.Hour)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
@@ -627,7 +627,7 @@ func TestPQCPublishDoesNotCorruptConcurrentGetNewKey(t *testing.T) {
 // TestPQCConcurrentRoundRejected asserts that only one round is ever active.
 func TestPQCConcurrentRoundRejected(t *testing.T) {
 	inbound := make(chan []byte, 1)
-	r, err := NewPQCHPKERepository(inbound, func([]byte) error { return nil },
+	r, err := NewPQCHPKERepository("PQC-HPKE[test]", inbound, func([]byte) error { return nil },
 		func(uint32) bool { return false }, // responder: blocks waiting for a public key
 		time.Second, 700*time.Millisecond, time.Minute)
 	if err != nil {
@@ -670,7 +670,7 @@ func TestPQCConstructorValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewPQCHPKERepository(tc.inbound, tc.send, tc.role, tc.interval, tc.timeout, tc.maxAge); err == nil {
+			if _, err := NewPQCHPKERepository("PQC-HPKE[test]", tc.inbound, tc.send, tc.role, tc.interval, tc.timeout, tc.maxAge); err == nil {
 				t.Fatal("expected a constructor error")
 			}
 		})
@@ -865,12 +865,12 @@ func TestPQCRoundSurvivesTransientSendFailure(t *testing.T) {
 	}
 
 	const interval = 10 * time.Second
-	initiator, err := NewPQCHPKERepository(toInitiator, initiatorSend,
+	initiator, err := NewPQCHPKERepository("PQC-HPKE[test-a]", toInitiator, initiatorSend,
 		func(uint32) bool { return true }, interval, 3*time.Second, time.Minute)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
 	}
-	responder, err := NewPQCHPKERepository(toResponder, deliver(toInitiator),
+	responder, err := NewPQCHPKERepository("PQC-HPKE[test-b]", toResponder, deliver(toInitiator),
 		func(uint32) bool { return false }, interval, 3*time.Second, time.Minute)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
