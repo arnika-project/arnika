@@ -477,26 +477,66 @@ func (r *PQCHPKERepository) publish(key []byte) error {
 }
 
 // Run drives the round schedule until ctx is cancelled.
+//
+// Two properties matter and neither is free:
+//
+//   - A round runs immediately on start. Waiting for the first boundary left
+//     the first rekey with no key at all, which surfaced as a "failed to
+//     retrieve PQC key" warning and a fallback for one whole interval.
+//   - Later rounds are scheduled to *finish* before their boundary, by waking
+//     one round timeout early, so a key for that boundary exists rather than
+//     being published at it.
+//
+// Note what this does NOT do: it does not make the two peers read the same
+// round's key during a rekey. Arnika's rekey instant is independent of the
+// round boundary, so the probability that a publish lands between the two
+// peers' setPSK calls is the read gap divided by the interval, wherever the
+// publish sits. Closing that needs a shared selector - the peers agreeing on
+// *which* round's key a given rekey uses - not a different schedule.
 func (r *PQCHPKERepository) Run(ctx context.Context) {
+	secs := int64(r.roundInterval.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+
+	// Best effort: this only completes if both peers start inside the same
+	// interval, so a failure here is expected and not worth alarming about.
+	startup := pqcRoundIndex(time.Now(), r.roundInterval)
+	if err := r.RunRound(ctx, startup); err != nil {
+		log.Printf("[INFO] pqc-hpke: startup round %d did not complete (%v); the first scheduled round follows",
+			startup, err)
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	nextIdx := time.Now().Unix()/secs + 1
 	for {
-		now := time.Now()
-		secs := int64(r.roundInterval.Seconds())
-		if secs < 1 {
-			secs = 1
-		}
-		// Wake at the next round boundary, which both peers compute identically.
-		next := time.Unix((now.Unix()/secs+1)*secs, 0)
-		timer := time.NewTimer(time.Until(next))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		wake := time.Unix(nextIdx*secs, 0).Add(-r.roundTimeout)
+		if d := time.Until(wake); d > 0 {
+			timer := time.NewTimer(d)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		} else if ctx.Err() != nil {
 			return
-		case <-timer.C:
 		}
 
-		round := pqcRoundIndex(time.Now(), r.roundInterval)
+		// Indexed by the boundary this round serves, which both peers compute
+		// identically from the clock.
+		round := uint32(nextIdx)
 		if err := r.RunRound(ctx, round); err != nil {
 			log.Printf("[WARNING] pqc-hpke: round %d failed: %v", round, err)
+		}
+
+		nextIdx++
+		// If a round overran its boundary, skip forward rather than chasing
+		// boundaries that have already passed.
+		if cur := time.Now().Unix()/secs + 1; nextIdx < cur {
+			nextIdx = cur
 		}
 	}
 }
@@ -608,11 +648,16 @@ func (s *pqcSession) sendAck(kind pqcKind) error {
 // sendWithAck sends a message and waits for the peer's ack, retrying the whole
 // message on timeout as udpClient does. HPKE is single-shot, so there is no
 // partial state to recover: an exhausted retry budget simply fails the round.
-func (s *pqcSession) sendWithAck(ctx context.Context, kind pqcKind, msg []byte) error {
-	attemptTimeout := s.repo.roundTimeout / pqcMaxSendAttempts
-	if attemptTimeout <= 0 {
-		attemptTimeout = s.repo.roundTimeout
+func (s *pqcSession) attemptTimeout() time.Duration {
+	d := s.repo.roundTimeout / pqcMaxSendAttempts
+	if d <= 0 {
+		d = s.repo.roundTimeout
 	}
+	return d
+}
+
+func (s *pqcSession) sendWithAck(ctx context.Context, kind pqcKind, msg []byte) error {
+	attemptTimeout := s.attemptTimeout()
 	for attempt := 1; attempt <= pqcMaxSendAttempts; attempt++ {
 		if err := s.sendFrames(kind, msg); err != nil {
 			return err
@@ -639,6 +684,25 @@ func (s *pqcSession) waitAck(ctx context.Context, kind pqcKind) error {
 		}
 		if err := s.pump(ctx); err != nil {
 			return err
+		}
+	}
+}
+
+// serviceConfirmRetries re-acknowledges repeated confirm messages for a grace
+// period, so a lost acknowledgement costs a retry rather than the round.
+func (s *pqcSession) serviceConfirmRetries(ctx context.Context, grace time.Duration) {
+	lctx, cancel := context.WithTimeout(ctx, grace)
+	defer cancel()
+	for {
+		if _, ok := s.pending[pqcKindConfirm]; ok {
+			delete(s.pending, pqcKindConfirm)
+			if err := s.sendAck(pqcKindConfirm); err != nil {
+				return
+			}
+			continue
+		}
+		if err := s.pump(lctx); err != nil {
+			return
 		}
 	}
 }
@@ -704,32 +768,65 @@ func (s *pqcSession) runResponder(ctx context.Context) error {
 // This gate exists because ML-KEM decapsulation never fails: without it two
 // peers could hold different keys and poison the WireGuard PSK an interval
 // later, with no error anywhere.
+//
+// The tag is a function of (key, round) alone, so both peers compute the same
+// value and reach the same verdict - the only asymmetry is a lost frame. Both
+// tags are therefore acknowledged: without that, the responder published as
+// soon as it had verified, and a single lost confirm left it holding a key the
+// initiator did not have. A residual remains, as it must for any last message:
+// the final acknowledgement is itself unacknowledged, so an exhausted retry
+// budget can still leave the two sides one round apart. The next round
+// reconverges them, and maxAge bounds how long a lone key can be used.
 func (s *pqcSession) confirmAndPublish(ctx context.Context, key []byte, initiator bool) error {
 	tag, err := pqcConfirmTag(key, s.round)
 	if err != nil {
 		return err
 	}
 
-	recv := func() ([]byte, error) { return s.waitFor(ctx, pqcKindConfirm) }
-
 	var peerTag []byte
 	if initiator {
-		if err := s.sendFrames(pqcKindConfirm, tag); err != nil {
+		// Acked, so we know the responder can compare before we wait on it.
+		if err := s.sendWithAck(ctx, pqcKindConfirm, tag); err != nil {
+			return fmt.Errorf("pqc-hpke: sending confirmation: %w", err)
+		}
+		peerTag, err = s.waitFor(ctx, pqcKindConfirm)
+		if err != nil {
+			return fmt.Errorf("pqc-hpke: confirmation exchange: %w", err)
+		}
+		// Tell the responder its tag arrived; it publishes on this.
+		if err := s.sendAck(pqcKindConfirm); err != nil {
 			return err
 		}
-		peerTag, err = recv()
-	} else {
-		peerTag, err = recv()
-		if err == nil {
-			err = s.sendFrames(pqcKindConfirm, tag)
+		if !pqcVerifyConfirm(key, s.round, peerTag) {
+			return fmt.Errorf("pqc-hpke: key confirmation failed for round %d; nothing published", s.round)
 		}
-	}
-	if err != nil {
-		return fmt.Errorf("pqc-hpke: confirmation exchange: %w", err)
-	}
-
-	if !pqcVerifyConfirm(key, s.round, peerTag) {
-		return fmt.Errorf("pqc-hpke: key confirmation failed for round %d; nothing published", s.round)
+		if err := s.repo.publish(key); err != nil {
+			return err
+		}
+		log.Printf("[INFO] pqc-hpke: round %d agreed a fresh PQC key", s.round)
+		// Our ack is the last message and is itself unacknowledged. Stay and
+		// answer retries for a while: otherwise a single lost ack would leave
+		// the responder retrying into silence and failing a round we have
+		// already committed to, which is the divergence this exchange exists
+		// to prevent.
+		s.serviceConfirmRetries(ctx, 2*s.attemptTimeout())
+		return nil
+	} else {
+		peerTag, err = s.waitFor(ctx, pqcKindConfirm)
+		if err != nil {
+			return fmt.Errorf("pqc-hpke: confirmation exchange: %w", err)
+		}
+		if err := s.sendAck(pqcKindConfirm); err != nil {
+			return err
+		}
+		// Verify before answering, so a mismatch never sends a tag back.
+		if !pqcVerifyConfirm(key, s.round, peerTag) {
+			return fmt.Errorf("pqc-hpke: key confirmation failed for round %d; nothing published", s.round)
+		}
+		// Publish only once the initiator has acknowledged our tag.
+		if err := s.sendWithAck(ctx, pqcKindConfirm, tag); err != nil {
+			return fmt.Errorf("pqc-hpke: confirming to peer: %w", err)
+		}
 	}
 
 	if err := s.repo.publish(key); err != nil {
