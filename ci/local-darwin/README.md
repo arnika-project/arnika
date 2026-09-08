@@ -308,10 +308,14 @@ How each source is taken away:
 
 - **QKD** — the KMS simulator is stopped, so every `enc_keys`/`dec_keys`
   request fails, and started again afterwards.
-- **PQC** — the pair is restarted with `PQC_ROUND_TIMEOUT=1ns`. One exchange
-  runs per interval with that deadline, so every round times out and the agreed
-  key is cleared. `1ns` and not `1ms` because a round over loopback can finish
-  inside a millisecond.
+- **PQC** — the pair is restarted with `PQC_ROUND_TIMEOUT=1ns`. Every attempt
+  then dies on its deadline waiting for the peer's answer, which has to cross
+  the socket, so the **initiating** peer never agrees a key and `GetNewKey` has
+  nothing to return. `1ns` and not `1ms` because an attempt over loopback can
+  finish inside a millisecond. The responding peer can still answer a frame or
+  two of its own — both its frames are already queued when it starts — so the
+  check reads peer a's log, whose even `ARNIKA_ID` makes it the initiator and
+  the end whose decision is deterministic.
 
 Each check asserts **both** halves: the PSK state above, *and* the line Arnika
 logs about its own decision — `no QKD key received`, `Abort since mode is set

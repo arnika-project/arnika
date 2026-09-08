@@ -530,9 +530,17 @@ pretest() {
 # instead leave rotation running, both ends in step on the other source.
 #
 # QKD is taken away by stopping the simulator. PQC is taken away with
-# PQC_ROUND_TIMEOUT=1ns: one round runs per interval with that deadline, so
-# every round times out and the agreed key is cleared. 1ns rather than 1ms
-# because a round over loopback can finish inside a millisecond.
+# PQC_ROUND_TIMEOUT=1ns: every attempt then dies on its deadline waiting for the
+# peer's answer, which has to cross the socket, so the *initiating* peer never
+# agrees a key and GetNewKey has nothing to return. 1ns rather than 1ms because
+# an attempt over loopback can finish inside a millisecond.
+#
+# The responding peer may still answer a frame or two of its own, since both its
+# frames are already queued when it starts - so it can hold a key the initiator
+# never confirmed. That is why this check reads LOG_A: peer a's ARNIKA_ID is
+# even, which is what makes it the PQC initiator (pqchpke.go), and therefore the
+# end whose decision is deterministic. Swap the IDs' parity and this has to
+# follow.
 #
 # Both halves are checked - the PSKs, and the line arnika logs about its own
 # decision - because the PSK state alone cannot say the mode reasoned correctly.
