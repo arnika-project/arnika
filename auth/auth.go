@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"runtime/secret"
+	"time"
 )
 
 // PacketType identifies the message type in the security-hardened UDP protocol.
@@ -161,6 +162,17 @@ func Decrypt(psk, ciphertext []byte) ([]byte, error) {
 		copy(result, plain)
 	})
 	return result, decErr
+}
+
+// WithinSkew reports whether a packet timestamp is close enough to now to be
+// accepted. Replay protection, applied identically to every packet type and
+// both directions, so it lives next to the packet rather than at each caller.
+func WithinSkew(ts int64, max time.Duration) bool {
+	diff := time.Now().Unix() - ts
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= int64(max.Seconds())
 }
 
 // signedPayload returns the bytes covered by the HMAC signature.

@@ -58,8 +58,13 @@ sequenceDiagram
 
 ### 5. **BACKUP Verifies DATA, Decrypts Key**
 - **Where:** `auth/auth.go` (`UnmarshalPacket`, `Verify`, `Decrypt`)
-- **What:** BACKUP checks rate limit, Base64 decodes, verifies HMAC signature, checks timestamp, then decrypts the payload.
+- **What:** BACKUP checks rate limit, verifies HMAC signature, checks timestamp, then decrypts the payload.
 - **Why:** Layered security — cheapest checks first, expensive decryption only after authentication passes.
+
+### 5a. **A Failing Key Source Reaches `MODE`**
+- **Where:** `main.go` (`installOnQKDFailure`, `setPSK`)
+- **What:** Every path on which the QKD key does not arrive is handed to `setPSK` with a nil QKD key so `MODE` decides: invalidate the tunnel where QKD is mandatory, carry on from the PQC key where it is optional. That covers the PRIMARY's KMS request failing, an empty `key_id`, a failing lookup by `key_id`, and a **BACKUP interval that ends without a `key_id` from the peer** - checked once at the end of the interval, which is why the `skip` signal has exactly one consumer per interval.
+- **Why:** These paths used to return to the interval ticker instead, which left the whole fallback and fail-closed logic in `setPSK` unreachable and the superseded PSK installed. In a QKD-optional mode the local tick deliberately does *not* install: the PQC-only installer owns the PSK there, on the instant both peers derive from the wall clock (`nextPQCInstall`), because installing on a local tick as well put the two peers on different keys.
 
 ### 6. **BACKUP Requests Key from KMS**
 - **Where:** `main.go` (`GetKeyByID`), `repositories/kms.go`
@@ -115,41 +120,56 @@ wall clock, so unlike the QKD rekey instant it is the same on both sides and
 cannot straddle a publish. See [`KEYCONTROL.md`](KEYCONTROL.md) for the reader
 build tags.
 
+Three messages, two round trips, in the same send-and-wait-for-the-reply shape
+`udpClient` uses for the key id. The initiator owns the schedule, the retries and
+the timeout; the responder is driven entirely by the messages it receives.
+
 ```mermaid
 stateDiagram-v2
-  [*] --> Idle
-  Idle --> AwaitEnc: round due (initiator) - keypair generated, public key sent
-  Idle --> Encapsulating: public key received (responder)
-  Encapsulating --> AwaitConfirm: enc sent, key derived
-  Encapsulating --> Failed: malformed public key
-  AwaitEnc --> Deriving: enc received and reassembled
-  AwaitEnc --> Failed: round deadline exceeded
-  Deriving --> AwaitConfirm: Export succeeded, 32 bytes, tag sent
-  Deriving --> Failed: NewRecipient or Export error
-  AwaitConfirm --> AwaitConfirmAck: peer tag matches (constant-time)
-  AwaitConfirm --> Failed: tag mismatch - divergent keys
-  AwaitConfirm --> Failed: round deadline exceeded
-  AwaitConfirmAck --> Publishing: own tag acknowledged by the peer
-  AwaitConfirmAck --> Failed: no acknowledgement after three attempts
-  Publishing --> Idle: publish, zero the exported key and enc
-  Failed --> Idle: log, keep the previous key until PQC_MAX_KEY_AGE
+  state "Initiator" as I {
+    [*] --> AwaitReply: round due - keypair generated, public key sent
+    AwaitReply --> Deriving: enc + responder tag received
+    AwaitReply --> Failed: no reply after three attempts
+    Deriving --> Confirming: Export succeeded, 32 bytes
+    Deriving --> Failed: NewRecipient or Export error
+    Confirming --> Publishing: responder tag matches (constant-time), own tag sent
+    Confirming --> Failed: tag mismatch - divergent keys
+    Publishing --> [*]: publish, zero the exported key and enc
+    Failed --> [*]: log, keep the previous key until PQC_MAX_KEY_AGE
+  }
+  state "Responder" as R {
+    [*] --> Encapsulating: public key received
+    Encapsulating --> AwaitTag: enc + own tag sent, reply stored for retries
+    Encapsulating --> Dropped: malformed public key
+    AwaitTag --> Published: initiator tag matches (constant-time)
+    AwaitTag --> Dropped: tag mismatch - nothing published
+    AwaitTag --> AwaitTag: public key retried - stored reply resent
+  }
 ```
 
-Four properties are worth stating explicitly:
+Six properties are worth stating explicitly:
 
 - **Nothing is published before confirmation succeeds.** ML-KEM decapsulation
   never fails - a malformed encapsulation returns a pseudorandom key rather than
-  an error - so the confirmation exchange is the only thing standing between a
-  corrupted message and a silently divergent PSK. Both tags are acknowledged, so
-  a single lost confirm fails the round on both sides instead of committing on
-  one.
-- **The role is pinned at round start** from the round index. It is the same
-  `IsPrimary` derivation used for the interval, evaluated once and held: it
-  alternates per interval, so re-deriving it mid-round would flip initiator and
-  responder in flight.
+  an error - so the confirmation tags are the only thing standing between a
+  corrupted message and a silently divergent PSK. Each tag is bound to its
+  sender's role, so neither direction can be satisfied by echoing back the tag
+  it just received.
+- **The role is decided once per round** from the round index. It is the same
+  `IsPrimary` derivation used for the interval, and both peers compute it from
+  the same PSK, so exactly one of them initiates and the other only answers.
+- **The register keeps the highest round, not the last publish.** At startup the
+  round for the current index and the round for the next boundary are both due,
+  and one peer initiates each, so two publishes land on both peers in opposite
+  orders. Keeping the last one left them on different keys and two different
+  PSKs; keeping the highest round is order-independent.
 - **A failed round publishes nothing.** The previous key stays live until
   `PQC_MAX_KEY_AGE`, after which `GetNewKey()` errors and the existing `Mode`
   logic decides. No new fail-closed policy is introduced.
+- **A retried public key is answered from the stored reply**, never by
+  encapsulating again. A second encapsulation would agree a second key for the
+  same round, and whichever reply reached the initiator first would decide which
+  key it confirmed while the responder kept the other.
 - **The HPKE private key is not zeroed, because it cannot be.** The round zeroes
   the exported 32-byte key and the encapsulation, and `publish` zeroes the key it
   supersedes. The per-round decapsulation key is not zeroable: `hpke.PrivateKey`

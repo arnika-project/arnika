@@ -334,7 +334,7 @@ Every authentication failure in the read loop is a bare drop: no reply, no ICMP,
 scanner receives nothing, and the port is dark.
 
 Passive classification is a different matter. The envelope's type byte and 8-byte Unix timestamp
-are authenticated but **not encrypted**, and the payload is base64, so deep packet inspection can
+are authenticated but **not encrypted**, so deep packet inspection can
 still recognise Arnika traffic and distinguish its packet types. WireGuard has the same property
 with its cleartext message-type byte. The PQC agreement adds one new type value and a short burst
 of larger datagrams once per interval. Claims about this port should say *unscannable*, not

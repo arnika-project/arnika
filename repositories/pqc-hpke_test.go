@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	mrand "math/rand"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -23,18 +24,36 @@ func mustSplit(t *testing.T, round uint32, kind pqcKind, msg []byte) [][]byte {
 	return frames
 }
 
+// testRound is a round the responder's freshness window accepts: HandleFrame
+// only takes the round the schedule could be serving, so a test cannot invent
+// an arbitrary index any more.
+func testRound(interval time.Duration) uint32 {
+	return pqcRoundIndex(time.Now(), interval)
+}
+
+func mustDecode(t *testing.T, raw []byte) pqcFrame {
+	t.Helper()
+	f, err := decodeFrame(raw)
+	if err != nil {
+		t.Fatalf("decodeFrame: %v", err)
+	}
+	return f
+}
+
 func TestPQCFrameRoundTrip(t *testing.T) {
 	cases := []struct {
 		name       string
 		size       int
 		wantFrames int
 	}{
-		{"empty (ack)", 0, 1},
+		{"empty", 0, 1},
 		{"one byte", 1, 1},
+		{"confirmation tag", pqcConfirmTagLen, 1},
 		{"one frame exactly", pqcChunkPayload, 1},
 		{"one byte over the boundary", pqcChunkPayload + 1, 2},
 		{"hpke public key", 1665, 2},
-		{"two frames exactly", 2 * pqcChunkPayload, 2},
+		{"encapsulation plus tag", 1665 + pqcConfirmTagLen, 2},
+		{"two frames exactly", pqcMaxFrames * pqcChunkPayload, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,16 +66,11 @@ func TestPQCFrameRoundTrip(t *testing.T) {
 				t.Fatalf("got %d frames, want %d", len(frames), tc.wantFrames)
 			}
 
-			r := newPQCReassembler()
-			r.SetRound(42)
+			var j pqcJoiner
 			var got []byte
 			var done bool
 			for _, raw := range frames {
-				f, err := decodeFrame(raw)
-				if err != nil {
-					t.Fatalf("decodeFrame: %v", err)
-				}
-				got, done = r.Add(f)
+				got, done = j.add(mustDecode(t, raw))
 			}
 			if !done {
 				t.Fatal("message never completed")
@@ -92,7 +106,7 @@ func TestPQCFrameRejectsMalformed(t *testing.T) {
 	}
 }
 
-func TestPQCReassemblyOutOfOrderAndDuplicate(t *testing.T) {
+func TestPQCJoinerOutOfOrderAndDuplicate(t *testing.T) {
 	msg := make([]byte, 1665)
 	if _, err := rand.Read(msg); err != nil {
 		t.Fatalf("rand: %v", err)
@@ -102,25 +116,16 @@ func TestPQCReassemblyOutOfOrderAndDuplicate(t *testing.T) {
 		t.Fatalf("expected 2 frames, got %d", len(frames))
 	}
 
-	r := newPQCReassembler()
-	r.SetRound(7)
-
-	add := func(raw []byte) ([]byte, bool) {
-		f, err := decodeFrame(raw)
-		if err != nil {
-			t.Fatalf("decodeFrame: %v", err)
-		}
-		return r.Add(f)
-	}
+	var j pqcJoiner
 
 	// Reversed, with the second frame delivered twice.
-	if _, done := add(frames[1]); done {
+	if _, done := j.add(mustDecode(t, frames[1])); done {
 		t.Fatal("completed after one frame")
 	}
-	if _, done := add(frames[1]); done {
+	if _, done := j.add(mustDecode(t, frames[1])); done {
 		t.Fatal("a duplicate frame completed the message")
 	}
-	got, done := add(frames[0])
+	got, done := j.add(mustDecode(t, frames[0]))
 	if !done {
 		t.Fatal("message did not complete after both frames arrived")
 	}
@@ -129,31 +134,32 @@ func TestPQCReassemblyOutOfOrderAndDuplicate(t *testing.T) {
 	}
 }
 
-func TestPQCReassemblyDropsOtherRounds(t *testing.T) {
-	msg := make([]byte, 1665)
-	frames := mustSplit(t, 9, pqcKindEnc, msg)
-
-	r := newPQCReassembler()
-	r.SetRound(10) // a different active round
-
-	for _, raw := range frames {
-		f, err := decodeFrame(raw)
-		if err != nil {
-			t.Fatalf("decodeFrame: %v", err)
-		}
-		if _, done := r.Add(f); done {
-			t.Fatal("a frame from an inactive round was accepted")
-		}
+// TestPQCJoinerRestartsOnOtherRoundOrKind asserts frames of two different
+// messages are never stitched into one: the second frame restarts the joiner
+// rather than completing whatever was half-assembled.
+func TestPQCJoinerRestartsOnOtherRoundOrKind(t *testing.T) {
+	a := mustSplit(t, 7, pqcKindPubKey, make([]byte, 1665))
+	cases := []struct {
+		name  string
+		other []byte
+	}{
+		{"other round", mustSplit(t, 8, pqcKindPubKey, make([]byte, 1665))[1]},
+		{"other kind", mustSplit(t, 7, pqcKindEnc, make([]byte, 1665))[1]},
 	}
-
-	// Before any round is active, everything is dropped.
-	fresh := newPQCReassembler()
-	f, err := decodeFrame(frames[0])
-	if err != nil {
-		t.Fatalf("decodeFrame: %v", err)
-	}
-	if _, done := fresh.Add(f); done {
-		t.Fatal("a frame was accepted before a round was started")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var j pqcJoiner
+			if _, done := j.add(mustDecode(t, a[0])); done {
+				t.Fatal("completed after one frame")
+			}
+			if _, done := j.add(mustDecode(t, tc.other)); done {
+				t.Fatal("a frame from another message completed the first one")
+			}
+			// The first message must now have to start over.
+			if _, done := j.add(mustDecode(t, a[1])); done {
+				t.Fatal("the restarted joiner completed from a stale half")
+			}
+		})
 	}
 }
 
@@ -164,7 +170,7 @@ func TestPQCSplitRejectsOversizedMessage(t *testing.T) {
 }
 
 // FuzzDecodeFrame is audit programme target A3: arbitrary bytes into the frame
-// decoder must never panic.
+// decoder and the joiner must never panic.
 func FuzzDecodeFrame(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0, 0, 0, 1, 1, 0, 1, 0})
@@ -181,9 +187,9 @@ func FuzzDecodeFrame(f *testing.F) {
 		if frame.total == 0 || frame.total > pqcMaxFrames || frame.seq >= frame.total {
 			t.Fatalf("decodeFrame accepted an invalid frame: seq=%d total=%d", frame.seq, frame.total)
 		}
-		r := newPQCReassembler()
-		r.SetRound(frame.round)
-		r.Add(frame) // must not panic
+		var j pqcJoiner
+		j.add(frame) // must not panic
+		j.add(frame) // nor on a duplicate
 	})
 }
 
@@ -222,6 +228,25 @@ func TestPQCAgreementDerivesIdenticalKeys(t *testing.T) {
 	}
 }
 
+// TestPQCEncMessageFitsTheFrameBudget pins the constants against the suite: the
+// largest message on the wire is the encapsulation plus the responder tag, and
+// it must still fit pqcMaxFrames frames.
+func TestPQCEncMessageFitsTheFrameBudget(t *testing.T) {
+	_, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	enc, _, err := pqcResponderRespond(pub, 1)
+	if err != nil {
+		t.Fatalf("responderRespond: %v", err)
+	}
+	largest := len(enc) + pqcConfirmTagLen
+	if largest > pqcMaxFrames*pqcChunkPayload {
+		t.Fatalf("the largest message is %d bytes but only %d fit in %d frames; raise pqcMaxFrames",
+			largest, pqcMaxFrames*pqcChunkPayload, pqcMaxFrames)
+	}
+}
+
 // TestPQCRoundBindingSeparatesKeys asserts that a delayed message from another
 // round cannot produce usable material.
 func TestPQCRoundBindingSeparatesKeys(t *testing.T) {
@@ -243,11 +268,11 @@ func TestPQCRoundBindingSeparatesKeys(t *testing.T) {
 		t.Fatal("a round mismatch produced the same key; info is not bound to the round")
 	}
 	// And the mismatch must be caught before publication.
-	tag, err := pqcConfirmTag(keyResponder, 100)
+	tag, err := pqcConfirmTag(keyResponder, 100, pqcRoleResponder)
 	if err != nil {
 		t.Fatalf("confirmTag: %v", err)
 	}
-	if pqcVerifyConfirm(keyInitiator, 101, tag) {
+	if pqcVerifyConfirm(keyInitiator, 101, pqcRoleResponder, tag) {
 		t.Fatal("confirmation accepted a cross-round key")
 	}
 }
@@ -296,7 +321,7 @@ func TestPQCSealIsRefused(t *testing.T) {
 
 // TestPQCConfirmationCatchesImplicitRejection is the load-bearing test for
 // ML-KEM implicit rejection: a corrupted encapsulation must produce no error
-// from decapsulation, and must be caught by the confirmation exchange instead.
+// from decapsulation, and must be caught by the confirmation tags instead.
 func TestPQCConfirmationCatchesImplicitRejection(t *testing.T) {
 	const round = 77
 
@@ -322,12 +347,21 @@ func TestPQCConfirmationCatchesImplicitRejection(t *testing.T) {
 		t.Fatal("corrupting the encapsulation did not change the derived key")
 	}
 
-	responderTag, err := pqcConfirmTag(keyResponder, round)
+	// Caught in both directions: the initiator rejects the responder's tag, and
+	// the responder would reject the initiator's.
+	responderTag, err := pqcConfirmTag(keyResponder, round, pqcRoleResponder)
 	if err != nil {
 		t.Fatalf("confirmTag: %v", err)
 	}
-	if pqcVerifyConfirm(keyInitiator, round, responderTag) {
+	if pqcVerifyConfirm(keyInitiator, round, pqcRoleResponder, responderTag) {
 		t.Fatal("confirmation accepted divergent keys; the PSK would have been poisoned silently")
+	}
+	initiatorTag, err := pqcConfirmTag(keyInitiator, round, pqcRoleInitiator)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	if pqcVerifyConfirm(keyResponder, round, pqcRoleInitiator, initiatorTag) {
+		t.Fatal("the responder's check accepted a divergent key")
 	}
 }
 
@@ -337,7 +371,7 @@ func TestPQCConfirmTagProperties(t *testing.T) {
 		t.Fatalf("rand: %v", err)
 	}
 
-	tag, err := pqcConfirmTag(key, 5)
+	tag, err := pqcConfirmTag(key, 5, pqcRoleInitiator)
 	if err != nil {
 		t.Fatalf("confirmTag: %v", err)
 	}
@@ -347,29 +381,84 @@ func TestPQCConfirmTagProperties(t *testing.T) {
 	if bytes.Contains(tag, key[:8]) {
 		t.Fatal("the tag leaks key material")
 	}
-	if !pqcVerifyConfirm(key, 5, tag) {
-		t.Fatal("a matching key and round failed verification")
+	if !pqcVerifyConfirm(key, 5, pqcRoleInitiator, tag) {
+		t.Fatal("a matching key, round and role failed verification")
 	}
-	if pqcVerifyConfirm(key, 6, tag) {
+	if pqcVerifyConfirm(key, 6, pqcRoleInitiator, tag) {
 		t.Fatal("a tag from another round verified; tags are not round-bound")
 	}
 	other := make([]byte, pqcKeyLen)
-	if pqcVerifyConfirm(other, 5, tag) {
+	if pqcVerifyConfirm(other, 5, pqcRoleInitiator, tag) {
 		t.Fatal("a different key verified against the tag")
 	}
-	if pqcVerifyConfirm(key, 5, tag[:len(tag)-1]) {
+	if pqcVerifyConfirm(key, 5, pqcRoleInitiator, tag[:len(tag)-1]) {
 		t.Fatal("a truncated tag verified")
+	}
+}
+
+// TestPQCConfirmTagsAreRoleSeparated is why the role label exists. Without it
+// both peers compute the identical tag, so the second one sent is a pure echo
+// of the first: it proves possession of the PSK, which the envelope already
+// did, and nothing whatsoever about the agreed key.
+func TestPQCConfirmTagsAreRoleSeparated(t *testing.T) {
+	key := make([]byte, pqcKeyLen)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+
+	tagI, err := pqcConfirmTag(key, 5, pqcRoleInitiator)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	tagR, err := pqcConfirmTag(key, 5, pqcRoleResponder)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	if bytes.Equal(tagI, tagR) {
+		t.Fatal("both roles compute the same tag; echoing it back would verify")
+	}
+	if pqcVerifyConfirm(key, 5, pqcRoleResponder, tagI) {
+		t.Fatal("the initiator's tag verified as the responder's")
+	}
+	if pqcVerifyConfirm(key, 5, pqcRoleInitiator, tagR) {
+		t.Fatal("the responder's tag verified as the initiator's")
 	}
 }
 
 // --- transport and scheduler ------------------------------------------------
 
-// pqcPipe wires two repositories back to back over in-memory channels, with an
-// optional frame loss rate, so a full round can run without any network.
-type pqcPipe struct {
-	initiator, responder *PQCHPKERepository
+// stubs for a repository whose own initiator channel must never be used.
+func mustNotInitiate() (func([]byte) error, func(time.Time) ([]byte, error)) {
+	return func([]byte) error { return fmt.Errorf("send called on a responder-only repository") },
+		func(time.Time) ([]byte, error) {
+			return nil, fmt.Errorf("recv called on a responder-only repository")
+		}
 }
 
+func newPQCTestRepo(t *testing.T, interval, timeout, maxAge time.Duration) *PQCHPKERepository {
+	t.Helper()
+	send, recv := mustNotInitiate()
+	r, err := NewPQCHPKERepository("PQC-HPKE[test]", send, recv,
+		func(uint32) bool { return false }, interval, timeout, maxAge)
+	if err != nil {
+		t.Fatalf("NewPQCHPKERepository: %v", err)
+	}
+	return r
+}
+
+// pqcPipe wires two repositories back to back in memory, so a full round runs
+// without any network. The initiator sends on its own channel, as the dialled
+// socket does; the responder is driven by a single pump goroutine calling
+// HandleFrame, as the UDP read loop does, and answers through reply.
+type pqcPipe struct {
+	initiator, responder *PQCHPKERepository
+
+	mu      sync.Mutex
+	sent    []pqcFrame // every frame handed to the transport, dropped or not
+	respErr []error    // errors HandleFrame returned on the pump goroutine
+}
+
+// newPQCPipe wires a pipe that loses lossPercent of all frames at random.
 func newPQCPipe(t *testing.T, lossPercent int, seed int64, timeout time.Duration) *pqcPipe {
 	t.Helper()
 	rng := mrand.New(mrand.NewSource(seed))
@@ -382,86 +471,167 @@ func newPQCPipe(t *testing.T, lossPercent int, seed int64, timeout time.Duration
 	return newPQCPipeDropping(t, drop, 10*time.Second, timeout)
 }
 
-// newPQCPipeDropping wires two repositories back to back and consults drop for
-// every frame, so a test can lose exactly one kind in one direction.
-// fromInitiator reports which side sent it.
+// newPQCPipeDropping wires a pipe and consults drop for every frame, so a test
+// can lose exactly one kind in one direction. fromInitiator reports who sent it.
 func newPQCPipeDropping(t *testing.T, drop func(fromInitiator bool, f pqcFrame) bool,
 	interval, timeout time.Duration) *pqcPipe {
 	t.Helper()
+	return newPQCPipeWith(t, drop, nil, interval, timeout)
+}
 
+// newPQCPipeFailingSends wires a pipe whose initiator writes fail while
+// failSend returns true, as a UDP write does when the peer has not bound its
+// socket yet.
+func newPQCPipeFailingSends(t *testing.T, failSend func() bool,
+	interval, timeout time.Duration) *pqcPipe {
+	t.Helper()
+	return newPQCPipeWith(t, nil, failSend, interval, timeout)
+}
+
+func newPQCPipeWith(t *testing.T, drop func(fromInitiator bool, f pqcFrame) bool,
+	failSend func() bool, interval, timeout time.Duration) *pqcPipe {
+	t.Helper()
+
+	p := &pqcPipe{}
 	toInitiator := make(chan []byte, 64)
 	toResponder := make(chan []byte, 64)
 
-	path := func(dst chan []byte, fromInitiator bool) func([]byte) error {
+	// deliver models one datagram in flight: it may be lost, and it never
+	// blocks, exactly like a UDP write.
+	deliver := func(dst chan []byte, fromInitiator bool) func([]byte) error {
 		return func(frame []byte) error {
+			if fromInitiator && failSend != nil && failSend() {
+				return fmt.Errorf("write udp 10.0.0.1:46886->10.0.0.2:9998: write: connection refused")
+			}
 			f, err := decodeFrame(frame)
 			if err != nil {
-				t.Errorf("a sent frame does not decode: %v", err)
-				return nil
+				return fmt.Errorf("a sent frame does not decode: %w", err)
 			}
+			p.mu.Lock()
+			p.sent = append(p.sent, f)
+			p.mu.Unlock()
 			if drop != nil && drop(fromInitiator, f) {
 				return nil // silently lost in transit, as a datagram would be
 			}
-			cp := make([]byte, len(frame))
-			copy(cp, frame)
+			cp := bytes.Clone(frame)
 			select {
 			case dst <- cp:
-			default: // receiver's queue full: dropped, exactly as udpServer does
+			default: // receiver's queue full: dropped, exactly as a socket does
 			}
 			return nil
 		}
 	}
 
-	initiator, err := NewPQCHPKERepository("PQC-HPKE[test-a]", toInitiator, path(toResponder, true),
+	recv := func(src chan []byte) func(time.Time) ([]byte, error) {
+		return func(deadline time.Time) ([]byte, error) {
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			select {
+			case frame := <-src:
+				return frame, nil
+			case <-timer.C:
+				return nil, os.ErrDeadlineExceeded
+			}
+		}
+	}
+
+	initiator, err := NewPQCHPKERepository("PQC-HPKE[init]",
+		deliver(toResponder, true), recv(toInitiator),
 		func(uint32) bool { return true }, interval, timeout, time.Minute)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
 	}
-	responder, err := NewPQCHPKERepository("PQC-HPKE[test-b]", toResponder, path(toInitiator, false),
+	// The responder never initiates, so its own channel must stay unused.
+	send, recvUnused := mustNotInitiate()
+	responder, err := NewPQCHPKERepository("PQC-HPKE[resp]", send, recvUnused,
 		func(uint32) bool { return false }, interval, timeout, time.Minute)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
 	}
-	return &pqcPipe{initiator: initiator, responder: responder}
+	p.initiator, p.responder = initiator, responder
+
+	// One pump goroutine, as udpServer has one read loop. Errors are collected
+	// rather than logged: logging from a goroutine outliving the test panics.
+	reply := deliver(toInitiator, false)
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-stop:
+				return
+			case frame := <-toResponder:
+				if err := responder.HandleFrame(frame, reply); err != nil {
+					p.mu.Lock()
+					p.respErr = append(p.respErr, err)
+					p.mu.Unlock()
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-stopped })
+
+	return p
 }
 
-// run executes one round on both ends concurrently and returns their errors.
-func (p *pqcPipe) run(t *testing.T, round uint32, wall time.Duration) (errInit, errResp error) {
+// run executes one round as the initiator. The responder needs no call: the
+// pump drives it, which is precisely the point of the design.
+func (p *pqcPipe) run(t *testing.T, round uint32, wall time.Duration) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), wall)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); errInit = p.initiator.RunRound(ctx, round) }()
-	go func() { defer wg.Done(); errResp = p.responder.RunRound(ctx, round) }()
-
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
+	done := make(chan error, 1)
+	go func() { done <- p.initiator.runRound(ctx, round) }()
 	select {
-	case <-done:
+	case err := <-done:
+		return err
 	case <-time.After(wall + 5*time.Second):
-		t.Fatal("round hung: RunRound did not return within the wall clock budget")
+		t.Fatal("round hung: runRound did not return within the wall clock budget")
+		return nil
 	}
-	return errInit, errResp
+}
+
+// framesSent returns every frame handed to the transport, dropped or not.
+func (p *pqcPipe) framesSent() []pqcFrame {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]pqcFrame(nil), p.sent...)
+}
+
+// settle gives the pump time to drain what the round left in flight. The
+// responder publishes after the initiator's round has already returned, so a
+// negative assertion needs this and a positive one needs waitPublished.
+func (p *pqcPipe) settle() { time.Sleep(200 * time.Millisecond) }
+
+// waitPublished polls until a key is available or the budget runs out.
+func waitPublished(r *PQCHPKERepository, wait time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		key, err := r.GetNewKey()
+		if err == nil {
+			return key, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestPQCRoundAgreesOverCleanPipe(t *testing.T) {
 	p := newPQCPipe(t, 0, 1, 3*time.Second)
 
-	errInit, errResp := p.run(t, 4242, 10*time.Second)
-	if errInit != nil {
-		t.Fatalf("initiator: %v", errInit)
-	}
-	if errResp != nil {
-		t.Fatalf("responder: %v", errResp)
+	if err := p.run(t, testRound(10*time.Second), 10*time.Second); err != nil {
+		t.Fatalf("initiator: %v", err)
 	}
 
 	keyA, err := p.initiator.GetNewKey()
 	if err != nil {
 		t.Fatalf("initiator GetNewKey: %v", err)
 	}
-	keyB, err := p.responder.GetNewKey()
+	keyB, err := waitPublished(p.responder, 2*time.Second)
 	if err != nil {
 		t.Fatalf("responder GetNewKey: %v", err)
 	}
@@ -470,6 +640,39 @@ func TestPQCRoundAgreesOverCleanPipe(t *testing.T) {
 	}
 	if len(keyA) != pqcKeyLen {
 		t.Fatalf("key is %d bytes, want %d", len(keyA), pqcKeyLen)
+	}
+}
+
+// TestPQCRoundIsThreeMessagesAndFiveDatagrams pins the protocol's cost. It is a
+// documented property, not an incidental one: the exchange was reduced from
+// four round trips to two by making the reply the acknowledgement, and a change
+// that quietly reintroduces a separate ack must fail here.
+func TestPQCRoundIsThreeMessagesAndFiveDatagrams(t *testing.T) {
+	p := newPQCPipe(t, 0, 3, 3*time.Second)
+	if err := p.run(t, testRound(10*time.Second), 10*time.Second); err != nil {
+		t.Fatalf("initiator: %v", err)
+	}
+	if _, err := waitPublished(p.responder, 2*time.Second); err != nil {
+		t.Fatalf("responder GetNewKey: %v", err)
+	}
+
+	counts := map[pqcKind]int{}
+	for _, f := range p.framesSent() {
+		counts[f.kind]++
+	}
+	want := map[pqcKind]int{pqcKindPubKey: 2, pqcKindEnc: 2, pqcKindTag: 1}
+	if len(counts) != len(want) {
+		t.Fatalf("a clean round sent kinds %v, want exactly %v", counts, want)
+	}
+	total := 0
+	for kind, n := range want {
+		if counts[kind] != n {
+			t.Errorf("kind %d: %d frames, want %d", kind, counts[kind], n)
+		}
+		total += n
+	}
+	if got := len(p.framesSent()); got != total {
+		t.Fatalf("a clean round sent %d datagrams, want %d", got, total)
 	}
 }
 
@@ -483,28 +686,28 @@ func TestPQCRoundUnderLoss(t *testing.T) {
 			const rounds = 5
 			for i := range rounds {
 				p := newPQCPipe(t, loss, int64(loss*100+i), 2*time.Second)
-				errInit, errResp := p.run(t, uint32(1000+i), 8*time.Second)
+				errInit := p.run(t, testRound(10*time.Second), 8*time.Second)
+				p.settle()
 
 				keyA, errA := p.initiator.GetNewKey()
 				keyB, errB := p.responder.GetNewKey()
 
-				switch {
-				case errInit == nil && errResp == nil:
-					if errA != nil || errB != nil {
-						t.Fatalf("round reported success but a key is missing: %v / %v", errA, errB)
-					}
-					if !bytes.Equal(keyA, keyB) {
-						t.Fatal("both ends succeeded with different keys; confirmation did not hold")
-					}
-					completed++
-				default:
+				if errInit != nil {
 					// A failed round must publish nothing on the failing side.
-					if errInit != nil && errA == nil {
-						t.Fatal("initiator failed the round but still published a key")
+					if errA == nil {
+						t.Fatal("the initiator failed the round but still published a key")
 					}
-					if errResp != nil && errB == nil {
-						t.Fatal("responder failed the round but still published a key")
-					}
+					continue
+				}
+				if errA != nil {
+					t.Fatalf("the round succeeded but the initiator has no key: %v", errA)
+				}
+				completed++
+				// The responder may be one message short: the initiator's tag
+				// is the last message and is unacknowledged, which is the
+				// documented residual. It must never hold a *different* key.
+				if errB == nil && !bytes.Equal(keyA, keyB) {
+					t.Fatal("both ends published, with different keys; confirmation did not hold")
 				}
 			}
 			t.Logf("%d%% loss: %d/%d rounds completed", loss, completed, rounds)
@@ -515,26 +718,185 @@ func TestPQCRoundUnderLoss(t *testing.T) {
 	}
 }
 
-func TestPQCGetNewKeyBeforeAnyRound(t *testing.T) {
-	p := newPQCPipe(t, 0, 2, time.Second)
+// TestPQCLostReplyFailsBothSides: with the responder's reply never arriving,
+// the round must fail and neither side may publish.
+func TestPQCLostReplyFailsBothSides(t *testing.T) {
+	p := newPQCPipeDropping(t, func(fromInitiator bool, f pqcFrame) bool {
+		return !fromInitiator && f.kind == pqcKindEnc
+	}, 10*time.Second, 900*time.Millisecond)
+
+	if err := p.run(t, testRound(10*time.Second), 10*time.Second); err == nil {
+		t.Fatal("the round reported success although the reply never arrived")
+	}
+	p.settle()
+
 	if _, err := p.initiator.GetNewKey(); err == nil {
+		t.Fatal("the initiator published without ever seeing an encapsulation")
+	}
+	if _, err := p.responder.GetNewKey(); err == nil {
+		t.Fatal("the responder published without the initiator's confirmation")
+	}
+}
+
+// TestPQCLostTagLeavesOnlyTheInitiatorPublished documents the residual every
+// protocol with an unacknowledged last message has. Losing the initiator's tag
+// must leave the responder *without* a key, never with a different one: the
+// next round reconverges the two and maxAge bounds the lone key's life.
+func TestPQCLostTagLeavesOnlyTheInitiatorPublished(t *testing.T) {
+	p := newPQCPipeDropping(t, func(fromInitiator bool, f pqcFrame) bool {
+		return fromInitiator && f.kind == pqcKindTag
+	}, 10*time.Second, 2*time.Second)
+
+	if err := p.run(t, testRound(10*time.Second), 10*time.Second); err != nil {
+		t.Fatalf("the initiator's round must still succeed: %v", err)
+	}
+	p.settle()
+
+	if _, err := p.initiator.GetNewKey(); err != nil {
+		t.Fatalf("the initiator verified the responder's tag and must publish: %v", err)
+	}
+	if _, err := p.responder.GetNewKey(); err == nil {
+		t.Fatal("the responder published without the initiator's confirmation")
+	}
+}
+
+// TestPQCRetriedPubKeyIsAnsweredFromTheStoredReply is the regression test for
+// the responder encapsulating twice in one round. Re-encapsulating on a retry
+// agrees a second key, and whichever reply reaches the initiator first decides
+// which key it confirms - while the responder keeps the other one. The reply is
+// therefore stored and resent byte for byte.
+func TestPQCRetriedPubKeyIsAnsweredFromTheStoredReply(t *testing.T) {
+	var mu sync.Mutex
+	dropped := 0
+	p := newPQCPipeDropping(t, func(fromInitiator bool, f pqcFrame) bool {
+		if !fromInitiator && f.kind == pqcKindEnc {
+			mu.Lock()
+			defer mu.Unlock()
+			if dropped < 2 { // lose the first reply entirely, both its frames
+				dropped++
+				return true
+			}
+		}
+		return false
+	}, 10*time.Second, 3*time.Second)
+
+	if err := p.run(t, testRound(10*time.Second), 12*time.Second); err != nil {
+		t.Fatalf("the round must survive one lost reply: %v", err)
+	}
+
+	keyA, err := p.initiator.GetNewKey()
+	if err != nil {
+		t.Fatalf("initiator GetNewKey: %v", err)
+	}
+	keyB, err := waitPublished(p.responder, 2*time.Second)
+	if err != nil {
+		t.Fatalf("responder GetNewKey: %v", err)
+	}
+	if !bytes.Equal(keyA, keyB) {
+		t.Fatal("peers published different keys after a retry")
+	}
+
+	// The resent reply must be the same bytes as the lost one: a second
+	// encapsulation would differ, since it draws fresh randomness.
+	var replies [][]byte
+	for _, f := range p.framesSent() {
+		if f.kind == pqcKindEnc && f.seq == 0 {
+			replies = append(replies, f.data)
+		}
+	}
+	if len(replies) < 2 {
+		t.Fatalf("expected the reply to be sent at least twice, saw %d", len(replies))
+	}
+	for i, r := range replies[1:] {
+		if !bytes.Equal(replies[0], r) {
+			t.Fatalf("reply %d differs from the first: the responder encapsulated again", i+1)
+		}
+	}
+}
+
+// TestPQCResponderRejectsForgedTag asserts the confirmation gate on the
+// responder side: a tag that does not match the agreed key publishes nothing.
+func TestPQCResponderRejectsForgedTag(t *testing.T) {
+	r := newPQCTestRepo(t, time.Second, 500*time.Millisecond, time.Minute)
+
+	_, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+
+	round := testRound(time.Second)
+	var replies [][]byte
+	reply := func(frame []byte) error {
+		replies = append(replies, bytes.Clone(frame))
+		return nil
+	}
+	for _, f := range mustSplit(t, round, pqcKindPubKey, pub) {
+		if err := r.HandleFrame(f, reply); err != nil {
+			t.Fatalf("HandleFrame(pubKey): %v", err)
+		}
+	}
+	if len(replies) != 2 {
+		t.Fatalf("the responder sent %d reply frames, want 2", len(replies))
+	}
+
+	forged := make([]byte, pqcConfirmTagLen)
+	for _, f := range mustSplit(t, round, pqcKindTag, forged) {
+		if err := r.HandleFrame(f, reply); err == nil {
+			t.Fatal("HandleFrame accepted a forged confirmation tag")
+		}
+	}
+	if _, err := r.GetNewKey(); err == nil {
+		t.Fatal("the responder published a key on a forged tag")
+	}
+}
+
+// TestPQCResponderIgnoresUnexpectedFrames asserts the responder tolerates
+// frames it has no state for: an error, never a panic and never a publish.
+func TestPQCResponderIgnoresUnexpectedFrames(t *testing.T) {
+	r := newPQCTestRepo(t, time.Second, 500*time.Millisecond, time.Minute)
+	reply := func([]byte) error { return fmt.Errorf("nothing may be answered here") }
+
+	round := testRound(time.Second)
+	cases := []struct {
+		name  string
+		frame []byte
+	}{
+		{"tag without a round in flight", mustSplit(t, round, pqcKindTag, make([]byte, pqcConfirmTagLen))[0]},
+		// A complete message of a kind the responder never expects. One frame,
+		// so it completes: an incomplete message is legitimately ignored.
+		{"encapsulation sent to a responder", mustSplit(t, round, pqcKindEnc, make([]byte, 8))[0]},
+		{"undecodable frame", []byte{0, 0}},
+		// Authentic, but from a round the schedule cannot be serving: an
+		// off-path replay needs no PSK, only a capture inside MAX_CLOCK_SKEW.
+		{"stale round", mustSplit(t, round-5, pqcKindPubKey, make([]byte, 1665))[0]},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := r.HandleFrame(tc.frame, reply); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+	if _, err := r.GetNewKey(); err == nil {
+		t.Fatal("the responder published a key from unexpected frames")
+	}
+}
+
+func TestPQCGetNewKeyBeforeAnyRound(t *testing.T) {
+	r := newPQCTestRepo(t, time.Second, 100*time.Millisecond, time.Minute)
+	if _, err := r.GetNewKey(); err == nil {
 		t.Fatal("expected an error before the first round has agreed a key")
 	}
 }
 
 func TestPQCGetNewKeyStale(t *testing.T) {
-	inbound := make(chan []byte, 1)
-	r, err := NewPQCHPKERepository("PQC-HPKE[test]", inbound, func([]byte) error { return nil },
-		func(uint32) bool { return true }, time.Second, 100*time.Millisecond, 50*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
-	}
+	r := newPQCTestRepo(t, time.Second, 100*time.Millisecond, 50*time.Millisecond)
 
 	key := make([]byte, pqcKeyLen)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	if err := r.publish(key); err != nil {
+	if err := r.publish(1, key); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	if _, err := r.GetNewKey(); err != nil {
@@ -548,14 +910,9 @@ func TestPQCGetNewKeyStale(t *testing.T) {
 }
 
 func TestPQCPublishRejectsWrongLength(t *testing.T) {
-	inbound := make(chan []byte, 1)
-	r, err := NewPQCHPKERepository("PQC-HPKE[test]", inbound, func([]byte) error { return nil },
-		func(uint32) bool { return true }, time.Second, 100*time.Millisecond, time.Minute)
-	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
-	}
+	r := newPQCTestRepo(t, time.Second, 100*time.Millisecond, time.Minute)
 	for _, n := range []int{0, 16, 31, 33, 64} {
-		if err := r.publish(make([]byte, n)); err == nil {
+		if err := r.publish(1, make([]byte, n)); err == nil {
 			t.Fatalf("publish accepted a %d-byte key", n)
 		}
 	}
@@ -576,17 +933,13 @@ func TestPQCPublishRejectsWrongLength(t *testing.T) {
 // fix this test failed within a few hundred iterations; -race alone does not
 // catch it, because the atomic Swap/Load supplied a partial happens-before edge.
 func TestPQCPublishDoesNotCorruptConcurrentGetNewKey(t *testing.T) {
-	r, err := NewPQCHPKERepository("PQC-HPKE[test]", make(chan []byte, 1), func([]byte) error { return nil },
-		func(uint32) bool { return true }, time.Minute, time.Second, time.Hour)
-	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
-	}
+	r := newPQCTestRepo(t, time.Minute, time.Second, time.Hour)
 
 	want := make([]byte, pqcKeyLen)
 	if _, err := rand.Read(want); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	if err := r.publish(want); err != nil {
+	if err := r.publish(1, want); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
 
@@ -596,7 +949,7 @@ func TestPQCPublishDoesNotCorruptConcurrentGetNewKey(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range iterations {
-			if err := r.publish(want); err != nil {
+			if err := r.publish(1, want); err != nil {
 				t.Errorf("publish: %v", err)
 				return
 			}
@@ -624,53 +977,30 @@ func TestPQCPublishDoesNotCorruptConcurrentGetNewKey(t *testing.T) {
 	}
 }
 
-// TestPQCConcurrentRoundRejected asserts that only one round is ever active.
-func TestPQCConcurrentRoundRejected(t *testing.T) {
-	inbound := make(chan []byte, 1)
-	r, err := NewPQCHPKERepository("PQC-HPKE[test]", inbound, func([]byte) error { return nil },
-		func(uint32) bool { return false }, // responder: blocks waiting for a public key
-		time.Second, 700*time.Millisecond, time.Minute)
-	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
-	}
-
-	ctx := context.Background()
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		_ = r.RunRound(ctx, 1)
-	}()
-	<-started
-	time.Sleep(100 * time.Millisecond) // let the first round take the slot
-
-	if err := r.RunRound(ctx, 2); err == nil {
-		t.Fatal("a second concurrent round was accepted; only one may be active")
-	}
-}
-
 func TestPQCConstructorValidation(t *testing.T) {
-	inbound := make(chan []byte, 1)
 	send := func([]byte) error { return nil }
+	recv := func(time.Time) ([]byte, error) { return nil, nil }
 	role := func(uint32) bool { return true }
 
 	cases := []struct {
 		name                      string
-		inbound                   <-chan []byte
 		send                      func([]byte) error
+		recv                      func(time.Time) ([]byte, error)
 		role                      func(uint32) bool
 		interval, timeout, maxAge time.Duration
 	}{
-		{"nil inbound", nil, send, role, time.Second, time.Millisecond, time.Minute},
-		{"nil send", inbound, nil, role, time.Second, time.Millisecond, time.Minute},
-		{"nil role", inbound, send, nil, time.Second, time.Millisecond, time.Minute},
-		{"zero interval", inbound, send, role, 0, time.Millisecond, time.Minute},
-		{"timeout equals interval", inbound, send, role, time.Second, time.Second, time.Minute},
-		{"timeout exceeds interval", inbound, send, role, time.Second, 2 * time.Second, time.Minute},
-		{"zero maxAge", inbound, send, role, time.Second, time.Millisecond, 0},
+		{"nil send", nil, recv, role, time.Second, time.Millisecond, time.Minute},
+		{"nil recv", send, nil, role, time.Second, time.Millisecond, time.Minute},
+		{"nil role", send, recv, nil, time.Second, time.Millisecond, time.Minute},
+		{"zero interval", send, recv, role, 0, time.Millisecond, time.Minute},
+		{"timeout equals interval", send, recv, role, time.Second, time.Second, time.Minute},
+		{"timeout exceeds interval", send, recv, role, time.Second, 2 * time.Second, time.Minute},
+		{"zero maxAge", send, recv, role, time.Second, time.Millisecond, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewPQCHPKERepository("PQC-HPKE[test]", tc.inbound, tc.send, tc.role, tc.interval, tc.timeout, tc.maxAge); err == nil {
+			if _, err := NewPQCHPKERepository("", tc.send, tc.recv, tc.role,
+				tc.interval, tc.timeout, tc.maxAge); err == nil {
 				t.Fatal("expected a constructor error")
 			}
 		})
@@ -695,69 +1025,6 @@ func TestPQCRoundIndexIsClockDerived(t *testing.T) {
 	_ = pqcRoundIndex(base, time.Millisecond)
 }
 
-// TestPQCLostConfirmDoesNotPublishAlone is the regression test for one-sided
-// publication. The responder used to publish as soon as it had verified the
-// initiator's tag, so losing its own confirm left it holding a key the
-// initiator did not have - and the next rekey then derived two different PSKs
-// with nothing logged to explain it.
-//
-// Both tags are acknowledged now, so losing one must leave the round failed on
-// both sides rather than committed on one.
-func TestPQCLostConfirmDoesNotPublishAlone(t *testing.T) {
-	// Lose every confirm frame travelling responder -> initiator.
-	p := newPQCPipeDropping(t, func(fromInitiator bool, f pqcFrame) bool {
-		return !fromInitiator && f.kind == pqcKindConfirm
-	}, 10*time.Second, 1500*time.Millisecond)
-
-	errInit, errResp := p.run(t, 500, 10*time.Second)
-
-	_, errKeyInit := p.initiator.GetNewKey()
-	_, errKeyResp := p.responder.GetNewKey()
-	publishedInit := errKeyInit == nil
-	publishedResp := errKeyResp == nil
-
-	if publishedInit != publishedResp {
-		t.Fatalf("one-sided publish: initiator published=%v, responder published=%v (round errors: %v / %v)",
-			publishedInit, publishedResp, errInit, errResp)
-	}
-	if publishedInit {
-		t.Fatal("a round whose confirmation never arrived must not publish on either side")
-	}
-}
-
-// TestPQCLostConfirmAckStillConverges asserts the acknowledgement itself is
-// retried: losing the first ack of the responder's tag must not fail the round.
-func TestPQCLostConfirmAckStillConverges(t *testing.T) {
-	var mu sync.Mutex
-	seen := 0
-	p := newPQCPipeDropping(t, func(fromInitiator bool, f pqcFrame) bool {
-		if fromInitiator && f.kind == pqcKindAck && len(f.data) == 1 && pqcKind(f.data[0]) == pqcKindConfirm {
-			mu.Lock()
-			defer mu.Unlock()
-			seen++
-			return seen == 1 // lose only the first one
-		}
-		return false
-	}, 10*time.Second, 3*time.Second)
-
-	errInit, errResp := p.run(t, 501, 12*time.Second)
-	if errInit != nil || errResp != nil {
-		t.Fatalf("round should survive a single lost confirm-ack: %v / %v", errInit, errResp)
-	}
-
-	keyA, err := p.initiator.GetNewKey()
-	if err != nil {
-		t.Fatalf("initiator GetNewKey: %v", err)
-	}
-	keyB, err := p.responder.GetNewKey()
-	if err != nil {
-		t.Fatalf("responder GetNewKey: %v", err)
-	}
-	if !bytes.Equal(keyA, keyB) {
-		t.Fatal("peers published different keys")
-	}
-}
-
 // TestPQCRunAgreesAKeyBeforeTheFirstBoundary asserts the startup round: with a
 // five-minute round interval, a key that appears within seconds can only have
 // come from the immediate round, not from waiting for a boundary.
@@ -768,6 +1035,8 @@ func TestPQCRunAgreesAKeyBeforeTheFirstBoundary(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go p.initiator.Run(ctx)
+	// The responder's Run does nothing for a round it does not initiate; the
+	// pump is what drives its side. Started anyway, to assert exactly that.
 	go p.responder.Run(ctx)
 
 	deadline := time.Now().Add(6 * time.Second)
@@ -836,61 +1105,226 @@ func TestPQCNextRoundAgreesAcrossPeers(t *testing.T) {
 // port-unreachable and the whole round was thrown away. A failed write must
 // cost a retry instead.
 func TestPQCRoundSurvivesTransientSendFailure(t *testing.T) {
-	toInitiator := make(chan []byte, 64)
-	toResponder := make(chan []byte, 64)
-
-	deliver := func(dst chan []byte) func([]byte) error {
-		return func(frame []byte) error {
-			cp := make([]byte, len(frame))
-			copy(cp, frame)
-			select {
-			case dst <- cp:
-			default:
-			}
-			return nil
-		}
-	}
-
 	var mu sync.Mutex
 	remaining := 2 // both frames of the initiator's first message fail
-	initiatorSend := func(frame []byte) error {
+	p := newPQCPipeFailingSends(t, func() bool {
 		mu.Lock()
+		defer mu.Unlock()
 		if remaining > 0 {
 			remaining--
-			mu.Unlock()
-			return fmt.Errorf("write udp 10.0.0.1:46886->10.0.0.2:9998: write: connection refused")
+			return true
 		}
-		mu.Unlock()
-		return deliver(toResponder)(frame)
-	}
+		return false
+	}, 10*time.Second, 3*time.Second)
 
-	const interval = 10 * time.Second
-	initiator, err := NewPQCHPKERepository("PQC-HPKE[test-a]", toInitiator, initiatorSend,
-		func(uint32) bool { return true }, interval, 3*time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
-	}
-	responder, err := NewPQCHPKERepository("PQC-HPKE[test-b]", toResponder, deliver(toInitiator),
-		func(uint32) bool { return false }, interval, 3*time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
-	}
-
-	p := &pqcPipe{initiator: initiator, responder: responder}
-	errInit, errResp := p.run(t, 357756367, 15*time.Second)
-	if errInit != nil || errResp != nil {
-		t.Fatalf("a round must survive two failed writes: %v / %v", errInit, errResp)
+	if err := p.run(t, testRound(10*time.Second), 15*time.Second); err != nil {
+		t.Fatalf("a round must survive two failed writes: %v", err)
 	}
 
 	keyA, err := p.initiator.GetNewKey()
 	if err != nil {
 		t.Fatalf("initiator GetNewKey: %v", err)
 	}
-	keyB, err := p.responder.GetNewKey()
+	keyB, err := waitPublished(p.responder, 2*time.Second)
 	if err != nil {
 		t.Fatalf("responder GetNewKey: %v", err)
 	}
 	if !bytes.Equal(keyA, keyB) {
 		t.Fatal("peers published different keys")
+	}
+}
+
+// TestPQCRunServesEachRoundOnce is the regression test for a scheduler that
+// repeats itself. The round index is clock-derived, so looping before the
+// boundary names the same round again: a round finishing in milliseconds would
+// be re-run until the boundary passed, and a node that is not the initiator
+// would spin on a wake instant already in the past.
+func TestPQCRunServesEachRoundOnce(t *testing.T) {
+	const interval = time.Second
+	p := newPQCPipeDropping(t, nil, interval, 200*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.initiator.Run(ctx)
+	time.Sleep(2500 * time.Millisecond)
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	rounds := map[uint32]int{}
+	for _, f := range p.framesSent() {
+		if f.kind == pqcKindPubKey && f.seq == 0 {
+			rounds[f.round]++
+		}
+	}
+	// Startup plus the two boundaries inside 2.5s, each attempted once.
+	if len(rounds) > 4 {
+		t.Fatalf("%d distinct rounds in 2.5s at a 1s interval: %v", len(rounds), rounds)
+	}
+	for round, n := range rounds {
+		if n > 1 {
+			t.Fatalf("round %d was started %d times; the scheduler repeats itself", round, n)
+		}
+	}
+}
+
+// TestPQCFollowingRoundNeverRepeats pins the guard that the containerlab-style
+// macOS run exposed and the in-memory tests could not: the boundary wait is a
+// monotonic sleep to a wall-clock instant, so it can return in the second
+// before the boundary, and the clock then names the round just served again.
+// The real run agreed round 357758807 twice, 1250 ms apart.
+func TestPQCFollowingRoundNeverRepeats(t *testing.T) {
+	const interval = 5 * time.Second
+	const timeout = 1250 * time.Millisecond
+
+	boundary := time.Unix(1788793930, 0) // a boundary, from the macOS run
+	served := uint32(boundary.Unix() / 5)
+
+	// A hair early is exactly what the boundary wait can return.
+	early := boundary.Add(-time.Microsecond)
+	if got, _ := pqcNextRound(early, interval, timeout); got != served {
+		t.Fatalf("precondition: the clock names %d there, want the round just served %d", got, served)
+	}
+	round, wake := pqcFollowingRound(early, interval, timeout, served)
+	if round != served+1 {
+		t.Fatalf("round = %d, want %d: the round just served was handed out again", round, served+1)
+	}
+	if wake.Before(early) {
+		t.Fatalf("wake %s is in the past", wake)
+	}
+	if b := time.Unix(int64(round)*5, 0); wake.After(b) {
+		t.Fatalf("wake %s is after the boundary %s", wake, b)
+	}
+
+	// With no repeat to correct, it must be pqcNextRound exactly, so both peers
+	// keep deriving the schedule from the clock alone.
+	for _, off := range []time.Duration{0, time.Second, 3 * time.Second} {
+		now := boundary.Add(off)
+		gotRound, gotWake := pqcFollowingRound(now, interval, timeout, served)
+		wantRound, wantWake := pqcNextRound(now, interval, timeout)
+		if gotRound != wantRound || !gotWake.Equal(wantWake) {
+			t.Fatalf("at +%s: (%d, %s), want (%d, %s)", off, gotRound, gotWake, wantRound, wantWake)
+		}
+	}
+}
+
+// TestPQCReplayedPubKeyDoesNotDisplaceTheRoundInFlight is the regression test
+// for an off-path replay, and it needs no PSK to mount: the envelope
+// authenticates a frame but only bounds its timestamp by MAX_CLOCK_SKEW, a
+// minute by default, so a captured public key stays replayable for several
+// rounds.
+//
+// Replayed between the real public key and the real confirmation, it used to
+// install itself as the round in flight and discard the pending key. The
+// responder then failed to confirm while the initiator published, which is the
+// one-sided key the confirmation exchange exists to prevent.
+func TestPQCReplayedPubKeyDoesNotDisplaceTheRoundInFlight(t *testing.T) {
+	const interval = 10 * time.Second
+	r := newPQCTestRepo(t, interval, time.Second, time.Minute)
+	round := testRound(interval)
+
+	// A real exchange, driven by hand so the replay can land mid-round.
+	priv, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	var replies [][]byte
+	reply := func(frame []byte) error {
+		replies = append(replies, bytes.Clone(frame))
+		return nil
+	}
+	for _, f := range mustSplit(t, round, pqcKindPubKey, pub) {
+		if err := r.HandleFrame(f, reply); err != nil {
+			t.Fatalf("HandleFrame(pubKey): %v", err)
+		}
+	}
+
+	// The attacker replays a public key captured one round earlier. It is
+	// authentic and inside the freshness window, so only the ordering guard
+	// stands between it and the pending key.
+	_, stalePub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	for _, f := range mustSplit(t, round-1, pqcKindPubKey, stalePub) {
+		_ = r.HandleFrame(f, reply) // rejected; the error is not the assertion
+	}
+
+	// The real round must still complete: reassemble the reply, derive, confirm.
+	var join pqcJoiner
+	var encMsg []byte
+	for _, raw := range replies {
+		f, err := decodeFrame(raw)
+		if err != nil {
+			t.Fatalf("decodeFrame: %v", err)
+		}
+		if f.kind != pqcKindEnc || f.round != round {
+			continue
+		}
+		if msg, done := join.add(f); done {
+			encMsg = msg
+		}
+	}
+	if len(encMsg) <= pqcConfirmTagLen {
+		t.Fatalf("no encapsulation for the real round: the replay took the reply path")
+	}
+	key, err := pqcInitiatorFinish(priv, encMsg[:len(encMsg)-pqcConfirmTagLen], round)
+	if err != nil {
+		t.Fatalf("initiatorFinish: %v", err)
+	}
+	tag, err := pqcConfirmTag(key, round, pqcRoleInitiator)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	for _, f := range mustSplit(t, round, pqcKindTag, tag) {
+		if err := r.HandleFrame(f, reply); err != nil {
+			t.Fatalf("the replay displaced the round in flight: %v", err)
+		}
+	}
+
+	got, err := r.GetNewKey()
+	if err != nil {
+		t.Fatalf("the responder never published, so the initiator would be alone: %v", err)
+	}
+	if !bytes.Equal(got, key) {
+		t.Fatal("the responder published a key the initiator does not hold")
+	}
+}
+
+// TestPQCPublishKeepsTheNewerRound is the regression test for the divergence
+// the macOS run exposed. At startup the round for the current index and the
+// round for the next boundary are both due, and one peer initiates each, so
+// both complete at the same instant - in opposite orders on the two peers:
+//
+//	peer a: publishes 357775722, then 357775723
+//	peer b: publishes 357775723, then 357775722
+//
+// Keeping the last one left them holding different keys, and the two PSKs
+// derived from them differed with nothing logged to explain it. Keeping the
+// highest round is order-independent, so both converge on the same key.
+func TestPQCPublishKeepsTheNewerRound(t *testing.T) {
+	older := bytes.Repeat([]byte{0xa1}, pqcKeyLen)
+	newer := bytes.Repeat([]byte{0xb2}, pqcKeyLen)
+
+	for _, tc := range []struct {
+		name  string
+		order [][]any
+	}{
+		{"newer last", [][]any{{uint32(357775722), older}, {uint32(357775723), newer}}},
+		{"newer first", [][]any{{uint32(357775723), newer}, {uint32(357775722), older}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newPQCTestRepo(t, time.Minute, time.Second, time.Hour)
+			for _, step := range tc.order {
+				if err := r.publish(step[0].(uint32), step[1].([]byte)); err != nil {
+					t.Fatalf("publish: %v", err)
+				}
+			}
+			got, err := r.GetNewKey()
+			if err != nil {
+				t.Fatalf("GetNewKey: %v", err)
+			}
+			if !bytes.Equal(got, newer) {
+				t.Fatal("the register kept the older round's key; two peers publishing in opposite orders would diverge")
+			}
+		})
 	}
 }

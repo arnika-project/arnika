@@ -68,6 +68,13 @@ is allowed to fall back to if one key source fails:
 | (C) hybrid | `QkdAndPqcRequired` _(default)_ | QKD **and** PQC | Both keys mandatory — no fallback, the strictest mode |
 | — | `EitherQkdOrPqcRequired` | QKD **or** PQC | Either source alone is accepted; the weakest mode |
 
+When a source that the mode treats as **mandatory** cannot deliver, the interval fails and the tunnel is
+invalidated with a random PSK, so a failed rotation never extends the life of the key it was meant to
+replace. When a source the mode treats as **optional** cannot deliver, rotation carries on from the
+other one: without QKD the two peers install the PQC-only PSK on an instant they both derive from the
+wall clock, because the `key_id` message that normally puts them on the same key is exactly what a KMS
+outage takes away.
+
 Regardless of the selected mode, WireGuard always receives a single 256bit (32byte) key as PSK which is used for WireGuard internal `MixKeyAndHash()` using **HKDF**.
 
 _Figure 3_ shows the key path of 2 interconnected sites for the hyprid mode (C) (QKD+PQC). In this scenario, the **KEY-CONTROL function** serves as a control entity, responsible for obtaining a **key** and transferring it to the encryption function (WireGuard).

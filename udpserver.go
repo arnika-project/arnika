@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"log"
 	"net"
@@ -13,6 +12,12 @@ import (
 	"github.com/arnika-project/arnika/auth"
 )
 
+// pqcHandler consumes one verified, decrypted PQC frame and may answer the
+// sender through reply, which sends one plaintext frame back. Implemented by
+// repositories.PQCHPKERepository.HandleFrame. Neither the handler nor reply may
+// block: both run on the UDP read loop, which also carries the QKD path.
+type pqcHandler func(frame []byte, reply func(frame []byte) error) error
+
 // udpServer listens for incoming UDP packets using the security-hardened protocol:
 //   - HMAC-SHA256 signature verification (authentication)
 //   - Timestamp validation (replay protection)
@@ -21,10 +26,12 @@ import (
 //
 // Protocol flow:
 //  1. Client sends DATA packet (signed + encrypted payload) -> Server replies with ACK
-//  2. Peer sends PQC packets (key agreement frames) -> handed to pqcInbound, never acked here
+//  2. Peer sends PQC packets (key agreement frames) -> handed to pqcHandle, which
+//     answers on this socket when the exchange calls for a reply
 //
 // dirIn is the direction the peer signs with; dirOut is this node's own.
-func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result chan string, done chan bool, pqcInbound chan<- []byte, rateLimit int, rateWindow, maxClockSkew time.Duration) {
+// pqcHandle is nil when no PQC key reader is wired, and PQC packets are dropped.
+func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result chan string, done chan bool, pqcHandle pqcHandler, rateLimit int, rateWindow, maxClockSkew time.Duration) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit,
 		syscall.SIGTERM,
@@ -71,32 +78,20 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 			continue
 		}
 
-		// 2. Base64 decode
-		raw, err := base64.StdEncoding.DecodeString(string(buf[:n]))
-		if err != nil {
-			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
-			continue
-		}
-
-		// 3. Unmarshal + HMAC verify (cheap, before any decryption)
-		pkt, err := auth.UnmarshalPacket(psk, raw, dirIn)
+		// 2. Unmarshal + HMAC verify (cheap, before any decryption)
+		pkt, err := auth.UnmarshalPacket(psk, buf[:n], dirIn)
 		if err != nil {
 			log.Printf("[WARNING] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
 			continue
 		}
 
-		// 4. Timestamp check (replay protection)
-		now := time.Now().Unix()
-		diff := now - pkt.Timestamp
-		if diff < 0 {
-			diff = -diff
-		}
-		if diff > int64(maxClockSkew.Seconds()) {
+		// 3. Timestamp check (replay protection)
+		if !auth.WithinSkew(pkt.Timestamp, maxClockSkew) {
 			log.Printf("[DEBUG] %s packet rejected from %s (timestamp)", BACKUPLOGPREFIX, remoteAddr)
 			continue
 		}
 
-		// 5. Dispatch by type, decrypting only after all cheap checks pass
+		// 4. Dispatch by type, decrypting only after all cheap checks pass
 		switch pkt.Type {
 		case auth.PacketData:
 			decrypted, err := auth.Decrypt(psk, pkt.Payload)
@@ -106,29 +101,45 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 				continue
 			}
 
-			// 6. Send ACK
+			// 5. Send ACK
 			ack := &auth.Packet{
 				Type:      auth.PacketAck,
 				Timestamp: time.Now().Unix(),
 			}
-			ackB64 := base64.StdEncoding.EncodeToString(ack.Marshal(psk, dirOut))
-			_, _ = conn.WriteToUDP([]byte(ackB64), remoteAddr)
+			_, _ = conn.WriteToUDP(ack.Marshal(psk, dirOut), remoteAddr)
 
 			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, string(decrypted), remoteAddr)
 			result <- string(decrypted)
 
 		case auth.PacketPQC:
+			if pqcHandle == nil {
+				log.Printf("[DEBUG] %s pqc frame dropped, no PQC key reader wired", BACKUPLOGPREFIX)
+				continue
+			}
 			decrypted, err := auth.Decrypt(psk, pkt.Payload)
 			if err != nil {
 				log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
 				continue
 			}
-			// Non-blocking: a slow or absent PQC consumer must never stall the
-			// QKD path. PQC frames carry their own kind=ack, so none is sent here.
-			select {
-			case pqcInbound <- decrypted:
-			default:
-				log.Printf("[DEBUG] %s pqc frame dropped (queue full)", BACKUPLOGPREFIX)
+			// The PQC responder answers on this socket, back to the sender,
+			// exactly as the ACK above does. A reply goes out only after the
+			// rate limit, the HMAC and the timestamp have passed, so eliciting
+			// one requires the PSK: this is not a reflection primitive.
+			reply := func(frame []byte) error {
+				encrypted, err := auth.Encrypt(psk, frame)
+				if err != nil {
+					return err
+				}
+				out := &auth.Packet{
+					Type:      auth.PacketPQC,
+					Timestamp: time.Now().Unix(),
+					Payload:   encrypted,
+				}
+				_, err = conn.WriteToUDP(out.Marshal(psk, dirOut), remoteAddr)
+				return err
+			}
+			if err := pqcHandle(decrypted, reply); err != nil {
+				log.Printf("[WARNING] %s pqc frame from %s: %v", BACKUPLOGPREFIX, remoteAddr, err)
 			}
 
 		default:
@@ -173,8 +184,7 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 			Timestamp: time.Now().Unix(),
 			Payload:   encrypted,
 		}
-		dataBytes := base64.StdEncoding.EncodeToString(dataPkt.Marshal(psk, dirOut))
-		_, err = conn.Write([]byte(dataBytes))
+		_, err = conn.Write(dataPkt.Marshal(psk, dirOut))
 		if err != nil {
 			return fmt.Errorf("failed to write DATA packet: %w", err)
 		}
@@ -193,24 +203,14 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 			return fmt.Errorf("no ACK after %d attempts: %w", maxRetries, err)
 		}
 
-		ackRaw, err := base64.StdEncoding.DecodeString(string(ackBuf[:n]))
-		if err != nil {
-			return fmt.Errorf("authentication failed")
-		}
-		ackPkt, err := auth.UnmarshalPacket(psk, ackRaw, dirIn)
+		ackPkt, err := auth.UnmarshalPacket(psk, ackBuf[:n], dirIn)
 		if err != nil {
 			return fmt.Errorf("authentication failed")
 		}
 		if ackPkt.Type != auth.PacketAck {
 			return fmt.Errorf("authentication failed")
 		}
-
-		now := time.Now().Unix()
-		diff := now - ackPkt.Timestamp
-		if diff < 0 {
-			diff = -diff
-		}
-		if diff > int64(maxClockSkew.Seconds()) {
+		if !auth.WithinSkew(ackPkt.Timestamp, maxClockSkew) {
 			return fmt.Errorf("authentication failed")
 		}
 
