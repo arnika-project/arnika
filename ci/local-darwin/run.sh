@@ -3,18 +3,27 @@
 # Native macOS end-to-end test: two real WireGuard interfaces on loopback, the
 # bundled KMS simulator, and two Arnika instances rotating the PSK on both ends.
 #
+# Each mode is put through its rotation cycles and then three deliberate
+# failures - QKD taken away, PQC taken away, the PSK desynced behind Arnika's
+# back - each followed by a recovery. WireGuard itself is pre-tested first, and
+# the run stops there if that fails. README.md explains why the tunnel check
+# looks the way it does: both ends are on one host, so a bare ping to the peer
+# address proves nothing.
+#
 # Needs sudo: wg-quick creates the interfaces and their control sockets are
 # owned by root, so Arnika has to run as root to write the PSK - the same
 # privilege it needs on Linux.
 #
-#   ./run.sh            bring up, watch five rotation cycles, tear down
+#   ./run.sh            all modes
 #   ./run.sh --keep     leave the interfaces and logs in place afterwards
-#   ./run.sh --quiet    do not stream the logs, only report the checks
-#   VERBOSE=1 ./run.sh  also print the wg dumps at the end
+#   ./run.sh --quiet    do not print the Arnika and KMS log lines
+#   ./run.sh --clean    only clear leftovers from earlier runs, then stop
 #
-# Arnika and the KMS simulator log to the console as they run, prefixed a1|,
-# a2| and kms|. The simulator needs DEBUG=true for its request and response
-# logging; Arnika's [DEBUG] lines are unconditional.
+# Every run starts by clearing what an earlier one left behind, so a stranded
+# process cannot write a PSK underneath the run that follows it.
+#
+# The KMS simulator runs with DEBUG=true so its requests and responses are
+# logged. Arnika's [DEBUG] lines are unconditional.
 #
 # See README.md for prerequisites.
 
@@ -23,15 +32,28 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d /tmp/arnika-darwin.XXXXXX)"
+CYCLES=3
+MODES="QkdAndPqcRequired AtLeastQkdRequired AtLeastPqcRequired"
+
 KEEP=0
 STREAM=1
+CLEAN_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --keep)  KEEP=1 ;;
         --quiet) STREAM=0 ;;
+        --clean) CLEAN_ONLY=1 ;;
         *) echo "unknown option: $arg"; exit 2 ;;
     esac
 done
+
+# Patterns for pkill. The bracket keeps the pattern from matching the pkill
+# command line itself: sudo's argv carries the pattern verbatim, so without it
+# pkill signals the sudo that is running it.
+# Anchored, so a log path like .../kms.log or the tee writing it never matches.
+PAT_PEERS="$WORK/[a]rnika\$"
+PAT_KMS="$WORK/[k]ms\$"
+PAT_STALE='/tmp/arnika-darwin[.][^/]*/([a]rnika|[k]ms)$'
 
 if [ -t 1 ]; then
     C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
@@ -40,53 +62,239 @@ else
     C_RESET=""; C_DIM=""; C_BOLD=""; C_A1=""; C_A2=""
 fi
 
-# stream prefixes each line of a process's output so three interleaved logs
-# stay readable. fflush keeps it live rather than block-buffered.
-stream() {
-    if [ "$STREAM" = "1" ]; then
-        awk -v p="$1" '{print p $0; fflush()}'
-    else
-        cat > /dev/null
-    fi
+FAILURES=0
+# Every pass and fail is also appended to a tally file, tagged with the section
+# head2 last announced and with INTENT, which is all the summary needs.
+#
+# INTENT marks a check that runs against a deliberately broken state - the
+# missing-source and desync tests, and the pre-test's mismatched key. Those
+# checks are the ones that pass *because* something is broken, so the summary
+# has to tell them apart from a check of a healthy tunnel. step clears it and
+# step_fault sets it, so a phase cannot forget to put it back.
+SECTION="setup"
+INTENT=0
+# LAST_WAS_LOG remembers whether the last thing on the console came from a peer
+# log or from the run itself. gap puts a blank line between the two whenever it
+# changes, so a block of log lines can never be read as part of a result.
+LAST_WAS_LOG=0
+gap() {
+    if [ "$LAST_WAS_LOG" = "1" ]; then printf '\n'; fi
+    LAST_WAS_LOG=0
+}
+tally() { printf '%s\t%s\t%s\t%s\n' "$SECTION" "$1" "$INTENT" "$2" >> "$WORK/tally"; }
+# step and head2 open with a blank line of their own, so they only have to clear
+# the marker; everything else asks gap for the break.
+step()       { INTENT=0; LAST_WAS_LOG=0; printf '\n%s==> %s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
+step_fault() { INTENT=1; LAST_WAS_LOG=0; printf '\n%s==> %s%s%s\n' "$C_BOLD" "$*" " [intentional]" "$C_RESET"; }
+head2() { SECTION="$*"; INTENT=0; LAST_WAS_LOG=0; printf '\n%s─── %s %s%s\n' "$C_BOLD" "$*" "──────────────────────────" "$C_RESET"; }
+pass()  { logs; gap; printf '%s    PASS  %s%s\n' "$C_BOLD" "$*" "$C_RESET"; tally PASS "$*"; }
+fail()  { logs; gap; printf '%s    FAIL  %s%s\n' "$C_BOLD" "$*" "$C_RESET"; tally FAIL "$*"; FAILURES=$((FAILURES + 1)); }
+info()  { gap; printf '          %s\n' "$*"; }
+# out indents a command's own output so it stays readable inside a step. No gap
+# here: out runs in a pipeline, so its own LAST_WAS_LOG=0 would be lost with the
+# subshell, and every caller prints an info or a verdict line first anyway.
+out()   { sed 's/^/          /'; }
+# sep divides one cycle from the next, so a cycle's log lines, its result and
+# the cycle after it cannot be read as one another.
+sep()   { gap; printf '%s  ─── %s ─────────────────────────────────%s\n' "$C_DIM" "$*" "$C_RESET"; }
+# rule closes off the run, so the verdict is not lost in the scrollback.
+rule()  { gap; printf '%s%s%s\n' "$C_BOLD" "══════════════════════════════════════════════════════════════════════" "$C_RESET"; }
+
+# summary tallies every pass and fail by section. Printed at the end of a run,
+# and by the pre-test gate when it stops the run early.
+summary() {
+    [ -s "$WORK/tally" ] || return 0
+    head2 "summary"
+    awk -F'\t' '
+        function row(name, np, nf, ni) {
+            printf "  %-40s %3d passed  %3d failed%s\n", name, np, nf,
+                ni ? sprintf("  %3d intentional", ni) : ""
+        }
+        !seen[$1]++ { order[++o] = $1 }
+        { total[$2]++ }
+        $3 == 1 { x[$1]++; total["INTENT"]++ }
+        $2 == "PASS" { p[$1]++ }
+        $2 == "FAIL" {
+            f[$1]++
+            failed[++n] = sprintf("%s%s: %s", $1, $3 == 1 ? " [intentional]" : "", $4)
+        }
+        END {
+            for (i = 1; i <= o; i++) row(order[i], p[order[i]] + 0, f[order[i]] + 0, x[order[i]] + 0)
+            printf "  %s\n", "──────────────────────────────────────────────────────────────"
+            row("total", total["PASS"] + 0, total["FAIL"] + 0, total["INTENT"] + 0)
+            if (n) {
+                printf "\n  failed:\n"
+                for (i = 1; i <= n; i++) printf "    %s\n", failed[i]
+                printf "\n  [intentional] marks a check of a deliberately broken state:\n"
+                printf "  it failed because the break went undetected, or did not happen.\n"
+            }
+        }
+    ' "$WORK/tally"
 }
 
-# Peer public keys, taken from the templates so the two never drift apart.
-PUB1="$(awk -F' = ' '/^PublicKey/ {print $2}' "$HERE/qcicat1.conf")"
-PUB2="$(awk -F' = ' '/^PublicKey/ {print $2}' "$HERE/qcicat2.conf")"
+# The peers and the simulator do not write to the console: three processes
+# writing at once interleave mid-line and bleed into the results. Their output
+# is teed to files, and logs() prints whatever is new - merged in timestamp
+# order, prefixed by peer - at the points where the run controls the console.
+# pass and fail call it before printing a verdict, and wait_for calls it once a
+# second, so output stays near-live without ever landing inside a result.
+LOG_A=""
+LOG_B=""
+LOG_KMS=""
+MARK_A=0
+MARK_B=0
+MARK_KMS=0
 
-FAILURES=0
-step() { printf '\n%s==> %s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
-pass() { printf '%s    PASS  %s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
-fail() { printf '%s    FAIL  %s%s\n' "$C_BOLD" "$*" "$C_RESET"; FAILURES=$((FAILURES + 1)); }
-info() { printf '          %s\n' "$*"; }
+# flush_one appends log $1's lines after line $2 to file $4, prefixed with $3,
+# and prints the line number it stopped at for the caller to remember.
+#
+# The count is taken first and the range bounded by it, rather than tailing to
+# the end of the file and counting afterwards: the peers are still writing, and
+# a line landing between a read-to-EOF and the count would be recorded as shown
+# without ever being shown. Anything appended after the count simply waits for
+# the next flush. wc counts newlines, so a half-written line is not counted.
+flush_one() {
+    local n
+    [ -n "$1" ] && [ -f "$1" ] || { printf '%s' "$2"; return 0; }
+    n="$(wc -l < "$1" | tr -d ' ')"
+    if [ "$n" -gt "$2" ]; then
+        sed -n "$(($2 + 1)),${n}p" "$1" | awk -v p="$3" '{print p " " $0}' >> "$4"
+    fi
+    printf '%s' "$n"
+}
+
+logs() {
+    [ "$STREAM" = "1" ] || return 0
+    local merged="$WORK/.merged"
+    : > "$merged"
+    MARK_A="$(flush_one "$LOG_A" "$MARK_A" "${C_A1}a1|${C_RESET}" "$merged")"
+    MARK_B="$(flush_one "$LOG_B" "$MARK_B" "${C_A2}a2|${C_RESET}" "$merged")"
+    MARK_KMS="$(flush_one "$LOG_KMS" "$MARK_KMS" "${C_DIM}kms|${C_RESET}" "$merged")"
+    if [ -s "$merged" ]; then
+        # A gutter of its own, so a block of log lines is never mistaken for
+        # the indented output of a check. Field 1 is the peer prefix, 2 and 3
+        # the date and time every line starts with.
+        if [ "$LAST_WAS_LOG" = "0" ]; then printf '\n'; fi
+        sort -k2,3 "$merged" | sed "s/^/    ${C_DIM}│${C_RESET} /"
+        LAST_WAS_LOG=1
+    fi
+    return 0
+}
 
 # iface maps a profile name to the interface wg-quick actually created. On
 # darwin that is a utun device, and wg-quick records it in a .name file.
-iface() { sudo cat "/var/run/wireguard/$1.name"; }
-
-# psk_of reads the preshared key installed on an interface.
+iface()  { sudo cat "/var/run/wireguard/$1.name"; }
 psk_of() { sudo wg show "$1" preshared-keys | awk '{print $2; exit}'; }
+wrote_psk() { grep -q 'PSK configured on WireGuard interface' "$1" 2> /dev/null; }
+# keytail identifies a key by its last 9 base64 characters. Enough to tell two
+# keys apart at a glance, and to match against a line in a log. These are local
+# test keys from a mock KMS - see the note in README.md.
+keytail() {
+    case "$1" in
+        "") printf '(unset)' ;;
+        "(none)") printf '(none)' ;;
+        # ${x: -9} yields nothing at all when x is shorter than 9.
+        *) if [ "${#1}" -le 9 ]; then printf '%s' "$1"; else printf '…%s' "${1: -9}"; fi ;;
+    esac
+}
 
-# digest identifies a key without printing it, so a log or a screenshot of a
-# test run never carries key material.
-digest() { printf '%s' "$1" | shasum -a 256 | cut -c1-12; }
+# A device is the handle everything passes around; dev_id and pub_of map it back
+# to the peer that owns it, so an interface is paired with its peer's public key
+# in one place. tag prints a device the way arnika names itself, dev[ARNIKA_ID],
+# to line a message up against that peer's own log prefix.
+dev_id() {
+    case "$1" in
+        "$DEV1") printf '%s' "$ID1" ;;
+        "$DEV2") printf '%s' "$ID2" ;;
+        *) printf '?' ;;
+    esac
+}
+pub_of() {
+    case "$1" in
+        "$DEV1") printf '%s' "$PUB1" ;;
+        "$DEV2") printf '%s' "$PUB2" ;;
+    esac
+}
+tag() { printf '%s[%s]' "$1" "$(dev_id "$1")"; }
+
+stop_peers() {
+    sudo pkill -f "$PAT_PEERS" 2> /dev/null || true
+    sleep 1
+}
+
+# clean_leftovers clears anything an earlier run left behind: its arnika and
+# KMS processes, and the two tunnels. Runs at the start of every run, and on
+# its own with --clean.
+clean_leftovers() {
+    local left dirs name
+    step "leftovers from earlier runs"
+
+    left="$(pgrep -fl "$PAT_STALE" 2> /dev/null || true)"
+    if [ -n "$left" ]; then
+        printf '%s\n' "$left" | out
+        # SIGCONT first in case one was left stopped: arnika handles SIGTERM
+        # itself (udpserver.go), so a stopped one would sit on the signal.
+        sudo pkill -CONT -f "$PAT_STALE" 2> /dev/null || true
+        sudo pkill -f "$PAT_STALE" 2> /dev/null || true
+        sleep 1
+        sudo pkill -KILL -f "$PAT_STALE" 2> /dev/null || true
+        pass "killed the processes above"
+    else
+        pass "no arnika or KMS process left running"
+    fi
+
+    for name in qcicat1 qcicat2; do
+        if sudo wg-quick down "$HERE/$name.conf" > /dev/null 2>&1; then
+            pass "$name was still up - taken down"
+        else
+            pass "$name was not up"
+        fi
+    done
+
+    # /tmp/ with the slash: /tmp is a symlink and find will not descend it.
+    dirs="$(find /tmp/ -maxdepth 1 -name 'arnika-darwin.*' -type d ! -path "$WORK" 2> /dev/null | wc -l | tr -d ' ')"
+    [ "$dirs" = "0" ] || info "$dirs old log dir(s) kept in /tmp - rm -rf /tmp/arnika-darwin.*"
+}
 
 teardown() {
     [ "$KEEP" = "1" ] && { printf '\nkept: interfaces up, logs in %s\n' "$WORK"; return 0; }
-    sudo pkill -f "$WORK/arnika" 2>/dev/null || true
-    pkill -f "$WORK/kms" 2>/dev/null || true
+    stop_peers
+    pkill -f "$PAT_KMS" 2> /dev/null || true
     sudo wg-quick down "$HERE/qcicat1.conf" > /dev/null 2>&1 || true
     sudo wg-quick down "$HERE/qcicat2.conf" > /dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap teardown EXIT
 
+# ---------------------------------------------------------------- preflight
 step "prerequisites"
 for tool in wg wg-quick wireguard-go go; do
     command -v "$tool" > /dev/null || { echo "missing: $tool - see README.md"; exit 1; }
 done
 pass "wg, wg-quick, wireguard-go and go are present"
-sudo -v || { echo "sudo is required"; exit 1; }
+# Prime sudo here, once, so it cannot fail halfway through the run. This is not
+# gated on a terminal: with pam_tid (Touch ID for sudo, /etc/pam.d/sudo_local)
+# the prompt is biometric and needs no tty, which is what makes this work when
+# it is started from an editor or an agent rather than a shell. Let sudo decide
+# whether it can ask, and only give up when it says it cannot.
+#
+# It has to be this process that asks: sudo tickets are per session, so priming
+# in another window does not carry in here.
+if ! sudo -n true 2> /dev/null; then
+    info "sudo is not primed - approve the prompt (Touch ID, or type a password)"
+    if ! sudo -v; then
+        echo "sudo is required and could not be obtained."
+        echo "Run this from a shell where sudo works, or prime it first: sudo -v"
+        exit 1
+    fi
+fi
+pass "sudo is available"
+
+clean_leftovers
+if [ "$CLEAN_ONLY" = "1" ]; then
+    summary
+    exit "$FAILURES"
+fi
 
 step "building arnika and the KMS simulator"
 ( cd "$REPO" && GOEXPERIMENT=runtimesecret CGO_ENABLED=0 go build -o "$WORK/arnika" . )
@@ -94,8 +302,6 @@ step "building arnika and the KMS simulator"
 pass "built into $WORK"
 
 step "bringing up the two WireGuard interfaces"
-sudo wg-quick down "$HERE/qcicat1.conf" > /dev/null 2>&1 || true
-sudo wg-quick down "$HERE/qcicat2.conf" > /dev/null 2>&1 || true
 sudo wg-quick up "$HERE/qcicat1.conf"
 sudo wg-quick up "$HERE/qcicat2.conf"
 DEV1="$(iface qcicat1)"
@@ -104,129 +310,502 @@ info "qcicat1 -> $DEV1"
 info "qcicat2 -> $DEV2"
 pass "both interfaces are up"
 
-step "starting the KMS simulator"
-# The simulator only logs requests and responses when DEBUG is set; Arnika's
-# own [DEBUG] lines are unconditional, so it needs no flag.
-( LISTEN=127.0.0.1:8080 DEBUG=true "$WORK/kms" 2>&1 \
-    | tee "$WORK/kms.log" | stream "${C_DIM}kms|${C_RESET} " ) &
-sleep 1
-grep -q 'QKD KMS Simulator' "$WORK/kms.log" || { cat "$WORK/kms.log"; exit 1; }
-grep -q 'debug logging enabled=true' "$WORK/kms.log" &&
-    pass "listening on 127.0.0.1:8080 with debug logging" ||
-    fail "the simulator did not enable debug logging"
-
-step "starting Arnika on both ends"
+# Peer public keys, taken from the templates so the two never drift apart.
+PUB1="$(awk -F' = ' '/^PublicKey/ {print $2}' "$HERE/qcicat1.conf")"
+PUB2="$(awk -F' = ' '/^PublicKey/ {print $2}' "$HERE/qcicat2.conf")"
 PSK="$(openssl rand -base64 32)"
-# ARNIKA_ID values must differ in parity: only the lowest bit takes part in
-# PRIMARY/BACKUP election, so two odd or two even IDs stall the exchange.
-sudo env \
-    LISTEN_ADDRESS=127.0.0.1:9998 SERVER_ADDRESS=127.0.0.1:9999 \
-    ARNIKA_ID=9998 ARNIKA_PSK="$PSK" INTERVAL=5s DEBUG=true \
-    KMS_URL="http://127.0.0.1:8080/api/v1/keys/CONSA" \
-    WIREGUARD_INTERFACE="$DEV1" WIREGUARD_PEER_PUBLIC_KEY="$PUB1" \
-    "$WORK/arnika" 2>&1 | tee "$WORK/arnika1.log" | stream "${C_A1}a1|${C_RESET} " &
-sudo env \
-    LISTEN_ADDRESS=127.0.0.1:9999 SERVER_ADDRESS=127.0.0.1:9998 \
-    ARNIKA_ID=9999 ARNIKA_PSK="$PSK" INTERVAL=5s DEBUG=true \
-    KMS_URL="http://127.0.0.1:8080/api/v1/keys/CONSB" \
-    WIREGUARD_INTERFACE="$DEV2" WIREGUARD_PEER_PUBLIC_KEY="$PUB2" \
-    "$WORK/arnika" 2>&1 | tee "$WORK/arnika2.log" | stream "${C_A2}a2|${C_RESET} " &
-info "logs in $WORK"
+# PROBE is routed into qcicat1's tunnel by its AllowedIPs and belongs to no
+# interface, so packets to it cannot be short-circuited over loopback the way
+# packets to the peer's own 100.1.2.2 are. SRC is qcicat1's address, which is
+# what the far end's AllowedIPs accepts as an inner source.
+SRC="100.1.1.1"
+PROBE="100.1.2.3"
+# The two peers, named by their ARNIKA_ID throughout. The IDs double as the
+# peers' UDP ports, and have to differ in parity: only the lowest bit takes part
+# in role election, and the PQC initiator is picked from it too.
+ID1=9998
+ID2=9999
+# wg reports an all-zero preshared key as "(none)", and setting it is how a key
+# is removed again.
+ZERO_PSK="$(head -c 32 /dev/zero | base64)"
 
-step "waiting for both ends to install a PSK"
-for _ in $(seq 1 40); do
-    if grep -q 'PSK configured on WireGuard interface' "$WORK/arnika1.log" 2>/dev/null &&
-       grep -q 'PSK configured on WireGuard interface' "$WORK/arnika2.log" 2>/dev/null; then
-        break
-    fi
-    sleep 1
-done
-if grep -q 'PSK configured on WireGuard interface' "$WORK/arnika1.log" &&
-   grep -q 'PSK configured on WireGuard interface' "$WORK/arnika2.log"; then
-    pass "both ends reported a successful write"
-else
-    fail "at least one end never wrote a PSK"
-    tail -n 15 "$WORK/arnika1.log" "$WORK/arnika2.log"
-fi
+# ------------------------------------------------------------------- checks
 
-step "both interfaces hold the same PSK"
-PSK1="$(psk_of "$DEV1")"
-PSK2="$(psk_of "$DEV2")"
-if [ -z "$PSK1" ] || [ "$PSK1" = "(none)" ]; then
-    fail "$DEV1 has no preshared key"
-elif [ "$PSK1" = "$PSK2" ]; then
-    pass "identical on both ends (sha256:$(digest "$PSK1"))"
-else
-    fail "the two ends installed different keys - the tunnel would show a dead handshake"
-fi
-
-step "the tunnel actually carries traffic"
-if ping -c 3 -t 5 100.1.2.2 > /dev/null 2>&1; then
-    pass "100.1.1.1 -> 100.1.2.2 over the tunnel"
-else
-    fail "no ping over the tunnel"
-fi
-HS="$(sudo wg show "$DEV1" latest-handshakes | awk '{print $2; exit}')"
-if [ -n "${HS:-}" ] && [ "$HS" -gt 0 ] 2>/dev/null; then
-    pass "a handshake completed with the PSK in place"
-else
-    fail "no handshake on $DEV1 (latest-handshakes: ${HS:-empty})"
-fi
-sudo wg show "$DEV1" transfer | awk '{printf "          transfer: rx %s tx %s bytes\n", $2, $3}'
-
-step "five rotation cycles"
-# One rotation proves the mechanism; five prove it keeps working. Each cycle
-# must produce a new key on one end and the identical key on the other - a
-# single divergence is what a dead handshake looks like in production.
-CYCLES=5
-PREV="$PSK1"
-for cycle in $(seq 1 "$CYCLES"); do
-    CUR=""
-    for _ in $(seq 1 30); do
-        CUR="$(psk_of "$DEV1")"
-        [ -n "$CUR" ] && [ "$CUR" != "(none)" ] && [ "$CUR" != "$PREV" ] && break
-        sleep 1
+# wg_dump prints wg's own view of the devices it is given - only those, and each
+# under a heading that says which device, profile and peer it belongs to, since
+# the dump itself carries no name.
+wg_dump() {
+    local dev prof
+    [ "$#" -gt 0 ] || set -- "$DEV1" "$DEV2"
+    for dev in "$@"; do
+        case "$dev" in "$DEV1") prof=qcicat1 ;; "$DEV2") prof=qcicat2 ;; *) prof=unknown ;; esac
+        info "wg dump $dev (profile $prof, ARNIKA_ID $(dev_id "$dev")):"
+        sudo wg show "$dev" dump | out
     done
-    if [ -z "$CUR" ] || [ "$CUR" = "$PREV" ]; then
-        fail "cycle $cycle/$CYCLES: the PSK did not change within 30s"
-        break
+}
+
+# xfer prints "rx tx" for the first peer, hs_of the epoch of its last handshake.
+# Both report 0 while the peer is briefly absent, so a delta is always safe.
+xfer()  { sudo wg show "$1" transfer | awk 'NR==1 {print $2+0, $3+0; exit} END {if (NR==0) print 0, 0}'; }
+hs_of() { sudo wg show "$1" latest-handshakes | awk 'NR==1 {print $2+0; exit} END {if (NR==0) print 0}'; }
+
+# wait_for runs a predicate once a second until it succeeds, for at most $1
+# seconds, and leaves the elapsed count in WAITED for the caller to report.
+# Predicates are plain functions, so bash's dynamic scoping lets them leave what
+# they found in the caller's p1 and p2.
+WAITED=0
+wait_for() {
+    local secs="$1"
+    shift
+    WAITED=0
+    while [ "$WAITED" -lt "$secs" ]; do
+        "$@" && return 0
+        logs
+        sleep 1
+        WAITED=$((WAITED + 1))
+    done
+    return 1
+}
+
+# hs_done asks whether qcicat1 has handshaked at all. Always qcicat1, and always
+# "at all": reset_session is what forces a handshake, and it wipes that end's
+# session, which takes its last-handshake time back to 0.
+hs_done()     { [ "$(hs_of "$DEV1")" -gt 0 ]; }
+wait_hs()     { wait_for "$1" hs_done; }
+both_wrote()  { wrote_psk "$LOG_A" && wrote_psk "$LOG_B"; }
+kms_up()      { nc -z 127.0.0.1 8080 2> /dev/null; }
+log_has()     { tail -n "+$(($2 + 1))" "$1" | grep -q "$3"; }
+psk_changed() { p1="$(psk_of "$1")"; [ -n "$p1" ] && [ "$p1" != "(none)" ] && [ "$p1" != "$2" ]; }
+psks_differ() { p1="$(psk_of "$DEV1")"; p2="$(psk_of "$DEV2")"; [ -n "$p1" ] && [ "$p1" != "$p2" ]; }
+# psks_agree_new: both ends on one usable key, and not the one $1 names.
+psks_agree_new() {
+    p1="$(psk_of "$DEV1")"
+    p2="$(psk_of "$DEV2")"
+    [ -n "$p1" ] && [ "$p1" != "(none)" ] && [ "$p1" = "$p2" ] && [ "$p1" != "$1" ]
+}
+
+set_psk() { printf '%s\n' "$2" | sudo wg set "$1" peer "$(pub_of "$1")" preshared-key /dev/stdin; }
+
+# reset_session drops qcicat1's peer and adds it back with $1 as its preshared
+# key. That throws away the current session, so the next packet has to complete
+# a fresh handshake - the only way to put a preshared key to the test on demand.
+# A live session survives a key change: the key is used in the handshake alone.
+# Always qcicat1's side - the end every handshake check watches.
+reset_session() {
+    local conf="$HERE/qcicat1.conf" allowed endpoint
+    allowed="$(awk -F' = ' '/^AllowedIPs/ {print $2}' "$conf" | tr -d ' ')"
+    endpoint="$(awk -F' = ' '/^Endpoint/ {print $2}' "$conf")"
+    sudo wg set "$DEV1" peer "$PUB1" remove
+    printf '%s\n' "$1" | sudo wg set "$DEV1" peer "$PUB1" \
+        allowed-ips "$allowed" endpoint "$endpoint" persistent-keepalive 10 \
+        preshared-key /dev/stdin
+}
+
+# tunnel_traffic is the whole tunnel check: send 4 KB to PROBE and see whether
+# the far end decrypted it. wireguard-go counts rx only for packets that
+# decrypt and pass that peer's AllowedIPs, so $DEV2 rx growing is proof the
+# payload traversed the tunnel and the two ends agree on the preshared key.
+# 4 KB is far more than the 32-byte keepalives that also move in that window.
+#
+# Nothing owns PROBE, so there is no reply and nothing to print; the ping is
+# only a way to put bytes into the interface.
+#
+# With "broken" as its argument it asserts the opposite - nothing may decrypt -
+# which is how each mode proves its checks can actually fail.
+tunnel_traffic() {
+    local expect="${1:-intact}" t1 r2 t1b r2b sent got
+
+    # Only $DEV1 tx and $DEV2 rx say anything here: the replies never come back
+    # through the tunnel, so the other two counters are not read.
+    read -r _ t1 <<< "$(xfer "$DEV1")"
+    read -r r2 _ <<< "$(xfer "$DEV2")"
+    ping -S "$SRC" -c 4 -s 1000 -t 6 "$PROBE" > /dev/null 2>&1 || true
+    read -r _ t1b <<< "$(xfer "$DEV1")"
+    read -r r2b _ <<< "$(xfer "$DEV2")"
+    sent=$((t1b - t1))
+    got=$((r2b - r2))
+
+    if [ "$expect" = "broken" ]; then
+        if [ "$got" -gt 2000 ]; then
+            fail "$got B decrypted on a desynced tunnel - a break is invisible here"
+        else
+            pass "nothing decrypted at the far end ($(tag "$DEV2") rx +$got B), as a break should look"
+        fi
+        return 0
     fi
-    OTHER="$(psk_of "$DEV2")"
-    if [ "$CUR" = "$OTHER" ]; then
-        pass "cycle $cycle/$CYCLES: rotated, both ends match (sha256:$(digest "$CUR"))"
+
+    if [ "$sent" -gt 2000 ] && [ "$got" -gt 2000 ]; then
+        pass "traffic traversed the tunnel: $(tag "$DEV1") tx +$sent B, $(tag "$DEV2") rx +$got B"
+        return 0
+    fi
+
+    fail "the payload did not traverse the tunnel: $(tag "$DEV1") tx +$sent B, $(tag "$DEV2") rx +$got B"
+    if [ "$sent" -le 2000 ]; then
+        info "$(tag "$DEV1") encrypted nothing, so the packets never reached it."
+        info "$PROBE has to be in qcicat1.conf AllowedIPs and routed there, and"
+        info "must belong to no interface here - route -n get $PROBE"
     else
-        fail "cycle $cycle/$CYCLES: the ends diverged - $DEV1 sha256:$(digest "$CUR"), $DEV2 sha256:$(digest "$OTHER")"
+        info "$(tag "$DEV2") decrypted none of it: either the ends hold different preshared"
+        info "keys, or $SRC is missing from qcicat2.conf AllowedIPs"
     fi
-    PREV="$CUR"
+    return 1
+}
+
+# pretest exercises WireGuard on its own, before Arnika touches anything. The
+# mismatched-key step is the point of it: without a check that is known to fail
+# on a broken tunnel, every green tick below could be a false pass.
+pretest() {
+    local k_a
+    head2 "pre-test: WireGuard alone, no Arnika"
+
+    step "both interfaces answer wg"
+    if sudo wg show "$DEV1" > /dev/null 2>&1 && sudo wg show "$DEV2" > /dev/null 2>&1; then
+        pass "$(tag "$DEV1") and $(tag "$DEV2") are live"
+    else
+        fail "one of the two interfaces does not answer wg"
+        return 1
+    fi
+
+    step "the peers handshake with no preshared key"
+    set_psk "$DEV1" "$ZERO_PSK"
+    set_psk "$DEV2" "$ZERO_PSK"
+    reset_session "$ZERO_PSK"
+    if wait_hs 20; then
+        pass "handshake completed"
+    else
+        fail "no handshake in 20s - WireGuard itself is not working"
+        wg_dump
+        return 1
+    fi
+
+    step "payload crosses the tunnel"
+    tunnel_traffic || { wg_dump; return 1; }
+
+    step "a matching preshared key keeps the tunnel up"
+    k_a="$(openssl rand -base64 32)"
+    set_psk "$DEV1" "$k_a"
+    set_psk "$DEV2" "$k_a"
+    reset_session "$k_a"
+    if wait_hs 20; then
+        pass "handshake completed with a shared key ($(keytail "$k_a"))"
+    else
+        fail "a matching preshared key did not handshake"
+        wg_dump
+        return 1
+    fi
+    tunnel_traffic || { wg_dump; return 1; }
+
+    step_fault "a mismatched preshared key must break the tunnel"
+    set_psk "$DEV2" "$(openssl rand -base64 32)"
+    reset_session "$k_a"
+    if wait_hs 15; then
+        fail "the ends handshaked while holding different keys - these checks"
+        info "cannot tell a working tunnel from a broken one, so the Arnika"
+        info "results below would be worthless"
+        wg_dump
+        return 1
+    fi
+    pass "no handshake with different keys - a broken tunnel does get caught"
+    # And the traffic check has to say so too: it is the measurement every
+    # check below leans on, so it is the one that must be known to fail.
+    tunnel_traffic broken
+
+    step "back to no preshared key, for Arnika to install its own"
+    set_psk "$DEV1" "$ZERO_PSK"
+    set_psk "$DEV2" "$ZERO_PSK"
+    reset_session "$ZERO_PSK"
+    if wait_hs 20; then
+        pass "the tunnel is up again and Arnika can take over"
+    else
+        fail "the tunnel did not come back after the pre-test"
+        wg_dump
+        return 1
+    fi
+}
+
+# source_check takes one key source away and holds the mode to its contract.
+# Arnika answers a missing *required* source by invalidating the tunnel with a
+# random PSK (main.go setPSK), and each end draws its own, so the two ends
+# landing on different keys is the signal. A missing *optional* source must
+# instead leave rotation running, both ends in step on the other source.
+#
+# QKD is taken away by stopping the simulator. PQC is taken away with
+# PQC_ROUND_TIMEOUT=1ns: one round runs per interval with that deadline, so
+# every round times out and the agreed key is cleared. 1ns rather than 1ms
+# because a round over loopback can finish inside a millisecond.
+#
+# Both halves are checked - the PSKs, and the line arnika logs about its own
+# decision - because the PSK state alone cannot say the mode reasoned correctly.
+source_check() {
+    local mode="$1" source="$2" required="$3"
+    local mark extra="" pattern p1 p2 before
+
+    if [ "$required" = "yes" ]; then
+        step_fault "no $source key: $mode requires it, so the tunnel must be invalidated"
+    else
+        step_fault "no $source key: $mode has it optional, so rotation must carry on"
+    fi
+
+    before="$(psk_of "$DEV1")"
+    stop_peers
+    mark="$(wc -l < "$LOG_A")"
+    if [ "$source" = "qkd" ]; then
+        stop_kms
+    else
+        extra="PQC_ROUND_TIMEOUT=1ns"
+    fi
+    start_pair "$mode" "$extra"
+
+    # What arnika should say about its own decision, from main.go setPSK.
+    case "$source $required" in
+        "qkd yes") pattern="no QKD key received" ;;
+        "qkd no")  pattern="switching to PQC key" ;;
+        "pqc yes") pattern="Abort since mode is set to" ;;
+        "pqc no")  pattern="switching to QKD key" ;;
+    esac
+
+    if [ "$required" = "yes" ]; then
+        if wait_for 25 psks_differ; then
+            pass "the ends were invalidated onto different keys after ${WAITED}s"
+        else
+            fail "$mode kept both ends on one key with no $source key available"
+        fi
+    else
+        if wait_for 25 psks_agree_new "$before"; then
+            pass "rotation carried on without $source, both ends in step after ${WAITED}s"
+        else
+            fail "$mode stopped rotating in step although $source is optional to it"
+        fi
+    fi
+
+    # Polled, not grepped once: arnika logs the decision just before it writes
+    # the PSK, but the line reaches the file through a pipe and tee, so the PSK
+    # can be visible here a moment before the line that explains it.
+    if wait_for 10 log_has "$LOG_A" "$mark" "$pattern"; then
+        pass "peer a[$ID1] logged the decision: \"$pattern\""
+    else
+        fail "peer a[$ID1] never logged \"$pattern\""
+        tail -n 6 "$LOG_A" | out
+    fi
+
+    step "$source back: the pair has to recover"
+    stop_peers
+    if [ "$source" = "qkd" ]; then
+        start_kms
+    fi
+    start_pair "$mode"
+    if wait_for 30 psks_agree_new "$before"; then
+        pass "both ends back in step after ${WAITED}s (key $(keytail "$p1"))"
+    else
+        fail "the pair did not recover once $source was available again"
+        wg_dump
+    fi
+}
+
+# desync_check is the intentional failure test, run once per mode. The peers are
+# stopped so they cannot heal it, one end's PSK is overwritten, and a fresh
+# handshake is forced: the tunnel has to break. A mode whose checks cannot see a
+# desync is a mode whose passes mean nothing. Then the peers are started again
+# and have to put it back.
+#
+# Stopping them is what makes it deterministic - at INTERVAL=5s a running pair
+# heals a desync faster than it can be measured. SIGSTOP would be the lighter
+# touch but cannot be used: arnika runs under sudo, and sudo answers a stopped
+# child by stopping itself and passing the signal to its process group, which
+# is this script.
+desync_check() {
+    local mode="$1" psk_before bad p1 p2
+
+    step_fault "desync: one end's PSK overwritten with the peers stopped"
+    psk_before="$(psk_of "$DEV1")"
+    bad="$(openssl rand -base64 32)"
+    stop_peers
+    set_psk "$DEV2" "$bad"
+    reset_session "$psk_before"
+    info "peers stopped; $(tag "$DEV1") keeps $(keytail "$psk_before"), $(tag "$DEV2") now holds $(keytail "$bad")"
+    if wait_hs 12; then
+        fail "the two ends handshaked while holding different keys"
+    else
+        pass "no handshake while the keys differ - the break is real"
+    fi
+    tunnel_traffic broken
+
+    step "recovery: the peers have to resync it when they come back"
+    start_pair "$mode"
+    if ! wait_for 30 psks_agree_new "$bad"; then
+        fail "still out of sync after 30s - $(tag "$DEV1") $(keytail "$p1"), $(tag "$DEV2") $(keytail "$p2")"
+        wg_dump
+        return 0
+    fi
+    pass "both ends back on one key after ${WAITED}s (key $(keytail "$p1"))"
+    if wait_hs 25; then
+        pass "the tunnel handshaked again on the resynced key"
+    else
+        fail "the keys match again but there was no handshake in 25s"
+        wg_dump
+    fi
+    tunnel_traffic || true
+}
+
+# start_kms and stop_kms exist so source_check can take QKD away and give it
+# back. The log is appended across restarts, like the peers' own.
+start_kms() {
+    LOG_KMS="$WORK/kms.log"
+    ( LISTEN=127.0.0.1:8080 DEBUG=true "$WORK/kms" >> "$LOG_KMS" 2>&1 ) &
+    wait_for 10 kms_up || fail "the KMS is not listening on 127.0.0.1:8080"
+}
+
+stop_kms() {
+    pkill -f "$PAT_KMS" 2> /dev/null || true
+    sleep 1
+}
+
+# start_pair starts both Arnika instances for one MODE. desync_check calls it
+# again after stopping them, so the logs are appended rather than truncated.
+start_pair() {
+    local mode="$1" extra="${2:-}"
+
+    # A new mode writes to new files, so the marks logs() reads from start over.
+    # A restart within a mode appends, and must not.
+    if [ "$LOG_A" != "$WORK/$mode-a.log" ]; then
+        LOG_A="$WORK/$mode-a.log"
+        LOG_B="$WORK/$mode-b.log"
+        MARK_A=0
+        MARK_B=0
+    fi
+
+    # $1 is this peer's ARNIKA_ID, which doubles as its port; $2 is the other's.
+    start_peer() {
+        sudo env \
+            LISTEN_ADDRESS="127.0.0.1:$1" SERVER_ADDRESS="127.0.0.1:$2" \
+            ARNIKA_ID="$1" ARNIKA_PSK="$PSK" INTERVAL=5s MODE="$mode" DEBUG=true \
+            KMS_URL="http://127.0.0.1:8080/api/v1/keys/$3" \
+            WIREGUARD_INTERFACE="$4" WIREGUARD_PEER_PUBLIC_KEY="$5" \
+            ${extra} \
+            "$WORK/arnika" >> "$6" 2>&1 &
+    }
+    start_peer "$ID1" "$ID2" CONSA "$DEV1" "$PUB1" "$LOG_A"
+    start_peer "$ID2" "$ID1" CONSB "$DEV2" "$PUB2" "$LOG_B"
+}
+
+# run_mode starts a peer pair in one MODE and puts it through the checks.
+run_mode() {
+    local mode="$1"
+
+    head2 "MODE=$mode"
+    start_pair "$mode"
+
+    step "waiting for both ends to install a PSK"
+    if ! wait_for 40 both_wrote; then
+        fail "at least one end never wrote a PSK in MODE=$mode"
+        tail -n 15 "$LOG_A" "$LOG_B" | out
+        stop_peers
+        return
+    fi
+    pass "both ends reported a successful write"
+
+    step "both interfaces hold the same PSK"
+    local psk1 psk2
+    psk1="$(psk_of "$DEV1")"
+    psk2="$(psk_of "$DEV2")"
+    if [ -z "$psk1" ] || [ "$psk1" = "(none)" ]; then
+        # Stop here. Everything below compares against this key, and the first
+        # rotation cycle would count any key at all as a change from nothing -
+        # reporting a rotation that never happened.
+        fail "$(tag "$DEV1") has no preshared key, so nothing below can be judged"
+        wg_dump
+        stop_peers
+        return
+    fi
+    if [ "$psk1" = "$psk2" ]; then
+        pass "identical on both ends (key $(keytail "$psk1"))"
+    else
+        # A divergence is still a usable baseline: both ends hold a real key, so
+        # the cycles below report the divergence per cycle rather than guessing.
+        fail "the two ends installed different keys - $(tag "$DEV1") $(keytail "$psk1"), $(tag "$DEV2") $(keytail "$psk2")"
+    fi
+    wg_dump
+    tunnel_traffic || true
+
+    step "$CYCLES rotation cycles"
+    local prev="$psk1" cur other cycle p1
+    for cycle in $(seq 1 "$CYCLES"); do
+        sep "cycle $cycle/$CYCLES"
+        if ! wait_for 30 psk_changed "$DEV1" "$prev"; then
+            fail "cycle $cycle/$CYCLES: the PSK did not change within 30s"
+            break
+        fi
+        cur="$p1"
+        other="$(psk_of "$DEV2")"
+        if [ "$cur" = "$other" ]; then
+            pass "cycle $cycle/$CYCLES: rotated, both ends match (key $(keytail "$cur"))"
+        else
+            fail "cycle $cycle/$CYCLES: the ends diverged - $(tag "$DEV1") $(keytail "$cur"), $(tag "$DEV2") $(keytail "$other")"
+        fi
+        wg_dump
+        prev="$cur"
+    done
+    sep "end of cycles"
+
+    step "the tunnel after $CYCLES rotations"
+    tunnel_traffic || true
+
+    # Which source this mode may do without - the contract under test. Mirrors
+    # IsQKDRequired and IsPQCRequired in config/config.go, so a mode that is in
+    # neither list (EitherQkdOrPqcRequired) correctly gets "optional" for both.
+    local qkd_req=no pqc_req=no
+    case "$mode" in QkdAndPqcRequired | AtLeastQkdRequired) qkd_req=yes ;; esac
+    case "$mode" in QkdAndPqcRequired | AtLeastPqcRequired) pqc_req=yes ;; esac
+    source_check "$mode" qkd "$qkd_req"
+    source_check "$mode" pqc "$pqc_req"
+
+    desync_check "$mode"
+
+    step "MODE=$mode log summary"
+    local name log rounds writes dbg warn id
+    for name in a b; do
+        if [ "$name" = "a" ]; then id="$ID1"; log="$LOG_A"; else id="$ID2"; log="$LOG_B"; fi
+        rounds="$(grep -c 'agreed a fresh PQC key' "$log" || true)"
+        writes="$(grep -c 'PSK configured on WireGuard interface' "$log" || true)"
+        dbg="$(grep -c '\[DEBUG\]' "$log" || true)"
+        warn="$(grep -c '\[WARNING\]\|\[ERROR\]' "$log" || true)"
+        info "peer $name[$id]: $rounds PQC exchanges, $writes PSK writes, $dbg debug lines, $warn warnings/errors"
+    done
+
+    stop_peers
+}
+
+pretest || {
+    printf '\n%sWireGuard is not working on its own - stopping before Arnika.%s\n' \
+        "$C_BOLD" "$C_RESET"
+    summary
+    rule
+    printf '%s  FAIL - WireGuard is broken, Arnika was not tested%s\n' "$C_BOLD" "$C_RESET"
+    rule
+    exit 1
+}
+
+# Back to setup for the tally: this runs after the pre-test, so without it the
+# check would be counted against the pre-test's section.
+SECTION="setup"
+step "starting the KMS simulator"
+start_kms
+grep -q 'debug logging enabled=true' "$WORK/kms.log" \
+    && pass "listening on 127.0.0.1:8080 with debug logging" \
+    || fail "the simulator did not enable debug logging"
+
+for mode in $MODES; do
+    run_mode "$mode"
 done
 
-step "the tunnel still works after rotating"
-if ping -c 3 -t 5 100.1.2.2 > /dev/null 2>&1; then
-    pass "still passing traffic after $CYCLES rotations"
-else
-    fail "the tunnel stopped passing traffic"
-fi
-
-step "debug output"
+logs
+summary
 info "logs: $WORK"
-for pair in "arnika1:$WORK/arnika1.log" "arnika2:$WORK/arnika2.log"; do
-    name="${pair%%:*}"; log="${pair##*:}"
-    rounds="$( { grep -c 'agreed a fresh PQC key' "$log" || true; } | head -1)"
-    writes="$( { grep -c 'PSK configured on WireGuard interface' "$log" || true; } | head -1)"
-    dbg="$( { grep -c '\[DEBUG\]' "$log" || true; } | head -1)"
-    warn="$( { grep -c '\[WARNING\]\|\[ERROR\]' "$log" || true; } | head -1)"
-    info "$name: $rounds PQC rounds, $writes PSK writes, $dbg debug lines, $warn warnings/errors"
-done
-info "kms: $( { grep -c '\[REQ\]' "$WORK/kms.log" || true; } | head -1) requests logged"
-if [ "$FAILURES" != "0" ] || [ "${VERBOSE:-0}" = "1" ]; then
-    if [ "$STREAM" != "1" ]; then
-        # Not streamed, so the logs have not been seen yet.
-        printf '\n--- arnika1 (last 25) ---\n'; tail -n 25 "$WORK/arnika1.log"
-        printf '\n--- arnika2 (last 25) ---\n'; tail -n 25 "$WORK/arnika2.log"
-    fi
-    printf '\n--- wg dump ---\n'; sudo wg show "$DEV1" dump; sudo wg show "$DEV2" dump
+rule
+if [ "$FAILURES" = "0" ]; then
+    printf '%s  PASS - all checks passed%s\n' "$C_BOLD" "$C_RESET"
+else
+    printf '%s  FAIL - %s check(s) failed%s\n' "$C_BOLD" "$FAILURES" "$C_RESET"
 fi
-
-printf '\n'
-[ "$FAILURES" = "0" ] && echo "all checks passed" || echo "$FAILURES check(s) failed"
+rule
 exit "$FAILURES"
