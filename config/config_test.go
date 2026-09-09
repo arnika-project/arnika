@@ -116,7 +116,7 @@ func TestParse(t *testing.T) {
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
 		PQCEnabled:             true,             // Default: PQC key agreement on
 		PQCRoundInterval:       time.Second * 10, // Defaults to INTERVAL
-		PQCMaxKeyAge:           time.Second * 20, // Defaults to 2 x INTERVAL
+		PQCMaxKeyAge:           time.Second * 20, // Defaults to 2 x PQC_ROUND_INTERVAL
 		PQCRoundTimeout:        time.Millisecond * 2500,
 		Mode:                   "AtLeastQkdRequired",
 		RateLimit:              30,          // Real default value for RateLimit
@@ -288,4 +288,78 @@ func TestValidateKeySources(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParse_PQCKeyAge covers AC-1.1 to AC-1.3: the default is derived from
+// PQC_ROUND_INTERVAL rather than INTERVAL, a key age that does not outlive its
+// own round is rejected, and an explicit valid value is kept verbatim.
+func TestParse_PQCKeyAge(t *testing.T) {
+	setValidEnv := func(t *testing.T, interval, roundInterval, maxKeyAge, roundTimeout string) {
+		t.Helper()
+		t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
+		t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
+		t.Setenv("KMS_URL", "https://example.com")
+		t.Setenv("WIREGUARD_INTERFACE", "wg0")
+		t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+		t.Setenv("MODE", "QkdAndPqcRequired")
+		t.Setenv("ARNIKA_PSK", testArnikaPSK)
+		t.Setenv("PQC_ENABLED", "true")
+		t.Setenv("INTERVAL", interval)
+		t.Setenv("PQC_ROUND_INTERVAL", roundInterval)
+		t.Setenv("PQC_MAX_KEY_AGE", maxKeyAge)
+		t.Setenv("PQC_ROUND_TIMEOUT", roundTimeout)
+	}
+
+	t.Run("unset defaults to twice the round interval", func(t *testing.T) {
+		setValidEnv(t, "10s", "120s", "", "10s")
+		cfg, err := Parse()
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if want := 240 * time.Second; cfg.PQCMaxKeyAge != want {
+			t.Fatalf("PQCMaxKeyAge = %s, want %s", cfg.PQCMaxKeyAge, want)
+		}
+	})
+
+	t.Run("equal to the round interval is fatal", func(t *testing.T) {
+		setValidEnv(t, "10s", "120s", "120s", "10s")
+		_, err := Parse()
+		if err == nil {
+			t.Fatal("expected Parse to reject PQC_MAX_KEY_AGE == PQC_ROUND_INTERVAL")
+		}
+		// The error has to name both durations, or an operator cannot see which
+		// of the two to change.
+		for _, want := range []string{"2m0s", "PQC_MAX_KEY_AGE", "PQC_ROUND_INTERVAL"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("shorter than the round interval is fatal", func(t *testing.T) {
+		setValidEnv(t, "10s", "120s", "20s", "10s")
+		if _, err := Parse(); err == nil {
+			t.Fatal("expected Parse to reject a PQC_MAX_KEY_AGE shorter than PQC_ROUND_INTERVAL")
+		}
+	})
+
+	t.Run("explicit valid value is retained", func(t *testing.T) {
+		setValidEnv(t, "10s", "120s", "300s", "10s")
+		cfg, err := Parse()
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if want := 300 * time.Second; cfg.PQCMaxKeyAge != want {
+			t.Fatalf("PQCMaxKeyAge = %s, want %s", cfg.PQCMaxKeyAge, want)
+		}
+	})
+
+	t.Run("ignored when PQC is disabled", func(t *testing.T) {
+		setValidEnv(t, "10s", "120s", "20s", "10s")
+		t.Setenv("PQC_ENABLED", "false")
+		t.Setenv("MODE", "AtLeastQkdRequired")
+		if _, err := Parse(); err != nil {
+			t.Fatalf("Parse must not validate PQC durations with PQC disabled: %v", err)
+		}
+	})
 }

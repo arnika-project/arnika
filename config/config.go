@@ -149,7 +149,8 @@ func (c *Config) PrintStartupConfig() {
 		fmt.Printf("PQC key agreement:        ENABLED (pqc-hpke)\n")
 		fmt.Printf("PQC round interval:       %s\n", c.PQCRoundInterval)
 		fmt.Printf("PQC round timeout:        %s\n", c.PQCRoundTimeout)
-		fmt.Printf("PQC max key age:          %s\n", c.PQCMaxKeyAge)
+		fmt.Printf("PQC max key age:          %s (%.1f x round interval)\n",
+			c.PQCMaxKeyAge, float64(c.PQCMaxKeyAge)/float64(c.PQCRoundInterval))
 	} else {
 		fmt.Println("PQC key agreement:        DISABLED")
 	}
@@ -243,7 +244,11 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse PQC_ROUND_INTERVAL: %w", err)
 	}
-	config.PQCMaxKeyAge, err = time.ParseDuration(getEnvOrDefault("PQC_MAX_KEY_AGE", (2 * config.Interval).String()))
+	// Derived from PQC_ROUND_INTERVAL, not INTERVAL: the key ages against the
+	// PQC round cadence, so deriving it from the QKD interval made a key stale
+	// for most of every healthy round whenever an operator overrode only
+	// PQC_ROUND_INTERVAL. Two rounds is one round of loss tolerance.
+	config.PQCMaxKeyAge, err = time.ParseDuration(getEnvOrDefault("PQC_MAX_KEY_AGE", (2 * config.PQCRoundInterval).String()))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse PQC_MAX_KEY_AGE: %w", err)
 	}
@@ -262,6 +267,14 @@ func Parse() (*Config, error) {
 		}
 		if config.PQCMaxKeyAge <= 0 {
 			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE must be positive, got %s", config.PQCMaxKeyAge)
+		}
+		// A key that goes stale within its own round interval is stale for part
+		// of every healthy round, and in a PQC-requiring mode each rotation in
+		// that window invalidates the tunnel. Reject it rather than let it
+		// surface as intermittent handshake failures.
+		if config.PQCMaxKeyAge <= config.PQCRoundInterval {
+			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE (%s) must be longer than PQC_ROUND_INTERVAL (%s)",
+				config.PQCMaxKeyAge, config.PQCRoundInterval)
 		}
 	}
 	config.Mode = getEnvOrDefault("MODE", "QkdAndPqcRequired")

@@ -434,8 +434,14 @@ func NewPQCHPKERepository(
 		return nil, fmt.Errorf("pqc: round timeout %s must be positive and shorter than the round interval %s",
 			roundTimeout, roundInterval)
 	}
-	if maxAge <= 0 {
-		return nil, fmt.Errorf("pqc: max key age must be positive, got %s", maxAge)
+	// Longer than the round interval, not merely positive: a key that expires
+	// inside its own round is stale for part of every healthy round, and a
+	// PQC-requiring mode then invalidates the tunnel on any rotation that lands
+	// in that window. Enforced here as well as in config, so a caller that
+	// builds the repository directly cannot bypass the invariant.
+	if maxAge <= roundInterval {
+		return nil, fmt.Errorf("pqc: max key age %s must be longer than the round interval %s",
+			maxAge, roundInterval)
 	}
 	if logPrefix == "" {
 		logPrefix = "PQC-HPKE"

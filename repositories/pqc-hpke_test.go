@@ -537,14 +537,14 @@ func newPQCPipeWith(t *testing.T, drop func(fromInitiator bool, f pqcFrame) bool
 
 	initiator, err := NewPQCHPKERepository("PQC-HPKE[init]",
 		deliver(toResponder, true), recv(toInitiator),
-		func(uint32) bool { return true }, interval, timeout, time.Minute)
+		func(uint32) bool { return true }, interval, timeout, 2*interval)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
 	}
 	// The responder never initiates, so its own channel must stay unused.
 	send, recvUnused := mustNotInitiate()
 	responder, err := NewPQCHPKERepository("PQC-HPKE[resp]", send, recvUnused,
-		func(uint32) bool { return false }, interval, timeout, time.Minute)
+		func(uint32) bool { return false }, interval, timeout, 2*interval)
 	if err != nil {
 		t.Fatalf("NewPQCHPKERepository: %v", err)
 	}
@@ -890,7 +890,8 @@ func TestPQCGetNewKeyBeforeAnyRound(t *testing.T) {
 }
 
 func TestPQCGetNewKeyStale(t *testing.T) {
-	r := newPQCTestRepo(t, time.Second, 100*time.Millisecond, 50*time.Millisecond)
+	// maxAge must exceed the round interval, so both are scaled down together.
+	r := newPQCTestRepo(t, 10*time.Millisecond, 5*time.Millisecond, 50*time.Millisecond)
 
 	key := make([]byte, pqcKeyLen)
 	if _, err := rand.Read(key); err != nil {
@@ -996,6 +997,8 @@ func TestPQCConstructorValidation(t *testing.T) {
 		{"timeout equals interval", send, recv, role, time.Second, time.Second, time.Minute},
 		{"timeout exceeds interval", send, recv, role, time.Second, 2 * time.Second, time.Minute},
 		{"zero maxAge", send, recv, role, time.Second, time.Millisecond, 0},
+		{"maxAge equals interval", send, recv, role, time.Second, time.Millisecond, time.Second},
+		{"maxAge below interval", send, recv, role, time.Second, time.Millisecond, 500 * time.Millisecond},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
