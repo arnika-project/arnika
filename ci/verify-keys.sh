@@ -72,6 +72,32 @@ if [ "$PSK_A" = "$PSK_B" ]; then
         echo "⚠️  WARNING: Node-A cannot ping Node-B (may need more time)"
     fi
 
+    # The transport must carry a healthy pair without the flood protections
+    # firing. At INTERVAL=5s the derived RATE_LIMIT is well above what two
+    # peers exchange, so any rejection here is legitimate traffic being
+    # dropped; likewise a full QKD queue means the read loop had to refuse a
+    # key_id the peer had to retry.
+    #
+    # "key stale" and not every PQC retrieval failure: "no key agreed yet" is
+    # the expected state before the first round completes, while a stale key is
+    # a tunnel invalidated because of key age, which is what must not happen.
+    echo ""
+    echo "====== Transport Health ======"
+    FAILURES=0
+    for node in node-a node-b ; do
+        for pattern in "rate limited" "QKD queue full" "key stale" ; do
+            HITS=$(docker exec "clab-arnika-ci-test-${node}" grep -c "$pattern" /tmp/arnika.log 2>/dev/null || true)
+            HITS=${HITS:-0}
+            if [ "$HITS" -gt 0 ] ; then
+                echo "❌ FAILED: ${node} logged \"${pattern}\" ${HITS} time(s)"
+                docker exec "clab-arnika-ci-test-${node}" grep -m5 "$pattern" /tmp/arnika.log || true
+                FAILURES=$((FAILURES + 1))
+            else
+                echo "✅ ${node}: no \"${pattern}\""
+            fi
+        done
+    done
+
     # Check Arnika logs
     echo ""
     echo "Node-A Arnika logs (last 40 lines):"
@@ -81,6 +107,9 @@ if [ "$PSK_A" = "$PSK_B" ]; then
     echo "Node-B Arnika logs (last 40 lines):"
     docker exec clab-arnika-ci-test-node-b tail -n 40 /tmp/arnika.log || echo "No logs available"
 
+    if [ "$FAILURES" -gt 0 ] ; then
+        exit 1
+    fi
     exit 0
 else
     echo "❌ FAILED: PSKs do not match!"
