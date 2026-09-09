@@ -119,7 +119,7 @@ func TestParse(t *testing.T) {
 		PQCMaxKeyAge:           time.Second * 20, // Defaults to 2 x PQC_ROUND_INTERVAL
 		PQCRoundTimeout:        time.Millisecond * 2500,
 		Mode:                   "AtLeastQkdRequired",
-		RateLimit:              30,          // Real default value for RateLimit
+		RateLimit:              0,           // Unset: derived from protocol traffic by the caller
 		RateWindow:             time.Minute, // Real default value for RateWindow
 		MaxClockSkew:           time.Minute, // Real default value for MaxClockSkew
 	}
@@ -360,6 +360,55 @@ func TestParse_PQCKeyAge(t *testing.T) {
 		t.Setenv("MODE", "AtLeastQkdRequired")
 		if _, err := Parse(); err != nil {
 			t.Fatalf("Parse must not validate PQC durations with PQC disabled: %v", err)
+		}
+	})
+}
+
+// TestParse_RateLimit covers FR-3.1 and FR-3.5: unset leaves zero, which the
+// caller reads as "derive from protocol traffic", and an explicit value is kept
+// verbatim as an operator override.
+func TestParse_RateLimit(t *testing.T) {
+	setValidEnv := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
+		t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
+		t.Setenv("KMS_URL", "https://example.com")
+		t.Setenv("WIREGUARD_INTERFACE", "wg0")
+		t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+		t.Setenv("MODE", "AtLeastQkdRequired")
+		t.Setenv("ARNIKA_PSK", testArnikaPSK)
+	}
+
+	t.Run("unset leaves zero for the caller to derive", func(t *testing.T) {
+		setValidEnv(t)
+		cfg, err := Parse()
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if cfg.RateLimit != 0 {
+			t.Fatalf("RateLimit = %d, want 0 so the protocol budget applies", cfg.RateLimit)
+		}
+	})
+
+	t.Run("explicit value is retained", func(t *testing.T) {
+		setValidEnv(t)
+		t.Setenv("RATE_LIMIT", "500")
+		cfg, err := Parse()
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if cfg.RateLimit != 500 {
+			t.Fatalf("RateLimit = %d, want 500", cfg.RateLimit)
+		}
+	})
+
+	t.Run("non-positive and unparseable values are fatal", func(t *testing.T) {
+		for _, v := range []string{"0", "-1", "many"} {
+			setValidEnv(t)
+			t.Setenv("RATE_LIMIT", v)
+			if _, err := Parse(); err == nil {
+				t.Fatalf("expected Parse to reject RATE_LIMIT=%q", v)
+			}
 		}
 	})
 }

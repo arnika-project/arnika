@@ -217,6 +217,15 @@ func main() {
 	if err := os.Unsetenv("ARNIKA_PSK"); err != nil {
 		log.Printf("[WARNING] failed to drop ARNIKA_PSK from the environment: %v", err)
 	}
+	// RATE_LIMIT unset means "size it from the protocol": only main sees both
+	// the transport's frame and retry counts and the configured cadences.
+	limit, budget, warning := effectiveRateLimit(cfg)
+	if warning != "" {
+		log.Printf("[WARNING] %s", warning)
+	}
+	cfg.RateLimit = limit
+	log.Printf("[INFO] per-IP rate limit: %d packets per %s (calculated legitimate budget: %d)",
+		cfg.RateLimit, cfg.RateWindow, budget)
 	cfg.PrintStartupConfig()
 	var colorStart, colorEnd string
 	arnikaIDInt := 0

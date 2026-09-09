@@ -331,6 +331,26 @@ func pqcVerifyConfirm(pqcKey []byte, round uint32, role string, peerTag []byte) 
 // pqcMaxSendAttempts mirrors udpClient's send-with-reply retry count.
 const pqcMaxSendAttempts = 3
 
+// PQCMessageFrames and PQCMaxSendAttempts are what the per-IP rate-limit
+// budget is sized from. They are exported rather than copied into the budget
+// calculation so that raising a retry count or a message size here cannot
+// leave the budget behind and start rejecting legitimate frames.
+const (
+	// PQCMessageFrames is the frame count of the largest inbound PQC message,
+	// the 1665-byte public key.
+	PQCMessageFrames = pqcMaxFrames
+	// PQCMaxSendAttempts is the initiator's retry budget for one message.
+	PQCMaxSendAttempts = pqcMaxSendAttempts
+)
+
+// PQCRoundSeconds is the scheduler's effective round spacing in whole seconds.
+// The budget must use this and not PQC_ROUND_INTERVAL itself: the round index
+// is second-granular, so a sub-second interval still yields one round per
+// second and not more.
+func PQCRoundSeconds(interval time.Duration) int64 {
+	return pqcIntervalSecs(interval)
+}
+
 // pqcSendRetryDelay spaces retries of a failed write. A UDP send can fail with
 // ICMP port-unreachable simply because the peer has not bound its socket yet,
 // which is routine when both peers start at once, so the delay is short.

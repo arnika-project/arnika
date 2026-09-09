@@ -187,8 +187,14 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 	}
 }
 
+// udpClientMaxAttempts is how many times udpClient sends one key id while
+// waiting for an ACK, so it is also how many DATA packets one QKD interval can
+// legitimately deliver to the peer's listening socket. Shared with the
+// rate-limit budget so the two cannot drift.
+const udpClientMaxAttempts = 3
+
 // udpClient sends an encrypted, HMAC-signed key ID to the peer via the security-hardened
-// UDP protocol. Retries up to 3 times on timeout.
+// UDP protocol. Retries up to udpClientMaxAttempts times on timeout.
 //
 // Protocol flow:
 //  1. Send DATA (signed + encrypted keyID) -> Receive ACK
@@ -210,8 +216,7 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 	}
 	defer func() { _ = conn.Close() }()
 
-	const maxRetries = 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= udpClientMaxAttempts; attempt++ {
 		// Step 1: Encrypt keyID and send DATA packet
 		encrypted, err := auth.Encrypt(psk, []byte(keyID))
 		if err != nil {
@@ -234,11 +239,11 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 		ackBuf := make([]byte, 1024)
 		n, err := conn.Read(ackBuf)
 		if err != nil {
-			if attempt < maxRetries {
-				log.Printf("[DEBUG] %s ACK timeout (attempt %d/%d), retrying...", PRIMARYLOGPREFIX, attempt, maxRetries)
+			if attempt < udpClientMaxAttempts {
+				log.Printf("[DEBUG] %s ACK timeout (attempt %d/%d), retrying...", PRIMARYLOGPREFIX, attempt, udpClientMaxAttempts)
 				continue
 			}
-			return fmt.Errorf("no ACK after %d attempts: %w", maxRetries, err)
+			return fmt.Errorf("no ACK after %d attempts: %w", udpClientMaxAttempts, err)
 		}
 
 		ackPkt, err := auth.UnmarshalPacket(psk, ackBuf[:n], dirIn)

@@ -40,7 +40,7 @@ type Config struct {
 	PQCRoundTimeout        time.Duration // PQC_ROUND_TIMEOUT, Per-round deadline, must be shorter than PQC_ROUND_INTERVAL
 	PQCMaxKeyAge           time.Duration // PQC_MAX_KEY_AGE, Staleness threshold for the agreed PQC key
 	Mode                   string        // MODE, Operation mode ("QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired")
-	RateLimit              int           // RATE_LIMIT, Max requests per IP per window
+	RateLimit              int           // RATE_LIMIT, Max requests per IP per window; zero means derive it from protocol traffic
 	RateWindow             time.Duration // RATE_WINDOW, Window duration for rate limiting
 	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
 }
@@ -318,10 +318,19 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse ARNIKA_PEER_TIMEOUT: %w", err)
 	}
-	rateLimitStr := getEnvOrDefault("RATE_LIMIT", "30")
-	config.RateLimit, err = strconv.Atoi(rateLimitStr)
-	if err != nil {
-		return nil, fmt.Errorf("[ERROR] failed to parse RATE_LIMIT: %w", err)
+	// Left at zero when unset, meaning "size it from the protocol". Only the
+	// caller can do that: the frame and retry counts that decide how much
+	// traffic one healthy round produces live in the transport, not here. A
+	// static default was below what a five-second interval legitimately
+	// generates, so the limiter rejected valid frames.
+	if v := os.Getenv("RATE_LIMIT"); v != "" {
+		config.RateLimit, err = strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("[ERROR] failed to parse RATE_LIMIT: %w", err)
+		}
+		if config.RateLimit <= 0 {
+			return nil, fmt.Errorf("[ERROR] RATE_LIMIT must be positive, got %d", config.RateLimit)
+		}
 	}
 	rateWindowStr := getEnvOrDefault("RATE_WINDOW", "1m")
 	config.RateWindow, err = time.ParseDuration(rateWindowStr)
