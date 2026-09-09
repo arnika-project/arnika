@@ -286,6 +286,84 @@ a handshake per rotation: at `INTERVAL=5s` the key rotates far faster than
 WireGuard's ~2-minute rekey, so most rotations are never exercised by a
 handshake at all.
 
+## The test matrix
+
+### What each mode promises
+
+The contract under test, from `IsQKDRequired` / `IsPQCRequired` in
+[`config/config.go`](../../config/config.go) and the branches of `setPSK` in
+[`main.go`](../../main.go):
+
+| `MODE` | PQC | QKD | PSK `setPSK` installs | Invalidates with a random PSK |
+|---|---|---|---|---|
+| `QkdAndPqcRequired` _(default)_ | must | must | `HKDF(QKD ‖ PQC)` | QKD **or** PQC is missing |
+| `AtLeastQkdRequired` | can fail | must | `HKDF(QKD ‖ PQC)`, else QKD alone | QKD is missing |
+| `AtLeastPqcRequired` | must | can fail | `HKDF(QKD ‖ PQC)`, else PQC alone | PQC is missing |
+| `EitherQkdOrPqcRequired` | can fail | can fail | whichever source answered | both are missing |
+
+The two fallbacks are **not** symmetric, and the difference is easy to miss:
+
+- **QKD alone** — `setPSK` skips the derivation entirely, so the installed PSK is
+  the KMS key **as-is**, never hashed.
+- **PQC alone** — `kdf.DeriveKey` still runs, with the QKD half empty, so the
+  installed PSK is `HKDF-SHA3-256(PQC)` rather than the agreed key itself.
+
+The fourth row is listed for completeness only — `EitherQkdOrPqcRequired` is not
+in `MODES`, for the reason given under [Running it](#running-it).
+
+### What the run asserts
+
+Five phases per mode are identical, because a healthy pair should behave the
+same whatever the mode says about absent sources:
+
+| Phase | Fault injected | Asserts | Checks |
+|---|---|---|---|
+| install | none | both ends log a PSK write, and hold the same key | 2 |
+| tunnel | none | 4 KB reaches the far end and decrypts there | 1 |
+| rotation | none | 3 consecutive rotations, both ends matching each time | 3 |
+| tunnel | none | still crossing after 3 rotations | 1 |
+| desync | one end's PSK overwritten with the peers stopped | no handshake, nothing decrypts, then the pair resyncs, handshakes and carries traffic | 5 |
+
+Two more phases are where the modes diverge — each source is taken away in turn
+and the mode is held to its row in the contract table above. Both the PSK state
+**and** the line Arnika logs about its own decision are asserted, then the source
+is restored and both ends have to come back onto one key within 30s:
+
+| `MODE` | QKD frozen (`FREEZE=CONSA,CONSB`) | expected in peer a's log | PQC gone (`PQC_ROUND_TIMEOUT=1ns`) | expected in peer a's log |
+|---|---|---|---|---|
+| `QkdAndPqcRequired` | ends diverge | `no QKD key received` | ends diverge | `Abort since mode is set to` |
+| `AtLeastQkdRequired` | ends diverge | `no QKD key received` | keep rotating in step | `switching to QKD key` |
+| `AtLeastPqcRequired` | keep rotating in step | `switching to PQC key` | ends diverge | `Abort since mode is set to` |
+
+That is 18 checks per mode, 54 across the three, on top of the pre-test and
+setup.
+
+### Known failures in the QKD column
+
+> [!WARNING]
+> The three **QKD gone** cells above describe the contract, not current
+> behaviour. They fail today, and the cause is not in this script.
+
+In a binary with a QKD reader compiled in, `setPSK` is only ever reached with a
+key from a **successful** KMS fetch: the PRIMARY has the call in the `else` of
+its `qkd.GetNewKey()` error check, and the BACKUP does `continue` when
+`GetKeyByID` fails. So with the simulator frozen neither end calls `setPSK` at
+all — it keeps the PSK it already had, `InvalidateTunnel` never runs, and
+`setPSK`'s `len(qkd) == 0` branch, the only place `no QKD key received` and
+`switching to PQC key` are logged, is unreachable.
+
+All three QKD-gone rows are affected, for that one reason:
+
+| Mode and phase | Symptom |
+|---|---|
+| `QkdAndPqcRequired`, QKD gone | `kept both ends on one key`, and `no QKD key received` never logged |
+| `AtLeastQkdRequired`, QKD gone | same |
+| `AtLeastPqcRequired`, QKD gone | `stopped rotating in step`, and `switching to PQC key` never logged — rotation cannot carry on when nothing calls `setPSK` |
+
+Making these pass means changing the QKD rotation loop so a failed fetch still
+reaches `setPSK`, which is a decision about Arnika's behaviour rather than about
+this test.
+
 ## The missing-source tests
 
 A mode is a statement about which key source may be absent. Two checks per mode
@@ -306,8 +384,15 @@ both ends stay in step, on a key derived from whichever source is left.
 
 How each source is taken away:
 
-- **QKD** — the KMS simulator is stopped, so every `enc_keys`/`dec_keys`
-  request fails, and started again afterwards.
+- **QKD** — the KMS simulator is restarted with `FREEZE=CONSA,CONSB` (see
+  [`KMS.md`](../../KMS.md)), so it accepts every `enc_keys`/`dec_keys` request
+  and never answers one; it is restarted without `FREEZE` afterwards. Stopping
+  it outright would break QKD too, but a refused connection leaves no KMS log
+  of the requests made into the failure — frozen, each one is logged as
+  `[FREEZE]`, so the KMS side of the fault is visible in the run's output. A
+  frozen KMS fails only on the client's timeout, so the pair is restarted with
+  `KMS_HTTP_TIMEOUT=1s KMS_BACKOFF_MAX_RETRIES=1` — roughly 2s per fetch,
+  rather than the minute the 10s/5-retry defaults would take.
 - **PQC** — the pair is restarted with `PQC_ROUND_TIMEOUT=1ns`. Every attempt
   then dies on its deadline waiting for the peer's answer, which has to cross
   the socket, so the **initiating** peer never agrees a key and `GetNewKey` has

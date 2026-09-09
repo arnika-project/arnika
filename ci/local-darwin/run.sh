@@ -4,7 +4,7 @@
 # bundled KMS simulator, and two Arnika instances rotating the PSK on both ends.
 #
 # Each mode is put through its rotation cycles and then three deliberate
-# failures - QKD taken away, PQC taken away, the PSK desynced behind Arnika's
+# failures - QKD frozen, PQC taken away, the PSK desynced behind Arnika's
 # back - each followed by a recovery. WireGuard itself is pre-tested first, and
 # the run stops there if that fails. README.md explains why the tunnel check
 # looks the way it does: both ends are on one host, so a bare ping to the peer
@@ -23,7 +23,9 @@
 # process cannot write a PSK underneath the run that follows it.
 #
 # The KMS simulator runs with DEBUG=true so its requests and responses are
-# logged. Arnika's [DEBUG] lines are unconditional.
+# logged. Arnika's [DEBUG] lines are unconditional. QKD is taken away by
+# freezing the simulator (FREEZE, see KMS.md) rather than stopping it, so the
+# requests Arnika makes into the failure are still in the log.
 #
 # See README.md for prerequisites.
 
@@ -174,8 +176,14 @@ logs() {
         # A gutter of its own, so a block of log lines is never mistaken for
         # the indented output of a check. Field 1 is the peer prefix, 2 and 3
         # the date and time every line starts with.
+        #
+        # -s because sort falls back to comparing whole lines when the keys tie,
+        # and lines that share a timestamp do tie: that reordered same-instant
+        # blocks alphabetically, which is why a KMS startup banner appeared
+        # *after* the requests it precedes. Stable, each peer's own lines keep
+        # the order they were written in.
         if [ "$LAST_WAS_LOG" = "0" ]; then printf '\n'; fi
-        sort -k2,3 "$merged" | sed "s/^/    ${C_DIM}│${C_RESET} /"
+        sort -s -k2,3 "$merged" | sed "s/^/    ${C_DIM}│${C_RESET} /"
         LAST_WAS_LOG=1
     fi
     return 0
@@ -529,7 +537,13 @@ pretest() {
 # landing on different keys is the signal. A missing *optional* source must
 # instead leave rotation running, both ends in step on the other source.
 #
-# QKD is taken away by stopping the simulator. PQC is taken away with
+# QKD is taken away by restarting the simulator with both SAE frozen: it accepts
+# and logs every request as usual and never answers one, which is what a hung
+# KMS or an exhausted key pool looks like from Arnika's side. Stopping the
+# simulator outright would do too, but a refused connection leaves no KMS log of
+# the requests made into the failure - the frozen run logs each one as [FREEZE].
+#
+# PQC is taken away with
 # PQC_ROUND_TIMEOUT=1ns: every attempt then dies on its deadline waiting for the
 # peer's answer, which has to cross the socket, so the *initiating* peer never
 # agrees a key and GetNewKey has nothing to return. 1ns rather than 1ms because
@@ -558,7 +572,12 @@ source_check() {
     stop_peers
     mark="$(wc -l < "$LOG_A")"
     if [ "$source" = "qkd" ]; then
-        stop_kms
+        freeze_kms CONSA,CONSB
+        # A frozen KMS never answers, so a fetch fails only once the HTTP client
+        # gives up: at the 10s default with 5 retries that is over a minute per
+        # fetch, far past the windows below. The pair is restarted with a short
+        # timeout and one retry instead, ~2s per fetch.
+        extra="KMS_HTTP_TIMEOUT=1s KMS_BACKOFF_MAX_RETRIES=1"
     else
         extra="PQC_ROUND_TIMEOUT=1ns"
     fi
@@ -599,7 +618,7 @@ source_check() {
     step "$source back: the pair has to recover"
     stop_peers
     if [ "$source" = "qkd" ]; then
-        start_kms
+        unfreeze_kms
     fi
     start_pair "$mode"
     if wait_for 30 psks_agree_new "$before"; then
@@ -616,7 +635,7 @@ source_check() {
 # desync is a mode whose passes mean nothing. Then the peers are started again
 # and have to put it back.
 #
-# Stopping them is what makes it deterministic - at INTERVAL=5s a running pair
+# Stopping them is what makes it deterministic - at INTERVAL=7s a running pair
 # heals a desync faster than it can be measured. SIGSTOP would be the lighter
 # touch but cannot be used: arnika runs under sudo, and sudo answers a stopped
 # child by stopping itself and passing the signal to its process group, which
@@ -655,12 +674,38 @@ desync_check() {
     tunnel_traffic || true
 }
 
-# start_kms and stop_kms exist so source_check can take QKD away and give it
-# back. The log is appended across restarts, like the peers' own.
+# start_kms, freeze_kms and unfreeze_kms exist so source_check can take QKD away
+# and give it back. The log is appended across restarts, like the peers' own.
+#
+# $1, when given, is passed as FREEZE: those SAE then accept and log requests and
+# never answer them. FREEZE is read once at startup, so switching it is a
+# restart rather than a signal.
 start_kms() {
     LOG_KMS="$WORK/kms.log"
-    ( LISTEN=127.0.0.1:8080 DEBUG=true "$WORK/kms" >> "$LOG_KMS" 2>&1 ) &
+    ( LISTEN=127.0.0.1:8080 DEBUG=true FREEZE="${1:-}" "$WORK/kms" >> "$LOG_KMS" 2>&1 ) &
     wait_for 10 kms_up || fail "the KMS is not listening on 127.0.0.1:8080"
+}
+
+# freeze_kms restarts the simulator with $1 frozen, and confirms it from the
+# simulator's own [CONF] line - a FREEZE value it does not recognise is silently
+# ignored, which would leave a healthy KMS behind a check expecting a broken one.
+# Marked before the restart because the log is appended: an earlier mode's
+# freeze is in there too.
+freeze_kms() {
+    local mark
+    mark="$(wc -l < "$LOG_KMS" | tr -d ' ')"
+    stop_kms
+    start_kms "$1"
+    if log_has "$LOG_KMS" "$mark" "frozen SAE=$1"; then
+        info "KMS restarted with $1 frozen - requests accepted, never answered"
+    else
+        fail "the KMS did not report $1 as frozen"
+    fi
+}
+
+unfreeze_kms() {
+    stop_kms
+    start_kms
 }
 
 stop_kms() {
@@ -686,7 +731,7 @@ start_pair() {
     start_peer() {
         sudo env \
             LISTEN_ADDRESS="127.0.0.1:$1" SERVER_ADDRESS="127.0.0.1:$2" \
-            ARNIKA_ID="$1" ARNIKA_PSK="$PSK" INTERVAL=5s MODE="$mode" DEBUG=true \
+            ARNIKA_ID="$1" ARNIKA_PSK="$PSK" INTERVAL=7s MODE="$mode" DEBUG=true \
             KMS_URL="http://127.0.0.1:8080/api/v1/keys/$3" \
             WIREGUARD_INTERFACE="$4" WIREGUARD_PEER_PUBLIC_KEY="$5" \
             ${extra} \

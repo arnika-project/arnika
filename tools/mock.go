@@ -75,6 +75,7 @@ var keyStore = &KeyStore{
 var randomizer = rand.New(rand.NewSource(time.Now().UnixNano()))
 var debugEnabled = isDebugEnabled()
 var listenAddr = getListenAddr()
+var frozenSAEs = getFrozenSAEs()
 
 const (
 	defaultKeyNumber          = 1
@@ -90,13 +91,18 @@ const (
 )
 
 func main() {
+	// Microseconds, like arnika's own (main.go): a run interleaves this log
+	// with the peers', and second resolution ties every line of a startup
+	// banner together for the merge to order however it likes.
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
 	// Register handlers for both CONSA and CONSB
-	http.HandleFunc("/api/v1/keys/CONSA/enc_keys", handleEncKeys)
-	http.HandleFunc("/api/v1/keys/CONSA/dec_keys", handleDecKeys)
-	http.HandleFunc("/api/v1/keys/CONSA/status", handleStatus)
-	http.HandleFunc("/api/v1/keys/CONSB/enc_keys", handleEncKeys)
-	http.HandleFunc("/api/v1/keys/CONSB/dec_keys", handleDecKeys)
-	http.HandleFunc("/api/v1/keys/CONSB/status", handleStatus)
+	http.HandleFunc("/api/v1/keys/CONSA/enc_keys", freezable("CONSA", handleEncKeys))
+	http.HandleFunc("/api/v1/keys/CONSA/dec_keys", freezable("CONSA", handleDecKeys))
+	http.HandleFunc("/api/v1/keys/CONSA/status", freezable("CONSA", handleStatus))
+	http.HandleFunc("/api/v1/keys/CONSB/enc_keys", freezable("CONSB", handleEncKeys))
+	http.HandleFunc("/api/v1/keys/CONSB/dec_keys", freezable("CONSB", handleDecKeys))
+	http.HandleFunc("/api/v1/keys/CONSB/status", freezable("CONSB", handleStatus))
 	log.Printf("======== QKD KMS Simulator ========")
 	log.Printf("[CONF] listen address=%s (set LISTEN=host:port to override)", listenAddr)
 	log.Printf("[CONF] supported key size=%d", defaultKeySize)
@@ -109,10 +115,31 @@ func main() {
 	log.Printf("[CONF]  /api/v1/keys/CONSB/dec_keys")
 	log.Printf("[CONF]  /api/v1/keys/CONSB/status")
 	log.Printf("[CONF] debug logging enabled=%t (set DEBUG=true to enable)", debugEnabled)
+	log.Printf("[CONF] frozen SAE=%s (set FREEZE=CONSA|CONSB|both to never reply)", freezeSummary())
 	log.Printf("===================================")
 
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		panic("[ERROR] failed starting server: " + err.Error())
+	}
+}
+
+// freezable simulates a hung KMS (or an exhausted key pool that never resolves):
+// the request is accepted and logged as usual, but no response is ever written.
+func freezable(sae string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !frozenSAEs[sae] {
+			next(w, r)
+			return
+		}
+
+		rawBody, _ := readAndRestoreBody(r)
+		debugLogRequest(r, rawBody)
+		// No status: nothing is ever sent, so LOG's %d had nothing but a
+		// misleading 0 to put there.
+		log.Printf("[FREEZE] [---] %s %s from %s", r.Method, r.URL.Path+getQueryParameters(r), r.RemoteAddr)
+
+		// Hold the connection open until the client gives up or the server shuts down.
+		<-r.Context().Done()
 	}
 }
 
@@ -451,6 +478,35 @@ func debugLogResponse(status int, contentType string, body []byte) {
 func isDebugEnabled() bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv("DEBUG")))
 	return value == "true"
+}
+
+func getFrozenSAEs() map[string]bool {
+	frozen := map[string]bool{}
+	for _, value := range strings.Split(os.Getenv("FREEZE"), ",") {
+		switch strings.ToUpper(strings.TrimSpace(value)) {
+		case "CONSA":
+			frozen["CONSA"] = true
+		case "CONSB":
+			frozen["CONSB"] = true
+		case "BOTH", "ALL":
+			frozen["CONSA"] = true
+			frozen["CONSB"] = true
+		}
+	}
+	return frozen
+}
+
+func freezeSummary() string {
+	switch {
+	case frozenSAEs["CONSA"] && frozenSAEs["CONSB"]:
+		return "CONSA,CONSB"
+	case frozenSAEs["CONSA"]:
+		return "CONSA"
+	case frozenSAEs["CONSB"]:
+		return "CONSB"
+	default:
+		return "none"
+	}
 }
 
 func getListenAddr() string {
