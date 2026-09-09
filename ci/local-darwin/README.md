@@ -38,6 +38,7 @@ carry in.
 ./run.sh --keep      # leave the interfaces and logs in place afterwards
 ./run.sh --quiet     # do not stream the Arnika and KMS logs
 ./run.sh --clean     # only clear leftovers from an earlier run, then stop
+./run.sh --list      # print the numbered test list and stop
 ```
 
 Every run **starts by clearing leftovers**: any `arnika` or KMS process from an
@@ -67,26 +68,32 @@ three operational modes in turn:
 the missing-source tests below have nothing to assert for it beyond what the
 other three already cover.
 
-For each mode it checks that:
+Each mode gets a numbered section of its own — 3, 4 and 5 — with the same 23
+tests in it. `x` below stands for that section number:
 
-- both ends report `[OK] PSK configured on WireGuard interface`
-- **both interfaces hold the same preshared key** — the property that matters;
-  different keys mean a dead handshake
-- traffic really traverses the tunnel and **decrypts at the far end** — see
-  [How the tunnel is checked](#how-the-tunnel-is-checked)
-- the PSK **rotates over `CYCLES` consecutive cycles** (3 by default), both ends
-  holding the identical key on every one, with a **`wg show … dump` of both
-  interfaces after every write** so a failure can be read against the state that
-  produced it
-- the tunnel still passes traffic after those rotations
-- **the mode honours its own contract** when a key source disappears — see
+- **x.1** both ends report `[OK] PSK configured on WireGuard interface`
+- **x.2** **both interfaces hold the same preshared key** — the property that
+  matters; different keys mean a dead handshake
+- **x.3** traffic really traverses the tunnel and **decrypts at the far end** —
+  see [How the tunnel is checked](#how-the-tunnel-is-checked)
+- **x.4**–**x.6** the PSK **rotates over `CYCLES` consecutive cycles** (3 by
+  default), both ends holding the identical key on every one, with a
+  **`wg show … dump` of both interfaces after every write** so a failure can be
+  read against the state that produced it
+- **x.7** the tunnel still passes traffic after those rotations
+- **x.8**–**x.18** **the mode honours its own contract** when a key source
+  disappears — three faults, each with a recovery: the KMS hung, the KMS not
+  running at all, PQC unable to agree. See
   [The missing-source tests](#the-missing-source-tests)
-- **a deliberate desync breaks it** — and the peers put it back; see
-  [The intentional failure test](#the-intentional-failure-test)
+- **x.19**–**x.23** **a deliberate desync breaks it** — and the peers put it
+  back; see [The intentional failure test](#the-intentional-failure-test)
 
-At `INTERVAL=5s` each mode takes two to three minutes — most of it waiting out
-the three deliberate failures and the recovery after each — so a whole run is
-roughly ten. `MODES` and `CYCLES` sit at the top of the script — narrow them if
+The full list, with the exact numbers, is under
+[What the run asserts](#what-the-run-asserts) or from `./run.sh --list`.
+
+At `INTERVAL=7s` each mode takes three to four minutes — most of it waiting out
+the four deliberate failures and the recovery after each — so a whole run is
+roughly twelve. `MODES` and `CYCLES` sit at the top of the script — narrow them if
 you only care about one mode, or want fewer rotations. Teardown runs even on
 failure, so a `wg-quick down` is never left to you.
 
@@ -145,40 +152,61 @@ you can keep poking with the commands below.
 
 ### The summary
 
-Every check is tallied by section, and the run ends with the score. A failed
-pre-test prints it too, before it stops the run:
+The run ends with **the whole numbered list and each test's result** — the
+message actually observed for a test that ran, its declared description for one
+that did not. A failed pre-test prints it too, before it stops the run, which is
+when the `SKIP` lines say the most:
 
 ```
 ─── summary ──────────────────────────
-  setup                                      8 passed    0 failed
-  pre-test: WireGuard alone, no Arnika       8 passed    0 failed    2 intentional
-  MODE=QkdAndPqcRequired                    18 passed    0 failed    6 intentional
-  MODE=AtLeastQkdRequired                   17 passed    1 failed    6 intentional
-  MODE=AtLeastPqcRequired                   17 passed    1 failed    6 intentional
-  ──────────────────────────────────────────────────────────────
-  total                                     68 passed    2 failed   20 intentional
+
+  1  setup
+       1.1  PASS  wg, wg-quick, wireguard-go and go are present
+       …
+       1.8  PASS  listening on 127.0.0.1:8080 with debug logging
+
+  2  pre-test: WireGuard alone, no Arnika
+       2.1  PASS  utun24[9998] and utun25[9999] are live
+       …
+
+  3  MODE=QkdAndPqcRequired
+       3.1  PASS  both ends reported a successful write
+       3.2  PASS  identical on both ends (key …fjz6mmI4=)
+       …
+       3.5  FAIL  cycle 2/3: the PSK did not change within 30s
+       3.6  SKIP  rotation cycle 3/3: the PSK changed and both ends match
+       …
+       3.9  FAIL  QkdAndPqcRequired kept both ends on one key with no qkd key available
+
+  ──────────────────────────────────────────────────────────────────
+  85 tests: 76 passed, 8 failed, 1 skipped   (33 of them intentional)
 
   failed:
-    MODE=AtLeastQkdRequired: cycle 2/3: the PSK did not change within 30s
-    MODE=AtLeastPqcRequired [intentional]: 4304 B decrypted on a desynced tunnel
+  [3.5] MODE=QkdAndPqcRequired: cycle 2/3: the PSK did not change within 30s
+  [3.6] MODE=QkdAndPqcRequired: QkdAndPqcRequired kept both ends on one key …
 
-  [intentional] marks a check of a deliberately broken state:
+  2 of the failures is a check of a deliberately broken state:
   it failed because the break went undetected, or did not happen.
 ```
 
-**Intentional** counts the checks that ran against a deliberately broken
-state — the missing-source tests, the desync, and the pre-test's mismatched
-key. Those pass *because* something is broken, so they are worth telling apart
-from a check of a healthy tunnel, and the step that produces them is labelled
-`[intentional]` as it runs. The distinction matters most in the failure list:
+Three verdicts, and the distinction between them is the point:
 
-- a plain failure is Arnika or the tunnel misbehaving;
-- an `[intentional]` failure means the deliberate break **was not detected, or
-  did not happen** — either the mode ignored its own contract, or the checks
+- **PASS** / **FAIL** — the check ran.
+- **SKIP** — the check never ran, because something before it stopped its
+  section. A `SKIP` is not a pass: it means that test has no result this run.
+- an **`[intentional]`** failure means the deliberate break **was not detected,
+  or did not happen** — either the mode ignored its own contract, or the checks
   cannot see a broken tunnel at all. The second is the worse of the two, because
-  it puts every other pass in the run in doubt.
+  it puts every other pass in the run in doubt. A plain failure is Arnika or the
+  tunnel misbehaving.
 
-The exit status is the number of failed checks, so `./run.sh && echo ok` works.
+A **`[ !! ] HARNESS`** line is neither: it is the harness itself failing — the
+KMS not coming back up after a restart, or a check citing a test id that its
+section does not declare (printed as `[  ?.?]`). Those have no number, so they
+cannot renumber anything, and they are counted on their own line.
+
+The exit status is the number of failed checks plus any harness errors, so
+`./run.sh && echo ok` works.
 
 > **The simulator's debug output contains key material.** `[RESP] body=` lines
 > carry the QKD keys it hands out, in full. They are pseudo-random keys from a
@@ -267,26 +295,27 @@ A broken tunnel makes every Arnika check meaningless, so `run.sh` puts
 WireGuard through its own paces first, with no Arnika running, and **exits
 before starting Arnika** if any of it fails:
 
-1. both interfaces answer `wg`;
-2. the peers complete a handshake with no preshared key;
-3. payload crosses the tunnel and decrypts at the far end;
-4. with the **same** preshared key set on both ends, a fresh handshake still
-   completes and payload still crosses;
-5. with a **different** key on one end, a fresh handshake must **not**
-   complete — the negative control. Without a check that is known to fail on a
-   broken tunnel, every green tick in the Arnika run could be a false pass;
-6. the keys are cleared again so Arnika starts from a clean interface.
+- **2.1** both interfaces answer `wg`;
+- **2.2** the peers complete a handshake with no preshared key;
+- **2.3** payload crosses the tunnel and decrypts at the far end;
+- **2.4**, **2.5** with the **same** preshared key set on both ends, a fresh
+  handshake still completes and payload still crosses;
+- **2.6**, **2.7** with a **different** key on one end, a fresh handshake must
+  **not** complete and nothing may decrypt — the negative control. Without a
+  check that is known to fail on a broken tunnel, every green tick in the Arnika
+  run could be a false pass;
+- **2.8** the keys are cleared again so Arnika starts from a clean interface.
 
-Steps 2 and 4–6 each need a handshake on demand, and a preshared key is used *only*
+Tests 2.2 and 2.4–2.8 each need a handshake on demand, and a preshared key is used *only*
 in the handshake — a live session keeps working after the key changes
 underneath it. So the script removes the peer and adds it back, which throws the
 session away and forces the next packet to handshake with the current key. That
 is also why the per-mode checks assert *matching keys on both ends* rather than
-a handshake per rotation: at `INTERVAL=5s` the key rotates far faster than
+a handshake per rotation: at `INTERVAL=7s` the key rotates far faster than
 WireGuard's ~2-minute rekey, so most rotations are never exercised by a
 handshake at all.
 
-## The test matrix
+## The tests
 
 ### What each mode promises
 
@@ -313,52 +342,159 @@ in `MODES`, for the reason given under [Running it](#running-it).
 
 ### What the run asserts
 
-Five phases per mode are identical, because a healthy pair should behave the
-same whatever the mode says about absent sources:
+Every check has a **fixed number**, `<section>.<n>`, and the run prints it beside
+each verdict:
 
-| Phase | Fault injected | Asserts | Checks |
-|---|---|---|---|
-| install | none | both ends log a PSK write, and hold the same key | 2 |
-| tunnel | none | 4 KB reaches the far end and decrypts there | 1 |
-| rotation | none | 3 consecutive rotations, both ends matching each time | 3 |
-| tunnel | none | still crossing after 3 rotations | 1 |
-| desync | one end's PSK overwritten with the peers stopped | no handshake, nothing decrypts, then the pair resyncs, handshakes and carries traffic | 5 |
+```
+    [  3.5] PASS  cycle 2/3: rotated, both ends match (key …fjz6mmI4=)
+```
 
-Two more phases are where the modes diverge — each source is taken away in turn
-and the mode is held to its row in the contract table above. Both the PSK state
-**and** the line Arnika logs about its own decision are asserted, then the source
-is restored and both ends have to come back onto one key within 30s:
+The numbers come from a declared list in `run.sh` — `list_setup`, `list_pretest`
+and `list_mode` — not from the order checks happen to run in. That is what makes
+a number citable: checks *do* get skipped (a failed pre-test stops the run, a
+mode that never installs a PSK abandons the rest of its checks, a failed
+rotation cycle breaks out of the loop), and a counter would renumber everything
+below the gap. Declared, a skipped check is reported `SKIP` under its own number
+and its neighbours keep theirs.
 
-| `MODE` | QKD frozen (`FREEZE=CONSA,CONSB`) | expected in peer a's log | PQC gone (`PQC_ROUND_TIMEOUT=1ns`) | expected in peer a's log |
-|---|---|---|---|---|
-| `QkdAndPqcRequired` | ends diverge | `no QKD key received` | ends diverge | `Abort since mode is set to` |
-| `AtLeastQkdRequired` | ends diverge | `no QKD key received` | keep rotating in step | `switching to QKD key` |
-| `AtLeastPqcRequired` | keep rotating in step | `switching to PQC key` | ends diverge | `Abort since mode is set to` |
+Sections 1 and 2 run once. Sections 3 and up are **one per `MODE`**, sharing one
+list, so `3.9` and `4.9` are the same test under two different modes. The
+rotation-cycle entries are generated from `CYCLES`, so changing it moves the
+numbers below them — the one case where they shift, and `--list` shows the
+current numbering.
 
-That is 18 checks per mode, 54 across the three, on top of the pre-test and
-setup.
+`./run.sh --list` prints it:
+
+```
+1  setup
+     1.1  wg, wg-quick, wireguard-go and go are present
+     1.2  sudo is available
+     1.3  no arnika or KMS process is left running from an earlier run
+     1.4  qcicat1 is not left up from an earlier run
+     1.5  qcicat2 is not left up from an earlier run
+     1.6  arnika and the KMS simulator build
+     1.7  both WireGuard interfaces come up
+     1.8  the KMS simulator listens on 127.0.0.1:8080 with debug logging
+
+2  pre-test: WireGuard alone, no Arnika
+     2.1  both interfaces answer wg
+     2.2  the peers handshake with no preshared key
+     2.3  payload crosses the tunnel and decrypts at the far end
+     2.4  a matching preshared key on both ends still handshakes
+     2.5  payload still crosses with that key installed
+     2.6  [intentional] a mismatched preshared key must break the handshake
+     2.7  [intentional] nothing may decrypt at the far end while the keys differ
+     2.8  the tunnel comes back once the keys are cleared for Arnika
+
+3  MODE=QkdAndPqcRequired
+     3.1  both ends report a successful PSK write
+     3.2  both interfaces hold the same preshared key
+     3.3  traffic traverses the tunnel on the first installed key
+     3.4  rotation cycle 1/3: the PSK changed and both ends match
+     3.5  rotation cycle 2/3: the PSK changed and both ends match
+     3.6  rotation cycle 3/3: the PSK changed and both ends match
+     3.7  traffic still traverses the tunnel after 3 rotations
+     3.8  [intentional] the KMS restarts with both SAE frozen
+     3.9  [intentional] no QKD key: the ends diverge or keep rotating, per the mode
+    3.10  [intentional] no QKD key: peer a logs its own decision
+    3.11  QKD back: both ends return to one fresh key
+    3.12  [intentional] KMS not running: the ends diverge or keep rotating, per the mode
+    3.13  [intentional] KMS not running: peer a logs its own decision
+    3.14  [intentional] KMS not running: nothing was listening and no request reached one
+    3.15  KMS back: both ends return to one fresh key
+    3.16  [intentional] no PQC key: the ends diverge or keep rotating, per the mode
+    3.17  [intentional] no PQC key: peer a logs its own decision
+    3.18  PQC back: both ends return to one fresh key
+    3.19  [intentional] desync: the handshake must fail while the keys differ
+    3.20  [intentional] desync: nothing may decrypt at the far end
+    3.21  desync: the peers resync onto one key
+    3.22  desync: the tunnel handshakes on the resynced key
+    3.23  desync: traffic traverses the tunnel again
+
+4  MODE=AtLeastQkdRequired
+     4.1  both ends report a successful PSK write
+     4.2  both interfaces hold the same preshared key
+     4.3  traffic traverses the tunnel on the first installed key
+     4.4  rotation cycle 1/3: the PSK changed and both ends match
+     4.5  rotation cycle 2/3: the PSK changed and both ends match
+     4.6  rotation cycle 3/3: the PSK changed and both ends match
+     4.7  traffic still traverses the tunnel after 3 rotations
+     4.8  [intentional] the KMS restarts with both SAE frozen
+     4.9  [intentional] no QKD key: the ends diverge or keep rotating, per the mode
+    4.10  [intentional] no QKD key: peer a logs its own decision
+    4.11  QKD back: both ends return to one fresh key
+    4.12  [intentional] KMS not running: the ends diverge or keep rotating, per the mode
+    4.13  [intentional] KMS not running: peer a logs its own decision
+    4.14  [intentional] KMS not running: nothing was listening and no request reached one
+    4.15  KMS back: both ends return to one fresh key
+    4.16  [intentional] no PQC key: the ends diverge or keep rotating, per the mode
+    4.17  [intentional] no PQC key: peer a logs its own decision
+    4.18  PQC back: both ends return to one fresh key
+    4.19  [intentional] desync: the handshake must fail while the keys differ
+    4.20  [intentional] desync: nothing may decrypt at the far end
+    4.21  desync: the peers resync onto one key
+    4.22  desync: the tunnel handshakes on the resynced key
+    4.23  desync: traffic traverses the tunnel again
+
+5  MODE=AtLeastPqcRequired
+     5.1  both ends report a successful PSK write
+     5.2  both interfaces hold the same preshared key
+     5.3  traffic traverses the tunnel on the first installed key
+     5.4  rotation cycle 1/3: the PSK changed and both ends match
+     5.5  rotation cycle 2/3: the PSK changed and both ends match
+     5.6  rotation cycle 3/3: the PSK changed and both ends match
+     5.7  traffic still traverses the tunnel after 3 rotations
+     5.8  [intentional] the KMS restarts with both SAE frozen
+     5.9  [intentional] no QKD key: the ends diverge or keep rotating, per the mode
+    5.10  [intentional] no QKD key: peer a logs its own decision
+    5.11  QKD back: both ends return to one fresh key
+    5.12  [intentional] KMS not running: the ends diverge or keep rotating, per the mode
+    5.13  [intentional] KMS not running: peer a logs its own decision
+    5.14  [intentional] KMS not running: nothing was listening and no request reached one
+    5.15  KMS back: both ends return to one fresh key
+    5.16  [intentional] no PQC key: the ends diverge or keep rotating, per the mode
+    5.17  [intentional] no PQC key: peer a logs its own decision
+    5.18  PQC back: both ends return to one fresh key
+    5.19  [intentional] desync: the handshake must fail while the keys differ
+    5.20  [intentional] desync: nothing may decrypt at the far end
+    5.21  desync: the peers resync onto one key
+    5.22  desync: the tunnel handshakes on the resynced key
+    5.23  desync: traffic traverses the tunnel again
+```
+
+`[intentional]` marks a check that runs against a deliberately broken state — it
+passes *because* something is broken. The label lives in that list and nowhere
+else, which is where the summary's count comes from.
 
 ### Known failures in the QKD column
 
 > [!WARNING]
-> The three **QKD gone** cells above describe the contract, not current
+> The QKD-gone tests — **x.9/x.10** with the KMS frozen and **x.12/x.13** with
+> it stopped, in all three modes — describe the contract, not current
 > behaviour. They fail today, and the cause is not in this script.
 
 In a binary with a QKD reader compiled in, `setPSK` is only ever reached with a
 key from a **successful** KMS fetch: the PRIMARY has the call in the `else` of
 its `qkd.GetNewKey()` error check, and the BACKUP does `continue` when
-`GetKeyByID` fails. So with the simulator frozen neither end calls `setPSK` at
+`GetKeyByID` fails. So with no QKD key to be had neither end calls `setPSK` at
 all — it keeps the PSK it already had, `InvalidateTunnel` never runs, and
 `setPSK`'s `len(qkd) == 0` branch, the only place `no QKD key received` and
 `switching to PQC key` are logged, is unreachable.
 
-All three QKD-gone rows are affected, for that one reason:
+It makes no difference *how* QKD is gone: a timed-out fetch and a refused one
+both return an error from `GetNewKey`, and that error goes to the same
+`ticker.Reset(KMSRetryInterval)`. So the frozen and the stopped phases fail
+identically, in every mode:
 
-| Mode and phase | Symptom |
+| Tests | Symptom |
 |---|---|
-| `QkdAndPqcRequired`, QKD gone | `kept both ends on one key`, and `no QKD key received` never logged |
-| `AtLeastQkdRequired`, QKD gone | same |
-| `AtLeastPqcRequired`, QKD gone | `stopped rotating in step`, and `switching to PQC key` never logged — rotation cannot carry on when nothing calls `setPSK` |
+| **3.9/3.10** and **3.12/3.13** (`QkdAndPqcRequired`) | `kept both ends on one key`, and `no QKD key received` never logged |
+| **4.9/4.10** and **4.12/4.13** (`AtLeastQkdRequired`) | same |
+| **5.9/5.10** and **5.12/5.13** (`AtLeastPqcRequired`) | `stopped rotating in step`, and `switching to PQC key` never logged — rotation cannot carry on when nothing calls `setPSK` |
+
+**x.14** and the recoveries **x.11**/**x.15** are unaffected and pass: the
+harness really does take the KMS away, and the pair really does come back once
+it returns.
 
 Making these pass means changing the QKD rotation loop so a failed fetch still
 reaches `setPSK`, which is a decision about Arnika's behaviour rather than about
@@ -366,14 +502,43 @@ this test.
 
 ## The missing-source tests
 
-A mode is a statement about which key source may be absent. Two checks per mode
-put that statement to the test, by taking each source away in turn:
+A mode is a statement about which key source may be absent. Tests
+**x.8**–**x.18** put that statement to the test, by taking each source away in
+turn — **three faults, each followed by a recovery**:
 
-| `MODE` | QKD gone | PQC gone |
+| Tests | Fault | How |
 |---|---|---|
-| `QkdAndPqcRequired` | invalidate | invalidate |
-| `AtLeastQkdRequired` | invalidate | keep rotating |
-| `AtLeastPqcRequired` | keep rotating | invalidate |
+| **x.8**–**x.11** | the KMS is **hung** | the simulator is restarted with `FREEZE=CONSA,CONSB` |
+| **x.12**–**x.15** | the KMS is **not running** | the simulator is stopped |
+| **x.16**–**x.18** | **PQC** cannot agree a key | the pair is restarted with `PQC_ROUND_TIMEOUT=1ns` |
+
+QKD gets two of them because *unresponsive* and *absent* are different faults
+and reach Arnika through different code paths — a client timeout versus a
+refused connection — and a mode has to answer both the same way. Neither
+substitutes for the other: the frozen KMS is the one that leaves a KMS-side
+record of every request Arnika made into the failure, and the stopped KMS is the
+one that proves the mode reaches its decision without a KMS being reachable at
+all. **x.14** asserts that second property directly: nothing was listening on
+`127.0.0.1:8080` for the whole window, and the KMS log gained no lines. It is
+not the tautology it looks like — `pkill` can miss, and a stale simulator from
+an earlier run or a real KMS on this host could be holding the port, either of
+which would leave the pair quietly talking to a KMS while the check believed
+there was none.
+
+What each mode must do, with the same expectation for both QKD faults:
+
+| Section, `MODE` | QKD gone (x.9, x.12) | in peer a's log (x.10, x.13) | PQC gone (x.16) | in peer a's log (x.17) |
+|---|---|---|---|---|
+| 3 `QkdAndPqcRequired` | invalidate | `no QKD key received` | invalidate | `Abort since mode is set to` |
+| 4 `AtLeastQkdRequired` | invalidate | `no QKD key received` | keep rotating | `switching to QKD key` |
+| 5 `AtLeastPqcRequired` | keep rotating | `switching to PQC key` | invalidate | `Abort since mode is set to` |
+
+**x.11**, **x.15** and **x.18** are the recoveries: the source is restored, the
+pair restarted, and both ends have to come back onto one fresh key within 30s.
+**x.8** is the freeze itself — the simulator has to confirm from its own
+`[CONF]` line that it came back up with both SAE frozen, since a `FREEZE` value
+it does not recognise is silently ignored and would leave a healthy KMS behind a
+check expecting a broken one.
 
 *Invalidate* is Arnika's own answer to a missing required source: rather than
 leave the previous PSK in place, `setPSK` installs a **random** one
@@ -384,15 +549,19 @@ both ends stay in step, on a key derived from whichever source is left.
 
 How each source is taken away:
 
-- **QKD** — the KMS simulator is restarted with `FREEZE=CONSA,CONSB` (see
-  [`KMS.md`](../../KMS.md)), so it accepts every `enc_keys`/`dec_keys` request
-  and never answers one; it is restarted without `FREEZE` afterwards. Stopping
-  it outright would break QKD too, but a refused connection leaves no KMS log
-  of the requests made into the failure — frozen, each one is logged as
+- **QKD, hung** (x.8–x.11) — the simulator is restarted with
+  `FREEZE=CONSA,CONSB` (see [`KMS.md`](../../KMS.md)), so it accepts every
+  `enc_keys`/`dec_keys` request and never answers one; each is logged as
   `[FREEZE]`, so the KMS side of the fault is visible in the run's output. A
   frozen KMS fails only on the client's timeout, so the pair is restarted with
   `KMS_HTTP_TIMEOUT=1s KMS_BACKOFF_MAX_RETRIES=1` — roughly 2s per fetch,
   rather than the minute the 10s/5-retry defaults would take.
+- **QKD, absent** (x.12–x.15) — the simulator is **stopped**. Nothing is
+  listening, so every connection is refused outright and no request ever reaches
+  a KMS. This one fails *fast* rather than on a timeout, so the timeouts are
+  left at their defaults: refused connections cost nothing and the retry backoff
+  fits inside the interval. It is also the phase that covers Arnika starting up
+  with no KMS there at all, rather than one that stops answering mid-run.
 - **PQC** — the pair is restarted with `PQC_ROUND_TIMEOUT=1ns`. Every attempt
   then dies on its deadline waiting for the peer's answer, which has to cross
   the socket, so the **initiating** peer never agrees a key and `GetNewKey` has
@@ -420,7 +589,7 @@ which is the failure the suite exists to catch. The pre-test proves the
 apparatus works before Arnika starts; this proves it still works with Arnika
 driving, in each mode.
 
-It cannot simply overwrite a key and look: at `INTERVAL=5s` a running pair
+It cannot simply overwrite a key and look: at `INTERVAL=7s` a running pair
 resyncs faster than the check can measure. So the peers are **stopped** first:
 
 1. stop both Arnika processes — they can no longer write a PSK;
@@ -428,11 +597,13 @@ resyncs faster than the check can measure. So the peers are **stopped** first:
 3. remove and re-add qcicat1's peer, which throws away the live session and
    forces a fresh handshake — remember a running session survives a key change,
    so without this the break would not show;
-4. **require the handshake to fail**, and require nothing to decrypt at the far
-   end (`tunnel_traffic broken` — the same counter check, verdict inverted);
-5. start the pair again, and **require them to resync**: both ends back on one
+4. **x.19** require the handshake to fail, and **x.20** require nothing to
+   decrypt at the far end (`tunnel_traffic … broken` — the same counter check,
+   verdict inverted);
+5. start the pair again: **x.21** requires them to resync, both ends back on one
    identical key that is neither the random one nor stale, within 30s;
-6. require a handshake on that resynced key, and the payload to traverse again.
+6. **x.22** requires a handshake on that resynced key and **x.23** the payload
+   to traverse again.
 
 `SIGSTOP` would be the lighter touch and is **not usable here**: Arnika runs
 under `sudo`, and `sudo` answers a stopped child by suspending itself and
@@ -441,9 +612,9 @@ passing the stop to its process group — which is the script. That reads as
 the pair is both safe and a slightly better test, since it also covers a peer
 starting up against an interface whose key is wrong.
 
-Step 4 failing is the serious one — it means a dead tunnel would pass unnoticed
-in that mode. Steps 5 and 6 failing means Arnika cannot recover from a PSK
-written behind its back.
+**x.19** and **x.20** failing is the serious case — it means a dead tunnel would
+pass unnoticed in that mode. **x.21**–**x.23** failing means Arnika cannot
+recover from a PSK written behind its back.
 
 The restart leaves ACK timeouts and warnings in both Arnika logs. That is
 expected; the per-mode log summary counts them, and nothing fails on the count.

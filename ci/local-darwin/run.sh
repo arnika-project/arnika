@@ -3,9 +3,9 @@
 # Native macOS end-to-end test: two real WireGuard interfaces on loopback, the
 # bundled KMS simulator, and two Arnika instances rotating the PSK on both ends.
 #
-# Each mode is put through its rotation cycles and then three deliberate
-# failures - QKD frozen, PQC taken away, the PSK desynced behind Arnika's
-# back - each followed by a recovery. WireGuard itself is pre-tested first, and
+# Each mode is put through its rotation cycles and then four deliberate
+# failures - the KMS frozen, the KMS not running at all, PQC taken away, the PSK
+# desynced behind Arnika's back - each followed by a recovery. WireGuard itself is pre-tested first, and
 # the run stops there if that fails. README.md explains why the tunnel check
 # looks the way it does: both ends are on one host, so a bare ping to the peer
 # address proves nothing.
@@ -18,14 +18,21 @@
 #   ./run.sh --keep     leave the interfaces and logs in place afterwards
 #   ./run.sh --quiet    do not print the Arnika and KMS log lines
 #   ./run.sh --clean    only clear leftovers from earlier runs, then stop
+#   ./run.sh --list     print the numbered test list and stop
+#
+# Every check has a fixed number, <section>.<n>, and the run prints it beside
+# each verdict; the summary lists every number with its result. The numbers come
+# from the registry below, not from execution order, so a check that does not
+# run is reported SKIP under its own number and the ones after it do not shift.
 #
 # Every run starts by clearing what an earlier one left behind, so a stranded
 # process cannot write a PSK underneath the run that follows it.
 #
 # The KMS simulator runs with DEBUG=true so its requests and responses are
-# logged. Arnika's [DEBUG] lines are unconditional. QKD is taken away by
-# freezing the simulator (FREEZE, see KMS.md) rather than stopping it, so the
-# requests Arnika makes into the failure are still in the log.
+# logged. Arnika's [DEBUG] lines are unconditional. QKD is taken away twice per
+# mode: once by freezing the simulator (FREEZE, see KMS.md), which keeps the
+# requests Arnika makes into the failure in the log, and once by stopping it, so
+# that no request reaches a KMS at all.
 #
 # See README.md for prerequisites.
 
@@ -40,11 +47,13 @@ MODES="QkdAndPqcRequired AtLeastQkdRequired AtLeastPqcRequired"
 KEEP=0
 STREAM=1
 CLEAN_ONLY=0
+LIST_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --keep)  KEEP=1 ;;
         --quiet) STREAM=0 ;;
         --clean) CLEAN_ONLY=1 ;;
+        --list)  LIST_ONLY=1 ;;
         *) echo "unknown option: $arg"; exit 2 ;;
     esac
 done
@@ -65,16 +74,143 @@ else
 fi
 
 FAILURES=0
-# Every pass and fail is also appended to a tally file, tagged with the section
-# head2 last announced and with INTENT, which is all the summary needs.
+HARNESS_ERRORS=0
+
+# ----------------------------------------------------- the numbered test list
 #
-# INTENT marks a check that runs against a deliberately broken state - the
-# missing-source and desync tests, and the pre-test's mismatched key. Those
-# checks are the ones that pass *because* something is broken, so the summary
-# has to tell them apart from a check of a healthy tunnel. step clears it and
-# step_fault sets it, so a phase cannot forget to put it back.
-SECTION="setup"
-INTENT=0
+# Every check in the run is declared here, in order, and its number is its
+# position: section 1's third entry is test 1.3. Nothing else assigns a number.
+#
+# It is a declared list rather than a counter incremented as checks run because
+# checks do get skipped - a failed pre-test stops the run, a mode that never
+# installs a PSK abandons its remaining checks, a failed rotation cycle breaks
+# out of the loop. A counter would renumber everything below the gap, which is
+# exactly when a stable number is worth having. Declared, a skipped check is
+# reported SKIP under its own number and its neighbours keep theirs.
+#
+# Sections 1 and 2 run once. Sections 3 and up are one per MODE and share one
+# list, so 3.9 and 4.9 are the same test under two different modes.
+#
+# Each line is id|description. The id is what a check cites; the description is
+# what the summary prints for a check that never ran. A description opening with
+# [intentional] marks a check of a deliberately broken state - it passes
+# *because* something is broken - and is what the summary counts under that
+# heading, so the label lives in one place instead of being set as checks run.
+#
+# ./run.sh --list prints the whole list.
+
+list_setup() {
+    cat <<'EOF'
+tools|wg, wg-quick, wireguard-go and go are present
+sudo|sudo is available
+leftover-procs|no arnika or KMS process is left running from an earlier run
+leftover-qcicat1|qcicat1 is not left up from an earlier run
+leftover-qcicat2|qcicat2 is not left up from an earlier run
+build|arnika and the KMS simulator build
+ifaces|both WireGuard interfaces come up
+kms|the KMS simulator listens on 127.0.0.1:8080 with debug logging
+EOF
+}
+
+list_pretest() {
+    cat <<'EOF'
+wg-answers|both interfaces answer wg
+hs-nopsk|the peers handshake with no preshared key
+payload-nopsk|payload crosses the tunnel and decrypts at the far end
+hs-samekey|a matching preshared key on both ends still handshakes
+payload-samekey|payload still crosses with that key installed
+hs-mismatch|[intentional] a mismatched preshared key must break the handshake
+nodecrypt-mismatch|[intentional] nothing may decrypt at the far end while the keys differ
+hs-cleared|the tunnel comes back once the keys are cleared for Arnika
+EOF
+}
+
+# One MODE's checks. The rotation cycles are generated, so CYCLES stays the one
+# place the count is set and the numbers below it move with it.
+list_mode() {
+    local c
+    cat <<'EOF'
+psk-written|both ends report a successful PSK write
+psk-identical|both interfaces hold the same preshared key
+tunnel-initial|traffic traverses the tunnel on the first installed key
+EOF
+    for c in $(seq 1 "$CYCLES"); do
+        printf 'rotate-%s|rotation cycle %s/%s: the PSK changed and both ends match\n' \
+            "$c" "$c" "$CYCLES"
+    done
+    cat <<EOF
+tunnel-rotated|traffic still traverses the tunnel after $CYCLES rotations
+qkd-freeze|[intentional] the KMS restarts with both SAE frozen
+qkd-state|[intentional] no QKD key: the ends diverge or keep rotating, per the mode
+qkd-logline|[intentional] no QKD key: peer a logs its own decision
+qkd-recovery|QKD back: both ends return to one fresh key
+kmsdown-state|[intentional] KMS not running: the ends diverge or keep rotating, per the mode
+kmsdown-logline|[intentional] KMS not running: peer a logs its own decision
+kmsdown-noreq|[intentional] KMS not running: nothing was listening and no request reached one
+kmsdown-recovery|KMS back: both ends return to one fresh key
+pqc-state|[intentional] no PQC key: the ends diverge or keep rotating, per the mode
+pqc-logline|[intentional] no PQC key: peer a logs its own decision
+pqc-recovery|PQC back: both ends return to one fresh key
+desync-no-hs|[intentional] desync: the handshake must fail while the keys differ
+desync-nodecrypt|[intentional] desync: nothing may decrypt at the far end
+desync-resync|desync: the peers resync onto one key
+desync-hs|desync: the tunnel handshakes on the resynced key
+desync-tunnel|desync: traffic traverses the tunnel again
+EOF
+}
+
+# SEC_LIST and SEC_TITLE are indexed by section number - plain arrays, since
+# macOS ships bash 3.2 and has no associative ones.
+SEC=1
+SEC_MAX=2
+SEC_TITLE[1]="setup"
+SEC_TITLE[2]="pre-test: WireGuard alone, no Arnika"
+SEC_LIST[1]="$(list_setup)"
+SEC_LIST[2]="$(list_pretest)"
+for mode in $MODES; do
+    SEC_MAX=$((SEC_MAX + 1))
+    SEC_TITLE[$SEC_MAX]="MODE=$mode"
+    SEC_LIST[$SEC_MAX]="$(list_mode)"
+done
+# Which section a mode's checks belong to, so run_mode can select it by name.
+sec_of_mode() {
+    local i
+    for i in $(seq 3 "$SEC_MAX"); do
+        [ "${SEC_TITLE[$i]}" = "MODE=$1" ] && { printf '%s' "$i"; return 0; }
+    done
+    printf '3'
+}
+
+print_list() {
+    local sec num id desc
+    for sec in $(seq 1 "$SEC_MAX"); do
+        printf '\n%s%s  %s%s\n' "$C_BOLD" "$sec" "${SEC_TITLE[$sec]}" "$C_RESET"
+        num=0
+        while IFS='|' read -r id desc; do
+            [ -n "$id" ] || continue
+            num=$((num + 1))
+            printf '  %6s  %s\n' "$sec.$num" "$desc"
+        done <<< "${SEC_LIST[$sec]}"
+    done
+    printf '\n'
+}
+
+# test_number maps a cited id to its number within the current section. An id
+# the current section does not declare - a typo, or a check citing an id from
+# another section - is a bug in the script rather than a test result, so it is
+# loud: ?.? in the output, and check counts it as a harness error. The counting
+# has to happen in check: this runs in $(...) and a subshell cannot increment
+# its caller's variable.
+test_number() {
+    local n
+    n="$(printf '%s\n' "${SEC_LIST[$SEC]}" | grep -n "^$1|" | head -1 | cut -d: -f1)"
+    if [ -z "$n" ]; then
+        printf '?.?'
+        return 0
+    fi
+    printf '%s.%s' "$SEC" "$n"
+}
+
 # LAST_WAS_LOG remembers whether the last thing on the console came from a peer
 # log or from the run itself. gap puts a blank line between the two whenever it
 # changes, so a block of log lines can never be read as part of a result.
@@ -83,14 +219,37 @@ gap() {
     if [ "$LAST_WAS_LOG" = "1" ]; then printf '\n'; fi
     LAST_WAS_LOG=0
 }
-tally() { printf '%s\t%s\t%s\t%s\n' "$SECTION" "$1" "$INTENT" "$2" >> "$WORK/tally"; }
-# step and head2 open with a blank line of their own, so they only have to clear
-# the marker; everything else asks gap for the break.
-step()       { INTENT=0; LAST_WAS_LOG=0; printf '\n%s==> %s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
-step_fault() { INTENT=1; LAST_WAS_LOG=0; printf '\n%s==> %s%s%s\n' "$C_BOLD" "$*" " [intentional]" "$C_RESET"; }
-head2() { SECTION="$*"; INTENT=0; LAST_WAS_LOG=0; printf '\n%s─── %s %s%s\n' "$C_BOLD" "$*" "──────────────────────────" "$C_RESET"; }
-pass()  { logs; gap; printf '%s    PASS  %s%s\n' "$C_BOLD" "$*" "$C_RESET"; tally PASS "$*"; }
-fail()  { logs; gap; printf '%s    FAIL  %s%s\n' "$C_BOLD" "$*" "$C_RESET"; tally FAIL "$*"; FAILURES=$((FAILURES + 1)); }
+# step and section open with a blank line of their own; everything else asks gap
+# for the break.
+step()       { LAST_WAS_LOG=0; printf '\n%s==> %s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
+step_fault() { LAST_WAS_LOG=0; printf '\n%s==> %s%s%s\n' "$C_BOLD" "$*" " [intentional]" "$C_RESET"; }
+banner() { LAST_WAS_LOG=0; printf '\n%s─── %s %s%s\n' "$C_BOLD" "$*" "──────────────────────────" "$C_RESET"; }
+# section opens a numbered section and makes it the one check ids resolve in.
+section() { SEC="$1"; banner "$1  ${SEC_TITLE[$1]}"; }
+
+# check records one numbered result. $1 is the id from the list above, $2 the
+# verdict, $3 what was actually observed.
+check() {
+    local num
+    num="$(test_number "$1")"
+    if [ "$num" = "?.?" ]; then HARNESS_ERRORS=$((HARNESS_ERRORS + 1)); fi
+    logs; gap
+    printf '%s    [%5s] %-4s %s%s\n' "$C_BOLD" "$num" "$2" "$3" "$C_RESET"
+    printf '%s\t%s\t%s\t%s\n' "$num" "$2" "$1" "$3" >> "$WORK/tally"
+    if [ "$2" = "FAIL" ]; then FAILURES=$((FAILURES + 1)); fi
+    return 0
+}
+pass() { check "$1" PASS "$2"; }
+fail() { check "$1" FAIL "$2"; }
+# abort is for the harness itself failing - the KMS not coming back up, say.
+# It is not a test and has no number, so it is counted separately and never
+# renumbers anything.
+abort() {
+    logs; gap
+    printf '%s    [ !! ] HARNESS  %s%s\n' "$C_BOLD" "$*" "$C_RESET"
+    HARNESS_ERRORS=$((HARNESS_ERRORS + 1))
+    return 0
+}
 info()  { gap; printf '          %s\n' "$*"; }
 # out indents a command's own output so it stays readable inside a step. No gap
 # here: out runs in a pipeline, so its own LAST_WAS_LOG=0 would be lost with the
@@ -102,36 +261,57 @@ sep()   { gap; printf '%s  ─── %s ─────────────�
 # rule closes off the run, so the verdict is not lost in the scrollback.
 rule()  { gap; printf '%s%s%s\n' "$C_BOLD" "══════════════════════════════════════════════════════════════════════" "$C_RESET"; }
 
-# summary tallies every pass and fail by section. Printed at the end of a run,
-# and by the pre-test gate when it stops the run early.
+# summary walks the whole numbered list and prints every test with its result:
+# the message actually observed for one that ran, its declared description for
+# one that did not. Printed at the end of a run, and by the pre-test gate when
+# it stops the run early - which is when the SKIP lines say the most.
 summary() {
-    [ -s "$WORK/tally" ] || return 0
-    head2 "summary"
-    awk -F'\t' '
-        function row(name, np, nf, ni) {
-            printf "  %-40s %3d passed  %3d failed%s\n", name, np, nf,
-                ni ? sprintf("  %3d intentional", ni) : ""
-        }
-        !seen[$1]++ { order[++o] = $1 }
-        { total[$2]++ }
-        $3 == 1 { x[$1]++; total["INTENT"]++ }
-        $2 == "PASS" { p[$1]++ }
-        $2 == "FAIL" {
-            f[$1]++
-            failed[++n] = sprintf("%s%s: %s", $1, $3 == 1 ? " [intentional]" : "", $4)
-        }
-        END {
-            for (i = 1; i <= o; i++) row(order[i], p[order[i]] + 0, f[order[i]] + 0, x[order[i]] + 0)
-            printf "  %s\n", "──────────────────────────────────────────────────────────────"
-            row("total", total["PASS"] + 0, total["FAIL"] + 0, total["INTENT"] + 0)
-            if (n) {
-                printf "\n  failed:\n"
-                for (i = 1; i <= n; i++) printf "    %s\n", failed[i]
-                printf "\n  [intentional] marks a check of a deliberately broken state:\n"
-                printf "  it failed because the break went undetected, or did not happen.\n"
-            }
-        }
-    ' "$WORK/tally"
+    local sec num id desc rec verdict msg
+    local total=0 np=0 nf=0 ns=0 ni=0 nif=0
+    local failed="" skipped=0
+    banner "summary"
+    for sec in $(seq 1 "$SEC_MAX"); do
+        printf '\n  %s%s  %s%s\n' "$C_BOLD" "$sec" "${SEC_TITLE[$sec]}" "$C_RESET"
+        num=0
+        while IFS='|' read -r id desc; do
+            [ -n "$id" ] || continue
+            num=$((num + 1))
+            total=$((total + 1))
+            # $1 "" == n "" forces a string comparison. Bare $1 == n makes awk
+            # compare two numeric-looking fields as numbers, and 3.10 == 3.1 is
+            # then true - test 3.10 reported test 3.1's result.
+            rec="$(awk -F'\t' -v n="$sec.$num" '$1 "" == n "" {print; exit}' "$WORK/tally")"
+            if [ -n "$rec" ]; then
+                verdict="$(printf '%s' "$rec" | cut -f2)"
+                msg="$(printf '%s' "$rec" | cut -f4)"
+            else
+                verdict="SKIP"
+                msg="$desc"
+            fi
+            case "$desc" in "[intentional]"*) ni=$((ni + 1)) ;; esac
+            case "$verdict" in
+                PASS) np=$((np + 1)) ;;
+                FAIL)
+                    nf=$((nf + 1))
+                    case "$desc" in "[intentional]"*) nif=$((nif + 1)) ;; esac
+                    failed="$failed  [$sec.$num] ${SEC_TITLE[$sec]}: $msg"$'\n' ;;
+                *)    ns=$((ns + 1)) ;;
+            esac
+            printf '    %s%6s%s  %-4s  %s\n' "$C_DIM" "$sec.$num" "$C_RESET" "$verdict" "$msg"
+        done <<< "${SEC_LIST[$sec]}"
+    done
+    printf '\n  %s\n' "──────────────────────────────────────────────────────────────────"
+    printf '  %d tests: %d passed, %d failed, %d skipped   (%d of them intentional)\n' \
+        "$total" "$np" "$nf" "$ns" "$ni"
+    [ "$HARNESS_ERRORS" = "0" ] || printf '  %d harness error(s) - see [ !! ] in the run output\n' "$HARNESS_ERRORS"
+    if [ -n "$failed" ]; then
+        printf '\n  failed:\n'
+        printf '%s' "$failed"
+    fi
+    if [ "$nif" != "0" ]; then
+        printf '\n  %d of the failures is a check of a deliberately broken state:\n' "$nif"
+        printf '  it failed because the break went undetected, or did not happen.\n'
+    fi
 }
 
 # The peers and the simulator do not write to the console: three processes
@@ -246,16 +426,16 @@ clean_leftovers() {
         sudo pkill -f "$PAT_STALE" 2> /dev/null || true
         sleep 1
         sudo pkill -KILL -f "$PAT_STALE" 2> /dev/null || true
-        pass "killed the processes above"
+        pass leftover-procs "killed the processes above"
     else
-        pass "no arnika or KMS process left running"
+        pass leftover-procs "no arnika or KMS process left running"
     fi
 
     for name in qcicat1 qcicat2; do
         if sudo wg-quick down "$HERE/$name.conf" > /dev/null 2>&1; then
-            pass "$name was still up - taken down"
+            pass "leftover-$name" "$name was still up - taken down"
         else
-            pass "$name was not up"
+            pass "leftover-$name" "$name was not up"
         fi
     done
 
@@ -275,11 +455,18 @@ teardown() {
 trap teardown EXIT
 
 # ---------------------------------------------------------------- preflight
+: > "$WORK/tally"
+if [ "$LIST_ONLY" = "1" ]; then
+    print_list
+    exit 0
+fi
+
+section 1
 step "prerequisites"
 for tool in wg wg-quick wireguard-go go; do
     command -v "$tool" > /dev/null || { echo "missing: $tool - see README.md"; exit 1; }
 done
-pass "wg, wg-quick, wireguard-go and go are present"
+pass tools "wg, wg-quick, wireguard-go and go are present"
 # Prime sudo here, once, so it cannot fail halfway through the run. This is not
 # gated on a terminal: with pam_tid (Touch ID for sudo, /etc/pam.d/sudo_local)
 # the prompt is biometric and needs no tty, which is what makes this work when
@@ -296,18 +483,17 @@ if ! sudo -n true 2> /dev/null; then
         exit 1
     fi
 fi
-pass "sudo is available"
+pass sudo "sudo is available"
 
 clean_leftovers
 if [ "$CLEAN_ONLY" = "1" ]; then
-    summary
-    exit "$FAILURES"
+    exit $((FAILURES + HARNESS_ERRORS))
 fi
 
 step "building arnika and the KMS simulator"
 ( cd "$REPO" && GOEXPERIMENT=runtimesecret CGO_ENABLED=0 go build -o "$WORK/arnika" . )
 ( cd "$REPO" && CGO_ENABLED=0 go build -o "$WORK/kms" ./tools )
-pass "built into $WORK"
+pass build "built into $WORK"
 
 step "bringing up the two WireGuard interfaces"
 sudo wg-quick up "$HERE/qcicat1.conf"
@@ -316,7 +502,7 @@ DEV1="$(iface qcicat1)"
 DEV2="$(iface qcicat2)"
 info "qcicat1 -> $DEV1"
 info "qcicat2 -> $DEV2"
-pass "both interfaces are up"
+pass ifaces "both interfaces are up"
 
 # Peer public keys, taken from the templates so the two never drift apart.
 PUB1="$(awk -F' = ' '/^PublicKey/ {print $2}' "$HERE/qcicat1.conf")"
@@ -418,10 +604,11 @@ reset_session() {
 # Nothing owns PROBE, so there is no reply and nothing to print; the ping is
 # only a way to put bytes into the interface.
 #
-# With "broken" as its argument it asserts the opposite - nothing may decrypt -
-# which is how each mode proves its checks can actually fail.
+# $1 is the number this check reports under. With "broken" as $2 it asserts the
+# opposite - nothing may decrypt - which is how each mode proves its checks can
+# actually fail.
 tunnel_traffic() {
-    local expect="${1:-intact}" t1 r2 t1b r2b sent got
+    local id="$1" expect="${2:-intact}" t1 r2 t1b r2b sent got
 
     # Only $DEV1 tx and $DEV2 rx say anything here: the replies never come back
     # through the tunnel, so the other two counters are not read.
@@ -435,19 +622,19 @@ tunnel_traffic() {
 
     if [ "$expect" = "broken" ]; then
         if [ "$got" -gt 2000 ]; then
-            fail "$got B decrypted on a desynced tunnel - a break is invisible here"
+            fail "$id" "$got B decrypted on a desynced tunnel - a break is invisible here"
         else
-            pass "nothing decrypted at the far end ($(tag "$DEV2") rx +$got B), as a break should look"
+            pass "$id" "nothing decrypted at the far end ($(tag "$DEV2") rx +$got B), as a break should look"
         fi
         return 0
     fi
 
     if [ "$sent" -gt 2000 ] && [ "$got" -gt 2000 ]; then
-        pass "traffic traversed the tunnel: $(tag "$DEV1") tx +$sent B, $(tag "$DEV2") rx +$got B"
+        pass "$id" "traffic traversed the tunnel: $(tag "$DEV1") tx +$sent B, $(tag "$DEV2") rx +$got B"
         return 0
     fi
 
-    fail "the payload did not traverse the tunnel: $(tag "$DEV1") tx +$sent B, $(tag "$DEV2") rx +$got B"
+    fail "$id" "the payload did not traverse the tunnel: $(tag "$DEV1") tx +$sent B, $(tag "$DEV2") rx +$got B"
     if [ "$sent" -le 2000 ]; then
         info "$(tag "$DEV1") encrypted nothing, so the packets never reached it."
         info "$PROBE has to be in qcicat1.conf AllowedIPs and routed there, and"
@@ -464,13 +651,13 @@ tunnel_traffic() {
 # on a broken tunnel, every green tick below could be a false pass.
 pretest() {
     local k_a
-    head2 "pre-test: WireGuard alone, no Arnika"
+    section 2
 
     step "both interfaces answer wg"
     if sudo wg show "$DEV1" > /dev/null 2>&1 && sudo wg show "$DEV2" > /dev/null 2>&1; then
-        pass "$(tag "$DEV1") and $(tag "$DEV2") are live"
+        pass wg-answers "$(tag "$DEV1") and $(tag "$DEV2") are live"
     else
-        fail "one of the two interfaces does not answer wg"
+        fail wg-answers "one of the two interfaces does not answer wg"
         return 1
     fi
 
@@ -479,15 +666,15 @@ pretest() {
     set_psk "$DEV2" "$ZERO_PSK"
     reset_session "$ZERO_PSK"
     if wait_hs 20; then
-        pass "handshake completed"
+        pass hs-nopsk "handshake completed"
     else
-        fail "no handshake in 20s - WireGuard itself is not working"
+        fail hs-nopsk "no handshake in 20s - WireGuard itself is not working"
         wg_dump
         return 1
     fi
 
     step "payload crosses the tunnel"
-    tunnel_traffic || { wg_dump; return 1; }
+    tunnel_traffic payload-nopsk || { wg_dump; return 1; }
 
     step "a matching preshared key keeps the tunnel up"
     k_a="$(openssl rand -base64 32)"
@@ -495,37 +682,37 @@ pretest() {
     set_psk "$DEV2" "$k_a"
     reset_session "$k_a"
     if wait_hs 20; then
-        pass "handshake completed with a shared key ($(keytail "$k_a"))"
+        pass hs-samekey "handshake completed with a shared key ($(keytail "$k_a"))"
     else
-        fail "a matching preshared key did not handshake"
+        fail hs-samekey "a matching preshared key did not handshake"
         wg_dump
         return 1
     fi
-    tunnel_traffic || { wg_dump; return 1; }
+    tunnel_traffic payload-samekey || { wg_dump; return 1; }
 
     step_fault "a mismatched preshared key must break the tunnel"
     set_psk "$DEV2" "$(openssl rand -base64 32)"
     reset_session "$k_a"
     if wait_hs 15; then
-        fail "the ends handshaked while holding different keys - these checks"
+        fail hs-mismatch "the ends handshaked while holding different keys - these checks"
         info "cannot tell a working tunnel from a broken one, so the Arnika"
         info "results below would be worthless"
         wg_dump
         return 1
     fi
-    pass "no handshake with different keys - a broken tunnel does get caught"
+    pass hs-mismatch "no handshake with different keys - a broken tunnel does get caught"
     # And the traffic check has to say so too: it is the measurement every
     # check below leans on, so it is the one that must be known to fail.
-    tunnel_traffic broken
+    tunnel_traffic nodecrypt-mismatch broken
 
     step "back to no preshared key, for Arnika to install its own"
     set_psk "$DEV1" "$ZERO_PSK"
     set_psk "$DEV2" "$ZERO_PSK"
     reset_session "$ZERO_PSK"
     if wait_hs 20; then
-        pass "the tunnel is up again and Arnika can take over"
+        pass hs-cleared "the tunnel is up again and Arnika can take over"
     else
-        fail "the tunnel did not come back after the pre-test"
+        fail hs-cleared "the tunnel did not come back after the pre-test"
         wg_dump
         return 1
     fi
@@ -537,11 +724,23 @@ pretest() {
 # landing on different keys is the signal. A missing *optional* source must
 # instead leave rotation running, both ends in step on the other source.
 #
-# QKD is taken away by restarting the simulator with both SAE frozen: it accepts
-# and logs every request as usual and never answers one, which is what a hung
-# KMS or an exhausted key pool looks like from Arnika's side. Stopping the
-# simulator outright would do too, but a refused connection leaves no KMS log of
-# the requests made into the failure - the frozen run logs each one as [FREEZE].
+# $4 says how QKD is taken away, and the two ways are different faults:
+#
+#   freeze - the simulator is restarted with both SAE frozen. It accepts and logs
+#            every request as usual and never answers one, so a fetch fails on
+#            the client's own timeout. That is a hung KMS, or one whose key pool
+#            is exhausted and never resolves, and the requests Arnika made into
+#            the failure are all in the KMS log as [FREEZE].
+#   down   - the simulator is stopped. Nothing is listening, so every connection
+#            is refused outright and no request ever reaches a KMS - the KMS is
+#            not merely unresponsive, it is absent. It fails fast rather than on
+#            a timeout, which is a different code path in kmsRequest, so the
+#            defaults are left alone here: refused connections cost nothing and
+#            the retry backoff fits inside the interval.
+#
+# Both must produce the same answer from the mode, and neither is a substitute
+# for the other: freeze is the one that leaves a KMS-side record, down is the one
+# that proves the mode does not need a KMS to be *reachable* to make a decision.
 #
 # PQC is taken away with
 # PQC_ROUND_TIMEOUT=1ns: every attempt then dies on its deadline waiting for the
@@ -559,24 +758,37 @@ pretest() {
 # Both halves are checked - the PSKs, and the line arnika logs about its own
 # decision - because the PSK state alone cannot say the mode reasoned correctly.
 source_check() {
-    local mode="$1" source="$2" required="$3"
+    local mode="$1" source="$2" required="$3" how="${4:-}"
     local mark extra="" pattern p1 p2 before
+    local idp="$source" what="no $source key" kms_mark=0
+
+    # The KMS-down phase reports under its own ids, so its numbers are separate
+    # from the frozen phase's rather than the two overwriting each other.
+    if [ "$how" = "down" ]; then
+        idp="kmsdown"
+        what="KMS not running at all"
+    fi
 
     if [ "$required" = "yes" ]; then
-        step_fault "no $source key: $mode requires it, so the tunnel must be invalidated"
+        step_fault "$what: $mode requires $source, so the tunnel must be invalidated"
     else
-        step_fault "no $source key: $mode has it optional, so rotation must carry on"
+        step_fault "$what: $mode has $source optional, so rotation must carry on"
     fi
 
     before="$(psk_of "$DEV1")"
     stop_peers
     mark="$(wc -l < "$LOG_A")"
-    if [ "$source" = "qkd" ]; then
+    if [ "$how" = "down" ]; then
+        kms_mark="$(wc -l < "$LOG_KMS" | tr -d ' ')"
+        stop_kms
+        info "KMS stopped - nothing is listening on 127.0.0.1:8080"
+    elif [ "$source" = "qkd" ]; then
         freeze_kms CONSA,CONSB
         # A frozen KMS never answers, so a fetch fails only once the HTTP client
         # gives up: at the 10s default with 5 retries that is over a minute per
         # fetch, far past the windows below. The pair is restarted with a short
-        # timeout and one retry instead, ~2s per fetch.
+        # timeout and one retry instead, ~2s per fetch. The down phase needs no
+        # such override - a refused connection returns at once.
         extra="KMS_HTTP_TIMEOUT=1s KMS_BACKOFF_MAX_RETRIES=1"
     else
         extra="PQC_ROUND_TIMEOUT=1ns"
@@ -593,15 +805,15 @@ source_check() {
 
     if [ "$required" = "yes" ]; then
         if wait_for 25 psks_differ; then
-            pass "the ends were invalidated onto different keys after ${WAITED}s"
+            pass "$idp-state" "the ends were invalidated onto different keys after ${WAITED}s"
         else
-            fail "$mode kept both ends on one key with no $source key available"
+            fail "$idp-state" "$mode kept both ends on one key with $what"
         fi
     else
         if wait_for 25 psks_agree_new "$before"; then
-            pass "rotation carried on without $source, both ends in step after ${WAITED}s"
+            pass "$idp-state" "rotation carried on with $what, both ends in step after ${WAITED}s"
         else
-            fail "$mode stopped rotating in step although $source is optional to it"
+            fail "$idp-state" "$mode stopped rotating in step although $source is optional to it"
         fi
     fi
 
@@ -609,22 +821,41 @@ source_check() {
     # the PSK, but the line reaches the file through a pipe and tee, so the PSK
     # can be visible here a moment before the line that explains it.
     if wait_for 10 log_has "$LOG_A" "$mark" "$pattern"; then
-        pass "peer a[$ID1] logged the decision: \"$pattern\""
+        pass "$idp-logline" "peer a[$ID1] logged the decision: \"$pattern\""
     else
-        fail "peer a[$ID1] never logged \"$pattern\""
+        fail "$idp-logline" "peer a[$ID1] never logged \"$pattern\""
         tail -n 6 "$LOG_A" | out
+    fi
+
+    # Checked at the end of the window rather than the start, so it covers the
+    # whole phase. Two ways this is not the tautology it looks like: pkill can
+    # miss, and something else - a stale simulator from another run, a real KMS
+    # on this host - can be holding 8080. Either would leave the pair talking to
+    # a KMS while the check believes there is none, and a pass here would then
+    # mean nothing. A stopped process cannot write, so any growth in its log is
+    # somebody else's.
+    if [ "$how" = "down" ]; then
+        local kms_now
+        kms_now="$(wc -l < "$LOG_KMS" | tr -d ' ')"
+        if kms_up; then
+            fail kmsdown-noreq "something is still listening on 127.0.0.1:8080"
+        elif [ "$kms_now" != "$kms_mark" ]; then
+            fail kmsdown-noreq "the KMS log gained $((kms_now - kms_mark)) line(s) with the simulator stopped"
+        else
+            pass kmsdown-noreq "nothing listening on 127.0.0.1:8080, and the KMS log gained no lines"
+        fi
     fi
 
     step "$source back: the pair has to recover"
     stop_peers
     if [ "$source" = "qkd" ]; then
-        unfreeze_kms
+        kms_back
     fi
     start_pair "$mode"
     if wait_for 30 psks_agree_new "$before"; then
-        pass "both ends back in step after ${WAITED}s (key $(keytail "$p1"))"
+        pass "$idp-recovery" "both ends back in step after ${WAITED}s (key $(keytail "$p1"))"
     else
-        fail "the pair did not recover once $source was available again"
+        fail "$idp-recovery" "the pair did not recover once $source was available again"
         wg_dump
     fi
 }
@@ -651,31 +882,31 @@ desync_check() {
     reset_session "$psk_before"
     info "peers stopped; $(tag "$DEV1") keeps $(keytail "$psk_before"), $(tag "$DEV2") now holds $(keytail "$bad")"
     if wait_hs 12; then
-        fail "the two ends handshaked while holding different keys"
+        fail desync-no-hs "the two ends handshaked while holding different keys"
     else
-        pass "no handshake while the keys differ - the break is real"
+        pass desync-no-hs "no handshake while the keys differ - the break is real"
     fi
-    tunnel_traffic broken
+    tunnel_traffic desync-nodecrypt broken
 
     step "recovery: the peers have to resync it when they come back"
     start_pair "$mode"
     if ! wait_for 30 psks_agree_new "$bad"; then
-        fail "still out of sync after 30s - $(tag "$DEV1") $(keytail "$p1"), $(tag "$DEV2") $(keytail "$p2")"
+        fail desync-resync "still out of sync after 30s - $(tag "$DEV1") $(keytail "$p1"), $(tag "$DEV2") $(keytail "$p2")"
         wg_dump
         return 0
     fi
-    pass "both ends back on one key after ${WAITED}s (key $(keytail "$p1"))"
+    pass desync-resync "both ends back on one key after ${WAITED}s (key $(keytail "$p1"))"
     if wait_hs 25; then
-        pass "the tunnel handshaked again on the resynced key"
+        pass desync-hs "the tunnel handshaked again on the resynced key"
     else
-        fail "the keys match again but there was no handshake in 25s"
+        fail desync-hs "the keys match again but there was no handshake in 25s"
         wg_dump
     fi
-    tunnel_traffic || true
+    tunnel_traffic desync-tunnel || true
 }
 
-# start_kms, freeze_kms and unfreeze_kms exist so source_check can take QKD away
-# and give it back. The log is appended across restarts, like the peers' own.
+# start_kms, freeze_kms, stop_kms and kms_back exist so source_check can take
+# QKD away - by freezing the simulator or by stopping it - and give it back. The log is appended across restarts, like the peers' own.
 #
 # $1, when given, is passed as FREEZE: those SAE then accept and log requests and
 # never answer them. FREEZE is read once at startup, so switching it is a
@@ -683,7 +914,7 @@ desync_check() {
 start_kms() {
     LOG_KMS="$WORK/kms.log"
     ( LISTEN=127.0.0.1:8080 DEBUG=true FREEZE="${1:-}" "$WORK/kms" >> "$LOG_KMS" 2>&1 ) &
-    wait_for 10 kms_up || fail "the KMS is not listening on 127.0.0.1:8080"
+    wait_for 10 kms_up || abort "the KMS is not listening on 127.0.0.1:8080"
 }
 
 # freeze_kms restarts the simulator with $1 frozen, and confirms it from the
@@ -697,13 +928,15 @@ freeze_kms() {
     stop_kms
     start_kms "$1"
     if log_has "$LOG_KMS" "$mark" "frozen SAE=$1"; then
-        info "KMS restarted with $1 frozen - requests accepted, never answered"
+        pass qkd-freeze "KMS restarted with $1 frozen - requests accepted, never answered"
     else
-        fail "the KMS did not report $1 as frozen"
+        fail qkd-freeze "the KMS did not report $1 as frozen"
     fi
 }
 
-unfreeze_kms() {
+# kms_back puts a healthy simulator back, whichever way the phase took it away:
+# stopping one that is already stopped is a no-op, so this covers both.
+kms_back() {
     stop_kms
     start_kms
 }
@@ -745,17 +978,17 @@ start_pair() {
 run_mode() {
     local mode="$1"
 
-    head2 "MODE=$mode"
+    section "$(sec_of_mode "$mode")"
     start_pair "$mode"
 
     step "waiting for both ends to install a PSK"
     if ! wait_for 40 both_wrote; then
-        fail "at least one end never wrote a PSK in MODE=$mode"
+        fail psk-written "at least one end never wrote a PSK in MODE=$mode"
         tail -n 15 "$LOG_A" "$LOG_B" | out
         stop_peers
         return
     fi
-    pass "both ends reported a successful write"
+    pass psk-written "both ends reported a successful write"
 
     step "both interfaces hold the same PSK"
     local psk1 psk2
@@ -765,35 +998,35 @@ run_mode() {
         # Stop here. Everything below compares against this key, and the first
         # rotation cycle would count any key at all as a change from nothing -
         # reporting a rotation that never happened.
-        fail "$(tag "$DEV1") has no preshared key, so nothing below can be judged"
+        fail psk-identical "$(tag "$DEV1") has no preshared key, so nothing below can be judged"
         wg_dump
         stop_peers
         return
     fi
     if [ "$psk1" = "$psk2" ]; then
-        pass "identical on both ends (key $(keytail "$psk1"))"
+        pass psk-identical "identical on both ends (key $(keytail "$psk1"))"
     else
         # A divergence is still a usable baseline: both ends hold a real key, so
         # the cycles below report the divergence per cycle rather than guessing.
-        fail "the two ends installed different keys - $(tag "$DEV1") $(keytail "$psk1"), $(tag "$DEV2") $(keytail "$psk2")"
+        fail psk-identical "the two ends installed different keys - $(tag "$DEV1") $(keytail "$psk1"), $(tag "$DEV2") $(keytail "$psk2")"
     fi
     wg_dump
-    tunnel_traffic || true
+    tunnel_traffic tunnel-initial || true
 
     step "$CYCLES rotation cycles"
     local prev="$psk1" cur other cycle p1
     for cycle in $(seq 1 "$CYCLES"); do
         sep "cycle $cycle/$CYCLES"
         if ! wait_for 30 psk_changed "$DEV1" "$prev"; then
-            fail "cycle $cycle/$CYCLES: the PSK did not change within 30s"
+            fail "rotate-$cycle" "cycle $cycle/$CYCLES: the PSK did not change within 30s"
             break
         fi
         cur="$p1"
         other="$(psk_of "$DEV2")"
         if [ "$cur" = "$other" ]; then
-            pass "cycle $cycle/$CYCLES: rotated, both ends match (key $(keytail "$cur"))"
+            pass "rotate-$cycle" "cycle $cycle/$CYCLES: rotated, both ends match (key $(keytail "$cur"))"
         else
-            fail "cycle $cycle/$CYCLES: the ends diverged - $(tag "$DEV1") $(keytail "$cur"), $(tag "$DEV2") $(keytail "$other")"
+            fail "rotate-$cycle" "cycle $cycle/$CYCLES: the ends diverged - $(tag "$DEV1") $(keytail "$cur"), $(tag "$DEV2") $(keytail "$other")"
         fi
         wg_dump
         prev="$cur"
@@ -801,7 +1034,7 @@ run_mode() {
     sep "end of cycles"
 
     step "the tunnel after $CYCLES rotations"
-    tunnel_traffic || true
+    tunnel_traffic tunnel-rotated || true
 
     # Which source this mode may do without - the contract under test. Mirrors
     # IsQKDRequired and IsPQCRequired in config/config.go, so a mode that is in
@@ -809,7 +1042,10 @@ run_mode() {
     local qkd_req=no pqc_req=no
     case "$mode" in QkdAndPqcRequired | AtLeastQkdRequired) qkd_req=yes ;; esac
     case "$mode" in QkdAndPqcRequired | AtLeastPqcRequired) pqc_req=yes ;; esac
-    source_check "$mode" qkd "$qkd_req"
+    # Two ways for QKD to be gone, and a mode has to answer both the same: the
+    # simulator hung, and the simulator absent.
+    source_check "$mode" qkd "$qkd_req" freeze
+    source_check "$mode" qkd "$qkd_req" down
     source_check "$mode" pqc "$pqc_req"
 
     desync_check "$mode"
@@ -838,14 +1074,14 @@ pretest || {
     exit 1
 }
 
-# Back to setup for the tally: this runs after the pre-test, so without it the
-# check would be counted against the pre-test's section.
-SECTION="setup"
+# Back to section 1: this runs after the pre-test, so without it the check would
+# resolve its id against the pre-test's list and come out ?.?.
+section 1
 step "starting the KMS simulator"
 start_kms
 grep -q 'debug logging enabled=true' "$WORK/kms.log" \
-    && pass "listening on 127.0.0.1:8080 with debug logging" \
-    || fail "the simulator did not enable debug logging"
+    && pass kms "listening on 127.0.0.1:8080 with debug logging" \
+    || fail kms "the simulator did not enable debug logging"
 
 for mode in $MODES; do
     run_mode "$mode"
@@ -855,10 +1091,10 @@ logs
 summary
 info "logs: $WORK"
 rule
-if [ "$FAILURES" = "0" ]; then
+if [ "$FAILURES" = "0" ] && [ "$HARNESS_ERRORS" = "0" ]; then
     printf '%s  PASS - all checks passed%s\n' "$C_BOLD" "$C_RESET"
 else
     printf '%s  FAIL - %s check(s) failed%s\n' "$C_BOLD" "$FAILURES" "$C_RESET"
 fi
 rule
-exit "$FAILURES"
+exit $((FAILURES + HARNESS_ERRORS))
