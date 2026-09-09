@@ -71,3 +71,26 @@ func (rl *rateLimiter) cleanup() {
 		}
 	}
 }
+
+// logThrottle emits at most one message per interval.
+//
+// Packet-level warnings are driven by whatever arrives on the socket, so an
+// unthrottled one lets flood or malformed traffic turn logging into a denial of
+// service. The zero value allows every call, which is the safe default for a
+// caller that forgets to set an interval.
+//
+// Not safe for concurrent use: every user is the UDP read loop, a single
+// goroutine, and a mutex here would be pure ceremony.
+type logThrottle struct {
+	interval time.Duration
+	next     time.Time
+}
+
+func (t *logThrottle) allow() bool {
+	now := time.Now()
+	if now.Before(t.next) {
+		return false
+	}
+	t.next = now.Add(t.interval)
+	return true
+}

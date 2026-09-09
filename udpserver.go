@@ -12,6 +12,22 @@ import (
 	"github.com/arnika-project/arnika/auth"
 )
 
+// qkdQueueDepth bounds the hand-off between the UDP read loop and the QKD
+// worker. It is deliberately small: the worker performs one KMS request and one
+// key-writer operation per identifier, so a deeper queue would only accumulate
+// identifiers whose keys are superseded by the time they are served. Eight
+// absorbs a burst of sender retries; past that the sender's own retry policy is
+// the right backpressure, not more memory here.
+//
+// Not externally configurable: an operator has no information with which to
+// size this better than the protocol does.
+const qkdQueueDepth = 8
+
+// qkdQueueWarnEvery throttles the queue-full warning. It is emitted from a
+// packet path, so an unthrottled one would let flood traffic turn logging into
+// a denial of service.
+const qkdQueueWarnEvery = 10 * time.Second
+
 // pqcHandler consumes one verified, decrypted PQC frame and may answer the
 // sender through reply, which sends one plaintext frame back. Implemented by
 // repositories.PQCHPKERepository.HandleFrame. Neither the handler nor reply may
@@ -25,7 +41,8 @@ type pqcHandler func(frame []byte, reply func(frame []byte) error) error
 //   - Constant-time checks, uniform error messages (side-channel resistance)
 //
 // Protocol flow:
-//  1. Client sends DATA packet (signed + encrypted payload) -> Server replies with ACK
+//  1. Client sends DATA packet (signed + encrypted payload) -> Server enqueues
+//     the key id on the bounded QKD queue and replies with ACK
 //  2. Peer sends PQC packets (key agreement frames) -> handed to pqcHandle, which
 //     answers on this socket when the exchange calls for a reply
 //
@@ -49,6 +66,8 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 
 	// Rate limiter: configurable requests per IP per window
 	limiter := newRateLimiter(rateLimit, rateWindow)
+	// Local to this loop, which is a single goroutine, so it needs no lock.
+	queueFullWarn := logThrottle{interval: qkdQueueWarnEvery}
 
 	go func() {
 		<-quit
@@ -101,7 +120,27 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 				continue
 			}
 
-			// 5. Send ACK
+			// 5. Hand the identifier to the bounded QKD queue, without
+			// blocking. Its worker performs the KMS request and the key-writer
+			// operation synchronously, so a blocking send stalled this read
+			// loop - and with it every PQC frame arriving on the same socket -
+			// for the length of a KMS outage.
+			//
+			// Enqueued before the ACK, never after: the ACK is the sender's
+			// only signal that it need not retry, so it has to reflect
+			// in-process acceptance rather than a successful decryption. A full
+			// queue therefore stays unacknowledged and the sender retries.
+			select {
+			case result <- string(decrypted):
+			default:
+				if queueFullWarn.allow() {
+					log.Printf("[WARNING] %s QKD queue full (%d slots), key_id from %s not acknowledged; the sender will retry",
+						BACKUPLOGPREFIX, cap(result), remoteAddr)
+				}
+				continue
+			}
+
+			// 6. Send ACK
 			ack := &auth.Packet{
 				Type:      auth.PacketAck,
 				Timestamp: time.Now().Unix(),
@@ -109,7 +148,6 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 			_, _ = conn.WriteToUDP(ack.Marshal(psk, dirOut), remoteAddr)
 
 			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, string(decrypted), remoteAddr)
-			result <- string(decrypted)
 
 		case auth.PacketPQC:
 			if pqcHandle == nil {
@@ -217,4 +255,24 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 		return nil // success
 	}
 	return fmt.Errorf("unreachable")
+}
+
+// runQKDWorker services the bounded QKD queue until done is closed.
+//
+// One worker, not a pool: handle performs the KMS request and the key-writer
+// operation, so two of them running concurrently could install PSKs in the
+// reverse of the order the peer sent the identifiers. A channel is FIFO, so a
+// single consumer is what preserves that order.
+//
+// It returns on done rather than looping forever, so the worker cannot outlive
+// the UDP server that feeds it.
+func runQKDWorker(done <-chan bool, queue <-chan string, handle func(keyID string)) {
+	for {
+		select {
+		case <-done:
+			return
+		case keyID := <-queue:
+			handle(keyID)
+		}
+	}
 }

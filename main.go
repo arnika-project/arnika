@@ -236,7 +236,9 @@ func main() {
 	interval := cfg.Interval
 	done := make(chan bool)
 	skip := make(chan bool, 1)
-	result := make(chan string)
+	// Bounded, so the UDP read loop can hand off a key id without ever waiting
+	// on the worker below it. See qkdQueueDepth.
+	result := make(chan string, qkdQueueDepth)
 	keyWriter, err := getKeyWriterService(cfg)
 	if err != nil {
 		log.Panicf("[ERROR] [STOP] Failed to create WireGuard repository: %v", err)
@@ -287,28 +289,27 @@ func main() {
 			}()
 		}
 		qkd := getQKDService(cfg)
-		go func() {
-			for {
-				r := <-result
-				select {
-				case skip <- true:
-				default:
-				}
-				log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPLOGPREFIX, r, cfg.KMSURL)
-				key, err := qkd.GetKeyByID(&r)
-				if err != nil {
-					log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPLOGPREFIX, r, cfg.KMSURL, err)
-					// MODE decides what a missing QKD key means; skipping the
-					// call left its whole fallback and fail-closed logic
-					// unreachable and the superseded PSK installed.
-					if installOnQKDFailure(cfg) {
-						setPSK(keyWriter, pqc, nil, cfg, BACKUPLOGPREFIX)
-					}
-					continue
-				}
-				setPSK(keyWriter, pqc, key.Key, cfg, BACKUPLOGPREFIX)
+		// One worker for the whole queue: the KMS request and the key-writer
+		// operation below are what the UDP read loop must never wait for.
+		go runQKDWorker(done, result, func(r string) {
+			select {
+			case skip <- true:
+			default:
 			}
-		}()
+			log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPLOGPREFIX, r, cfg.KMSURL)
+			key, err := qkd.GetKeyByID(&r)
+			if err != nil {
+				log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPLOGPREFIX, r, cfg.KMSURL, err)
+				// MODE decides what a missing QKD key means; skipping the
+				// call left its whole fallback and fail-closed logic
+				// unreachable and the superseded PSK installed.
+				if installOnQKDFailure(cfg) {
+					setPSK(keyWriter, pqc, nil, cfg, BACKUPLOGPREFIX)
+				}
+				return
+			}
+			setPSK(keyWriter, pqc, key.Key, cfg, BACKUPLOGPREFIX)
+		})
 		go func() {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
@@ -392,11 +393,9 @@ func main() {
 	} else {
 		// PQC-only build: nothing exchanges a key_id, so drain what a
 		// misconfigured peer sends rather than let the UDP server block on it.
-		go func() {
-			for r := range result {
-				log.Printf("[WARNING] %s received key_id %s from the peer, but this binary has no QKD key reader", ARNIKALOGPREFIX, r)
-			}
-		}()
+		go runQKDWorker(done, result, func(r string) {
+			log.Printf("[WARNING] %s received key_id %s from the peer, but this binary has no QKD key reader", ARNIKALOGPREFIX, r)
+		})
 		// Both peers derive the PQC round from the wall clock, so installing the
 		// agreed key one round timeout after each boundary keeps them on the same
 		// key without a key_id message. Rotating on INTERVAL instead would let two

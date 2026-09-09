@@ -25,13 +25,13 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 		ListenAddress: addrA, ServerAddress: addrB, ArnikaID: "2",
 		ArnikaPSK: psk, MaxClockSkew: time.Minute,
 		PQCRoundInterval: 5 * time.Minute, PQCRoundTimeout: 3 * time.Second,
-		PQCMaxKeyAge: time.Minute,
+		PQCMaxKeyAge: 10 * time.Minute, // the default: 2 x the round interval
 	}
 	cfgB := &config.Config{
 		ListenAddress: addrB, ServerAddress: addrA, ArnikaID: "3",
 		ArnikaPSK: psk, MaxClockSkew: time.Minute,
 		PQCRoundInterval: 5 * time.Minute, PQCRoundTimeout: 3 * time.Second,
-		PQCMaxKeyAge: time.Minute,
+		PQCMaxKeyAge: 10 * time.Minute, // the default: 2 x the round interval
 	}
 
 	// The role is fixed here rather than derived from the PSK, so the test does
