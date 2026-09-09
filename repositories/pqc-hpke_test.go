@@ -1331,3 +1331,295 @@ func TestPQCPublishKeepsTheNewerRound(t *testing.T) {
 		})
 	}
 }
+
+// --- backward clock step ----------------------------------------------------
+
+// staleRepo is a repository whose keys go stale in staleAfter, so a test can
+// reach the stale branch of publish without waiting out a real maxAge.
+func staleRepo(t *testing.T, staleAfter time.Duration) *PQCHPKERepository {
+	t.Helper()
+	// maxAge must exceed the round interval, so both scale down together.
+	return newPQCTestRepo(t, staleAfter/5, staleAfter/10, staleAfter)
+}
+
+// TestPQCPublishLowerRoundRules covers AC-4.1, AC-4.2 and FR-4.6: a lower round
+// loses to a fresh key and wins against a stale one, and the round it installs
+// becomes the baseline every later round is compared against.
+//
+// Round numbers come from wall time, so after a backward step across a boundary
+// every newly confirmed round is below the published one. Without the stale
+// branch the old key aged out, GetNewKey started failing, and no lower round
+// could replace it until wall time caught up or the process restarted.
+func TestPQCPublishLowerRoundRules(t *testing.T) {
+	const staleAfter = 100 * time.Millisecond
+	keyFor := func(b byte) []byte { return bytes.Repeat([]byte{b}, pqcKeyLen) }
+
+	t.Run("a fresh key beats a lower round", func(t *testing.T) {
+		r := staleRepo(t, staleAfter)
+		if err := r.publish(101, keyFor(0xa1)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if err := r.publish(100, keyFor(0xb2)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		got, err := r.GetNewKey()
+		if err != nil {
+			t.Fatalf("GetNewKey: %v", err)
+		}
+		if !bytes.Equal(got, keyFor(0xa1)) {
+			t.Fatal("a lower round replaced a key that was still fresh")
+		}
+	})
+
+	t.Run("a stale key yields to a lower round", func(t *testing.T) {
+		r := staleRepo(t, staleAfter)
+		if err := r.publish(101, keyFor(0xa1)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		time.Sleep(2 * staleAfter)
+		if _, err := r.GetNewKey(); err == nil {
+			t.Fatal("the key should be stale by now")
+		}
+		if err := r.publish(90, keyFor(0xb2)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		got, err := r.GetNewKey()
+		if err != nil {
+			t.Fatalf("the lower round did not become the new baseline: %v", err)
+		}
+		if !bytes.Equal(got, keyFor(0xb2)) {
+			t.Fatal("GetNewKey still returns the stale key")
+		}
+
+		// FR-4.6: rounds after the reset are compared against round 90, so 89
+		// loses while 90's key is fresh and 91 wins.
+		if err := r.publish(89, keyFor(0xc3)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if got, _ := r.GetNewKey(); !bytes.Equal(got, keyFor(0xb2)) {
+			t.Fatal("round 89 displaced the new baseline although it is fresh")
+		}
+		if err := r.publish(91, keyFor(0xd4)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if got, _ := r.GetNewKey(); !bytes.Equal(got, keyFor(0xd4)) {
+			t.Fatal("a higher round did not supersede the new baseline")
+		}
+	})
+
+	t.Run("an equal round replaces the key", func(t *testing.T) {
+		r := staleRepo(t, staleAfter)
+		if err := r.publish(101, keyFor(0xa1)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if err := r.publish(101, keyFor(0xb2)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if got, _ := r.GetNewKey(); !bytes.Equal(got, keyFor(0xb2)) {
+			t.Fatal("a repeated round did not refresh the key")
+		}
+	})
+}
+
+// TestPQCStaleLowerRoundResetZeroesTheSupersededKey asserts FR-4.4: the
+// recovery path is a normal publication, so the buffer it replaces is zeroed
+// under the write lock exactly as any other supersession zeroes it.
+func TestPQCStaleLowerRoundResetZeroesTheSupersededKey(t *testing.T) {
+	const staleAfter = 100 * time.Millisecond
+	r := staleRepo(t, staleAfter)
+
+	if err := r.publish(101, bytes.Repeat([]byte{0xa1}, pqcKeyLen)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	superseded := r.latest.key // the buffer the reset must clear
+	time.Sleep(2 * staleAfter)
+	if err := r.publish(90, bytes.Repeat([]byte{0xb2}, pqcKeyLen)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	if !bytes.Equal(superseded, make([]byte, pqcKeyLen)) {
+		t.Fatal("the lower-round reset left the superseded key material in memory")
+	}
+}
+
+// TestPQCPeersConvergeAfterBackwardClockStep covers AC-4.4. Two peers whose old
+// keys go stale at slightly different moments must still end up on the same
+// round: both apply the same rule, so the first round both are eligible for
+// installs the same baseline on both.
+func TestPQCPeersConvergeAfterBackwardClockStep(t *testing.T) {
+	const staleAfter = 100 * time.Millisecond
+	a := staleRepo(t, staleAfter)
+	b := staleRepo(t, staleAfter)
+
+	old := bytes.Repeat([]byte{0xa1}, pqcKeyLen)
+	if err := a.publish(101, old); err != nil {
+		t.Fatalf("publish a: %v", err)
+	}
+	// b's key is published later, so it goes stale later: the peers are not
+	// eligible to reset at the same instant.
+	time.Sleep(staleAfter / 2)
+	if err := b.publish(101, old); err != nil {
+		t.Fatalf("publish b: %v", err)
+	}
+
+	// Round 90 completes while only a is eligible. a resets, b keeps 101.
+	time.Sleep(3 * staleAfter / 4)
+	lower := bytes.Repeat([]byte{0xb2}, pqcKeyLen)
+	if err := a.publish(90, lower); err != nil {
+		t.Fatalf("publish a: %v", err)
+	}
+	if err := b.publish(90, lower); err != nil {
+		t.Fatalf("publish b: %v", err)
+	}
+	if a.latest.round == b.latest.round {
+		t.Skip("the two peers became eligible at the same instant; nothing to converge")
+	}
+
+	// Round 91 is the next round both are eligible for: a's baseline is 90 and
+	// b's 101 has gone stale by now.
+	time.Sleep(2 * staleAfter)
+	next := bytes.Repeat([]byte{0xc3}, pqcKeyLen)
+	if err := a.publish(91, next); err != nil {
+		t.Fatalf("publish a: %v", err)
+	}
+	if err := b.publish(91, next); err != nil {
+		t.Fatalf("publish b: %v", err)
+	}
+
+	keyA, errA := a.GetNewKey()
+	keyB, errB := b.GetNewKey()
+	if errA != nil || errB != nil {
+		t.Fatalf("a peer has no usable key after recovery: a=%v b=%v", errA, errB)
+	}
+	if !bytes.Equal(keyA, keyB) {
+		t.Fatal("the two peers did not converge on the same key")
+	}
+	if a.latest.round != b.latest.round {
+		t.Fatalf("rounds diverged: a=%d b=%d", a.latest.round, b.latest.round)
+	}
+}
+
+// TestPQCStaleKeyDoesNotBypassTheFrameChecks covers AC-4.5: a stale published
+// key relaxes the round-ordering rule and nothing else. A malformed frame, a
+// round outside the acceptance window and a failed confirmation must all leave
+// the register untouched.
+func TestPQCStaleKeyDoesNotBypassTheFrameChecks(t *testing.T) {
+	const interval = 10 * time.Second
+	r := newPQCTestRepo(t, interval, time.Second, 2*interval)
+	round := testRound(interval)
+	// Publish a key with an age past maxAge by backdating it directly: the
+	// alternative is sleeping eleven seconds in a unit test.
+	stale := bytes.Repeat([]byte{0xa1}, pqcKeyLen)
+	if err := r.publish(round, stale); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	r.latest.at = time.Now().Add(-time.Hour)
+	if _, err := r.GetNewKey(); err == nil {
+		t.Fatal("the key should read as stale")
+	}
+
+	noReply := func([]byte) error { return fmt.Errorf("the responder must not answer") }
+
+	t.Run("malformed frame", func(t *testing.T) {
+		if err := r.HandleFrame([]byte{0x01, 0x02}, noReply); err == nil {
+			t.Fatal("a truncated frame was accepted")
+		}
+	})
+
+	t.Run("round outside the window", func(t *testing.T) {
+		_, pub, err := pqcInitiatorStart()
+		if err != nil {
+			t.Fatalf("initiatorStart: %v", err)
+		}
+		for _, f := range mustSplit(t, round-5, pqcKindPubKey, pub) {
+			if err := r.HandleFrame(f, noReply); err == nil {
+				t.Fatal("a frame five rounds behind was accepted")
+			}
+		}
+	})
+
+	t.Run("failed confirmation", func(t *testing.T) {
+		var replies [][]byte
+		reply := func(frame []byte) error {
+			replies = append(replies, bytes.Clone(frame))
+			return nil
+		}
+		_, pub, err := pqcInitiatorStart()
+		if err != nil {
+			t.Fatalf("initiatorStart: %v", err)
+		}
+		for _, f := range mustSplit(t, round-1, pqcKindPubKey, pub) {
+			if err := r.HandleFrame(f, reply); err != nil {
+				t.Fatalf("HandleFrame(pubKey): %v", err)
+			}
+		}
+		forged := bytes.Repeat([]byte{0xff}, pqcConfirmTagLen)
+		for _, f := range mustSplit(t, round-1, pqcKindTag, forged) {
+			if err := r.HandleFrame(f, reply); err == nil {
+				t.Fatal("a forged confirmation tag was accepted")
+			}
+		}
+	})
+
+	// Nothing above may have published, so the stale key is still the register's
+	// content and GetNewKey still refuses it.
+	if r.latest.round != round {
+		t.Fatalf("published round = %d, want the untouched %d", r.latest.round, round)
+	}
+	if !bytes.Equal(r.latest.key, stale) {
+		t.Fatal("a rejected frame changed the published key")
+	}
+}
+
+// TestPQCAbandonsResponderStateOutsideTheRoundWindow asserts the responder does
+// not stay wedged on a round it can no longer confirm.
+//
+// After a backward clock step the pre-step round is outside the acceptance
+// window, so its confirmation tag would be rejected and the pending key can
+// never be published. Keeping it live made respondPubKey reject every newly
+// current round as behind it, and the responder could take no part in the
+// recovery.
+func TestPQCAbandonsResponderStateOutsideTheRoundWindow(t *testing.T) {
+	const interval = 10 * time.Second
+	r := newPQCTestRepo(t, interval, time.Second, 2*interval)
+	cur := testRound(interval)
+
+	// Wedge the responder on a round far above the window, as a clock step
+	// backwards would leave it.
+	future := cur + 100
+	_, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	_, key, err := pqcResponderRespond(pub, future)
+	if err != nil {
+		t.Fatalf("responderRespond: %v", err)
+	}
+	r.resp.round, r.resp.live, r.resp.key = future, true, key
+
+	// A public key for the current round must now be served rather than
+	// rejected as behind the wedged one.
+	_, freshPub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	var replies [][]byte
+	reply := func(frame []byte) error {
+		replies = append(replies, bytes.Clone(frame))
+		return nil
+	}
+	for _, f := range mustSplit(t, cur, pqcKindPubKey, freshPub) {
+		if err := r.HandleFrame(f, reply); err != nil {
+			t.Fatalf("the wedged round blocked the current one: %v", err)
+		}
+	}
+	if len(replies) == 0 {
+		t.Fatal("the responder did not answer the current round")
+	}
+	if r.resp.round != cur {
+		t.Fatalf("round in flight = %d, want the current %d", r.resp.round, cur)
+	}
+	if !bytes.Equal(key, make([]byte, pqcKeyLen)) {
+		t.Fatal("the abandoned round's key was not zeroed")
+	}
+}

@@ -583,14 +583,28 @@ func (r *PQCHPKERepository) GetNewKey() ([]byte, error) {
 // publish installs a freshly agreed key and zeroes the one it supersedes.
 // Callers must not reach here before confirmation has succeeded.
 //
-// A key from an *older* round never supersedes a newer one. Two rounds can
-// complete at the same instant - at startup the round for the current index and
-// the round for the next boundary are both due, and one peer initiates each -
-// and the order the two publishes land in is then reversed on the two peers.
+// A key from an *older* round never supersedes a *fresh* newer one. Two rounds
+// can complete at the same instant - at startup the round for the current index
+// and the round for the next boundary are both due, and one peer initiates each
+// - and the order the two publishes land in is then reversed on the two peers.
 // Keeping the last one had them hold different keys and derive two different
 // PSKs from them, which is exactly the divergence that has no symptom until the
 // WireGuard handshake fails. Keeping the highest round is order-independent, so
 // both peers converge on the same key whatever the interleaving.
+//
+// Once the published key is stale a confirmed lower round does take over, as
+// the new baseline. Round numbers come from wall time, so a backward clock step
+// across a boundary leaves every newly confirmed round below the published one:
+// without this the old key aged out, GetNewKey started failing, and no lower
+// round could replace it until wall time caught up again or the process was
+// restarted. Staleness is measured with time.Since, which reads the monotonic
+// clock, so the very step that caused the problem cannot also hide it.
+//
+// This does not weaken confirmation or the frame round window: publish is only
+// reached after a tag has verified, and HandleFrame has already rejected any
+// round outside [current-1, current+1]. Both peers apply the same rule, so two
+// peers whose keys go stale moments apart converge on the next round both are
+// eligible to reset on.
 //
 // The swap and the clear both happen under the write lock. Zeroing the
 // superseded buffer outside it would race a GetNewKey() that had already taken
@@ -609,10 +623,15 @@ func (r *PQCHPKERepository) publish(round uint32, key []byte) error {
 
 	prev := r.latest
 	if prev != nil && round < prev.round {
-		clear(k)
-		log.Printf("[INFO] %s [OK] round %d agreed, but round %d is already published; keeping the newer one",
-			r.logPrefix, round, prev.round)
-		return nil
+		age := time.Since(prev.at)
+		if age <= r.maxAge {
+			clear(k)
+			log.Printf("[INFO] %s [OK] round %d agreed, but round %d is already published and still fresh (age %s); keeping the newer one",
+				r.logPrefix, round, prev.round, age.Truncate(time.Second))
+			return nil
+		}
+		log.Printf("[WARNING] %s [OK] round %d is behind the published round %d, but that key is stale (age %s, max %s); taking the lower round as the new baseline, which is how a backward clock step recovers",
+			r.logPrefix, round, prev.round, age.Truncate(time.Second), r.maxAge)
 	}
 	r.latest = &pqcResult{key: k, round: round, at: time.Now()}
 	if prev != nil {
@@ -868,6 +887,20 @@ func (r *PQCHPKERepository) HandleFrame(raw []byte, reply func(frame []byte) err
 
 	r.respMu.Lock()
 	defer r.respMu.Unlock()
+
+	// Abandon a round in flight that the window above has moved past: its
+	// confirmation tag would now be rejected as out of window, so the pending
+	// key can never be published and only occupies memory. Before this, a
+	// backward clock step left the pre-step round live forever and
+	// respondPubKey then rejected every newly current round as behind it, so
+	// the responder could not take part in the recovery publish() allows.
+	if r.resp.live {
+		if d := int64(r.resp.round) - cur; d < -1 || d > 1 {
+			log.Printf("[WARNING] %s round %d abandoned: it is outside the round window [%d,%d], so its confirmation can no longer arrive",
+				r.logPrefix, r.resp.round, cur-1, cur+1)
+			r.clearResponder()
+		}
+	}
 
 	msg, complete := r.resp.join.add(f)
 	if !complete {
