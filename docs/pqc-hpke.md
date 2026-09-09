@@ -94,6 +94,36 @@ which the envelope already proved, and nothing at all about the agreed key. With
 the label, each direction is a real possession proof.
 `TestPQCConfirmTagsAreRoleSeparated` pins this.
 
+### Recovering from a backward clock step
+
+Publication keeps the highest round, which is what makes two peers converge when
+overlapping rounds complete in different orders. Round numbers come from wall
+time, so a backward step across a boundary put every newly confirmed round
+*below* the published one: the old key kept aging on the monotonic clock,
+`GetNewKey()` began failing once it passed `PQC_MAX_KEY_AGE`, and no lower round
+could replace it until wall time reached the previous round again or the process
+restarted.
+
+A confirmed lower round therefore becomes the new publication baseline **once
+the published key is stale**, and only then. The staleness decision reads
+`time.Since`, hence the monotonic clock, so the adjusted wall clock that caused
+the problem cannot also mask it. The reset zeroes the superseded key under the
+same write lock as any other publication and logs a warning with both rounds and
+the old key's age.
+
+Nothing else is relaxed. The frame still has to pass the envelope's HMAC and
+timestamp checks, still has to fall inside the `[current-1, current+1]` round
+window, and still has to confirm, so a malformed, unauthenticated, out-of-window
+or unconfirmed lower round is never published however stale the current key is.
+While the published key is fresh, higher-round-wins is unchanged.
+
+`HandleFrame` additionally abandons a round in flight once it falls outside that
+window: its confirmation tag would be rejected there, so the pending key could
+never be published, and keeping the state live made `respondPubKey` reject every
+newly current round as behind it — the responder could take no part in the
+recovery. Two peers whose old keys go stale moments apart converge on the first
+round both are eligible to reset on.
+
 A residual remains, as it must for any protocol whose last message is
 unacknowledged: if `tag_I` is lost, the initiator has published and the
 responder has not, so for one interval the two may feed different keys into the
@@ -214,11 +244,26 @@ Requirements:
 |---|---|---|---|
 | `PQC_ENABLED` | ➖ | `true` | The PQC key agreement. **On by default**: set `false` to run QKD-only |
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
-| `PQC_MAX_KEY_AGE` | ➖ | `2 × INTERVAL` | Staleness threshold; one round of loss tolerance |
+| `PQC_MAX_KEY_AGE` | ➖ | `2 × PQC_ROUND_INTERVAL` | Staleness threshold; one round of loss tolerance. **Must be longer than `PQC_ROUND_INTERVAL`** — a shorter value makes the key stale during every healthy round, so it is rejected at startup with both durations in the error, and `NewPQCHPKERepository` enforces the same invariant |
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline. **Must be shorter than `PQC_ROUND_INTERVAL`**, or rounds would overlap; this is rejected at startup |
 
 These must be **identical on both peers**: `PQC_ENABLED`, `PQC_ROUND_INTERVAL`
 and `MODE`. `INTERVAL` must already match for role election to work.
+
+`PQC_MAX_KEY_AGE` derives from `PQC_ROUND_INTERVAL` and not from `INTERVAL`: the
+key ages against the round cadence, so with `INTERVAL=10s` and
+`PQC_ROUND_INTERVAL=120s` the old derivation gave an effective maximum age of
+`20s` and left a healthy key stale for the remaining ~100 s of every round. In a
+PQC-requiring mode each rotation in that window invalidated the tunnel.
+
+A successful round also contributes to the per-IP rate-limit budget: two
+public-key fragments, retried up to three times, plus the one-frame
+confirmation tag, so seven inbound packets per round on the responder's
+listening socket. The reply frames leave that socket rather than arriving on it,
+and rate limiting applies only to inbound reads, so they cost nothing. `RATE_LIMIT`
+is sized from these counts when it is unset — see
+[`ratebudget.go`](../ratebudget.go) and the `RATE_LIMIT` row in
+[`README.md`](../README.md).
 
 The agreement runs unless it is switched off, so an upgraded deployment starts
 negotiating PQC material without any configuration change. Until the first

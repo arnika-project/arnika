@@ -440,7 +440,7 @@ start without them.
 | `ARNIKA_ID` | ➖ | port from `LISTEN_ADDRESS` | Identifier (max 5 digits) used in logs and in PRIMARY/BACKUP election. The two peers' values **must differ in parity** — one odd, one even |
 | `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | Timeout waiting for the peer's ACK |
 | `INTERVAL` | ➖ | `10s` | Interval between key rotations. **Must be the same on both peers**; align with the WireGuard rekey interval (`120s`) |
-| `RATE_LIMIT` | ➖ | `30` | Max accepted packets per source IP per `RATE_WINDOW` |
+| `RATE_LIMIT` | ➖ | calculated | Max accepted packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
 | `RATE_WINDOW` | ➖ | `1m` | Window for the per-IP rate limit |
 | `MAX_CLOCK_SKEW` | ➖ | `1m` | Accepted timestamp deviation (replay protection). Requires clocks in sync between peers |
 
@@ -483,7 +483,7 @@ start without them.
 |---|---|---|---|
 | `PQC_ENABLED` | ➖ | `true` | The **pqc-hpke** key agreement: Arnika negotiates the PQC key with its peer over the existing socket, using HPKE (RFC 9180) with MLKEM1024-P384. No external daemon, no key on disk, no new port. **On by default** — set `false` to run QKD-only |
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
-| `PQC_MAX_KEY_AGE` | ➖ | `2 × INTERVAL` | Staleness threshold for the agreed key |
+| `PQC_MAX_KEY_AGE` | ➖ | `2 × PQC_ROUND_INTERVAL` | Staleness threshold for the agreed key. **Must be longer than `PQC_ROUND_INTERVAL`**, or the key is stale for part of every healthy round; this is rejected at startup with both values in the error |
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline; must be shorter than `PQC_ROUND_INTERVAL` |
 | `MODE` | ➖ | `QkdAndPqcRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired` or `EitherQkdOrPqcRequired` — see the mode table above. The default is the **strictest** mode: both key sources are mandatory and there is no fallback |
 
