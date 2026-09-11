@@ -1,4 +1,4 @@
-// Package repositories - pqc-hpke key reader.
+// Package pqchpke is the pqc-hpke key reader.
 //
 // This adapter derives the 32-byte PQC key by running an HPKE (RFC 9180) key
 // agreement directly with the Arnika peer, replacing the reader that took the
@@ -20,8 +20,8 @@
 //
 //  1. frame layer         - splitting and reassembling messages that exceed one datagram
 //  2. HPKE core           - the key agreement itself, plus mandatory key confirmation
-//  3. transport/scheduler - rounds, retries and the KeyReaderUnmanaged surface
-package repositories
+//  3. transport/scheduler - rounds, retries and the key reader surface
+package pqchpke
 
 import (
 	"context"
@@ -331,23 +331,23 @@ func pqcVerifyConfirm(pqcKey []byte, round uint32, role string, peerTag []byte) 
 // pqcMaxSendAttempts mirrors udpClient's send-with-reply retry count.
 const pqcMaxSendAttempts = 3
 
-// PQCMessageFrames and PQCMaxSendAttempts are what the per-IP rate-limit
+// MessageFrames and MaxSendAttempts are what the per-IP rate-limit
 // budget is sized from. They are exported rather than copied into the budget
 // calculation so that raising a retry count or a message size here cannot
 // leave the budget behind and start rejecting legitimate frames.
 const (
-	// PQCMessageFrames is the frame count of the largest inbound PQC message,
+	// MessageFrames is the frame count of the largest inbound PQC message,
 	// the 1665-byte public key.
-	PQCMessageFrames = pqcMaxFrames
-	// PQCMaxSendAttempts is the initiator's retry budget for one message.
-	PQCMaxSendAttempts = pqcMaxSendAttempts
+	MessageFrames = pqcMaxFrames
+	// MaxSendAttempts is the initiator's retry budget for one message.
+	MaxSendAttempts = pqcMaxSendAttempts
 )
 
-// PQCRoundSeconds is the scheduler's effective round spacing in whole seconds.
+// RoundSeconds is the scheduler's effective round spacing in whole seconds.
 // The budget must use this and not PQC_ROUND_INTERVAL itself: the round index
 // is second-granular, so a sub-second interval still yields one round per
 // second and not more.
-func PQCRoundSeconds(interval time.Duration) int64 {
+func RoundSeconds(interval time.Duration) int64 {
 	return pqcIntervalSecs(interval)
 }
 
@@ -383,7 +383,7 @@ type pqcResponderState struct {
 	reply [][]byte
 }
 
-// PQCHPKERepository implements services.KeyReaderUnmanaged by running an HPKE
+// Repository agrees the PQC key by running an HPKE
 // key agreement with the Arnika peer once per round. It replaces reading the
 // PQC key via file from an external PQC provider; the key never touches disk.
 //
@@ -392,7 +392,7 @@ type pqcResponderState struct {
 // already-decrypted frames through HandleFrame and answers through the reply
 // function that comes with them. All four are supplied by the wiring, which
 // keeps the whole module testable without any network.
-type PQCHPKERepository struct {
+type Repository struct {
 	// send and recv are the initiator's request/response channel to the peer:
 	// a connected UDP socket in production, exactly what udpClient uses for
 	// the QKD key id, and a pair of channels in tests.
@@ -429,15 +429,15 @@ type PQCHPKERepository struct {
 	resp   pqcResponderState
 }
 
-// NewPQCHPKERepository builds the adapter. Every dependency is an argument: it
+// NewRepository builds the adapter. Every dependency is an argument: it
 // reads no environment and opens no socket.
-func NewPQCHPKERepository(
+func NewRepository(
 	logPrefix string,
 	send func(frame []byte) error,
 	recv func(deadline time.Time) ([]byte, error),
 	isInitiator func(round uint32) bool,
 	roundInterval, roundTimeout, maxAge time.Duration,
-) (*PQCHPKERepository, error) {
+) (*Repository, error) {
 	if send == nil {
 		return nil, fmt.Errorf("pqc: send function is nil")
 	}
@@ -466,7 +466,7 @@ func NewPQCHPKERepository(
 	if logPrefix == "" {
 		logPrefix = "PQC-HPKE"
 	}
-	return &PQCHPKERepository{
+	return &Repository{
 		logPrefix:     logPrefix,
 		send:          send,
 		recv:          recv,
@@ -553,7 +553,7 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 	}
 }
 
-// GetNewKey implements services.KeyReaderUnmanaged.
+// GetNewKey returns the current agreed key.
 //
 // It reads a register rather than a channel: it is called synchronously from
 // setPSK(), may be called more than once per round, and needs the key's age.
@@ -563,7 +563,7 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 // The read lock is held only for a 32-byte copy, and the sole writer holds the
 // write lock for a copy plus a clear, so this cannot block for a meaningful
 // amount of time even though it is on the synchronous rekeying path.
-func (r *PQCHPKERepository) GetNewKey() ([]byte, error) {
+func (r *Repository) GetNewKey() ([]byte, error) {
 	r.keyMu.RLock()
 	defer r.keyMu.RUnlock()
 
@@ -611,7 +611,7 @@ func (r *PQCHPKERepository) GetNewKey() ([]byte, error) {
 // its reference, and hand that caller an all-zero key: sync.RWMutex.Lock waits
 // for every outstanding reader, so once it is held no reader can still be
 // reading prev.key.
-func (r *PQCHPKERepository) publish(round uint32, key []byte) error {
+func (r *Repository) publish(round uint32, key []byte) error {
 	if len(key) != pqcKeyLen {
 		return fmt.Errorf("pqc-hpke: refusing to publish %d-byte key, want %d", len(key), pqcKeyLen)
 	}
@@ -673,7 +673,7 @@ func (r *PQCHPKERepository) publish(round uint32, key []byte) error {
 // peers' setPSK calls is the read gap divided by the interval, wherever the
 // publish sits. Closing that needs a shared selector - the peers agreeing on
 // *which* round's key a given rekey uses - not a different schedule.
-func (r *PQCHPKERepository) Run(ctx context.Context) {
+func (r *Repository) Run(ctx context.Context) {
 	// Give a peer starting at the same moment time to bind its listener. The
 	// startup round is the one round with no earlier round to fall back on.
 	if !sleepUntil(ctx, time.Now().Add(pqcStartupGrace)) {
@@ -722,7 +722,7 @@ func (r *PQCHPKERepository) Run(ctx context.Context) {
 
 // runRound executes one agreement as the initiator. Nothing is published unless
 // the responder's tag verifies against the key this side derived.
-func (r *PQCHPKERepository) runRound(ctx context.Context, round uint32) error {
+func (r *Repository) runRound(ctx context.Context, round uint32) error {
 	ctx, cancel := context.WithTimeout(ctx, r.roundTimeout)
 	defer cancel()
 
@@ -773,7 +773,7 @@ func (r *PQCHPKERepository) runRound(ctx context.Context, round uint32) error {
 // whole message on timeout as udpClient does. HPKE is single-shot, so an
 // exhausted budget has no partial state to recover: the round simply fails and
 // the next one proceeds.
-func (r *PQCHPKERepository) exchange(ctx context.Context, round uint32, pub []byte) ([]byte, error) {
+func (r *Repository) exchange(ctx context.Context, round uint32, pub []byte) ([]byte, error) {
 	attempt := r.roundTimeout / pqcMaxSendAttempts
 	if attempt <= 0 {
 		attempt = r.roundTimeout
@@ -799,7 +799,7 @@ func (r *PQCHPKERepository) exchange(ctx context.Context, round uint32, pub []by
 // readMessage collects frames until the wanted message is complete or the
 // deadline passes. Frames of another round or another kind are dropped: a late
 // reply from an earlier round must not be mistaken for this one's.
-func (r *PQCHPKERepository) readMessage(ctx context.Context, round uint32, kind pqcKind, deadline time.Time) ([]byte, error) {
+func (r *Repository) readMessage(ctx context.Context, round uint32, kind pqcKind, deadline time.Time) ([]byte, error) {
 	var join pqcJoiner
 	for {
 		if err := ctx.Err(); err != nil {
@@ -831,7 +831,7 @@ func (r *PQCHPKERepository) readMessage(ctx context.Context, round uint32, kind 
 // datagram it just received, so that port is bound by definition, and its
 // unconnected socket is never handed an ICMP error in the first place - while a
 // sleep on its path would block the UDP read loop, and with it the QKD path.
-func (r *PQCHPKERepository) sendMessage(ctx context.Context, round uint32, kind pqcKind, msg []byte) error {
+func (r *Repository) sendMessage(ctx context.Context, round uint32, kind pqcKind, msg []byte) error {
 	frames, err := splitMessage(round, kind, msg)
 	if err != nil {
 		return err
@@ -863,7 +863,7 @@ func pqcSendFrames(send func([]byte) error, frames [][]byte) error {
 // reply sends one plaintext frame back to whoever sent this one. Neither it nor
 // this function may block: both run on the UDP read loop, which also carries
 // the QKD path.
-func (r *PQCHPKERepository) HandleFrame(raw []byte, reply func(frame []byte) error) error {
+func (r *Repository) HandleFrame(raw []byte, reply func(frame []byte) error) error {
 	f, err := decodeFrame(raw)
 	if err != nil {
 		return err
@@ -918,7 +918,7 @@ func (r *PQCHPKERepository) HandleFrame(raw []byte, reply func(frame []byte) err
 
 // respondPubKey encapsulates to the peer's public key and answers with the
 // encapsulation and this side's confirmation tag as one message.
-func (r *PQCHPKERepository) respondPubKey(round uint32, pub []byte, reply func([]byte) error) error {
+func (r *Repository) respondPubKey(round uint32, pub []byte, reply func([]byte) error) error {
 	// A retried public key is answered from the stored reply. Encapsulating
 	// again would agree a second key for the same round, and the initiator
 	// would confirm whichever reply reached it first while this side kept the
@@ -964,7 +964,7 @@ func (r *PQCHPKERepository) respondPubKey(round uint32, pub []byte, reply func([
 // respondTag verifies the initiator's tag and publishes on a match. This is the
 // check that catches ML-KEM implicit rejection: the initiator cannot produce
 // this tag from a divergent key.
-func (r *PQCHPKERepository) respondTag(round uint32, peerTag []byte) error {
+func (r *Repository) respondTag(round uint32, peerTag []byte) error {
 	if !r.resp.live || r.resp.round != round {
 		return fmt.Errorf("pqc-hpke: confirmation for round %d with no round in flight", round)
 	}
@@ -981,7 +981,7 @@ func (r *PQCHPKERepository) respondTag(round uint32, peerTag []byte) error {
 }
 
 // clearResponder zeroes the unpublished key and drops the round state.
-func (r *PQCHPKERepository) clearResponder() {
+func (r *Repository) clearResponder() {
 	clear(r.resp.key)
 	r.resp = pqcResponderState{}
 }

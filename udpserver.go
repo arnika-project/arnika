@@ -30,7 +30,7 @@ const qkdQueueWarnEvery = 10 * time.Second
 
 // pqcHandler consumes one verified, decrypted PQC frame and may answer the
 // sender through reply, which sends one plaintext frame back. Implemented by
-// repositories.PQCHPKERepository.HandleFrame. Neither the handler nor reply may
+// pqchpke.Repository.HandleFrame. Neither the handler nor reply may
 // block: both run on the UDP read loop, which also carries the QKD path.
 type pqcHandler func(frame []byte, reply func(frame []byte) error) error
 
