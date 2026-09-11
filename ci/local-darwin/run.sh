@@ -29,7 +29,8 @@
 # process cannot write a PSK underneath the run that follows it.
 #
 # The KMS simulator runs with DEBUG=true so its requests and responses are
-# logged. Arnika's [DEBUG] lines are unconditional. QKD is taken away twice per
+# logged; Arnika takes LOG_LEVEL=debug for the same reason, since its debug
+# lines are filtered out at the default level. QKD is taken away twice per
 # mode: once by freezing the simulator (FREEZE, see KMS.md), which keeps the
 # requests Arnika makes into the failure in the log, and once by stopping it, so
 # that no request reaches a KMS at all.
@@ -964,7 +965,7 @@ start_pair() {
     start_peer() {
         sudo env \
             LISTEN_ADDRESS="127.0.0.1:$1" SERVER_ADDRESS="127.0.0.1:$2" \
-            ARNIKA_ID="$1" ARNIKA_PSK="$PSK" INTERVAL=7s MODE="$mode" DEBUG=true \
+            ARNIKA_ID="$1" ARNIKA_PSK="$PSK" INTERVAL=7s MODE="$mode" LOG_LEVEL=debug \
             KMS_URL="http://127.0.0.1:8080/api/v1/keys/$3" \
             WIREGUARD_INTERFACE="$4" WIREGUARD_PEER_PUBLIC_KEY="$5" \
             ${extra} \
