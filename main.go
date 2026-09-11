@@ -257,8 +257,19 @@ func main() {
 	// Serve returns an error rather than ending the process itself, so the
 	// failure surfaces here, next to every other startup failure.
 	go func() {
-		if err := transport.Serve(cfg.ListenAddress, cfg.ArnikaPSK, dirOut, dirIn, result, done,
-			pqcHandle, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew, arnikaLog); err != nil {
+		if err := transport.Serve(transport.ServerConfig{
+			Address:      cfg.ListenAddress,
+			PSK:          cfg.ArnikaPSK,
+			DirOut:       dirOut,
+			DirIn:        dirIn,
+			KeyIDs:       result,
+			Done:         done,
+			PQC:          pqcHandle,
+			RateLimit:    cfg.RateLimit,
+			RateWindow:   cfg.RateWindow,
+			MaxClockSkew: cfg.MaxClockSkew,
+			Log:          arnikaLog,
+		}); err != nil {
 			fatal("UDP server stopped", "err", err)
 		}
 	}()
@@ -336,7 +347,16 @@ func main() {
 								}
 							} else {
 								primaryLog.Info("sending the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress)
-								err = transport.SendKeyID(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew, primaryLog)
+								err = transport.SendKeyID(transport.ClientConfig{
+									Address:      cfg.ServerAddress,
+									PSK:          cfg.ArnikaPSK,
+									DirOut:       dirOut,
+									DirIn:        dirIn,
+									KeyID:        key.ID,
+									Timeout:      cfg.ArnikaPeerTimeout,
+									MaxClockSkew: cfg.MaxClockSkew,
+									Log:          primaryLog,
+								})
 								if err != nil {
 									primaryLog.Error("failed to send the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress, "err", err)
 								}

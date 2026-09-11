@@ -60,8 +60,12 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 		result := make(chan string, 1)
 		done := make(chan bool)
 		go func() {
-			_ = transport.Serve(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
-				repo.HandleFrame, 10000, time.Minute, time.Minute, slog.New(slog.DiscardHandler))
+			_ = transport.Serve(transport.ServerConfig{
+				Address: cfg.ListenAddress, PSK: psk, DirOut: dirOut, DirIn: dirIn,
+				KeyIDs: result, Done: done, PQC: repo.HandleFrame,
+				RateLimit: 10000, RateWindow: time.Minute, MaxClockSkew: time.Minute,
+				Log: slog.New(slog.DiscardHandler),
+			})
 		}()
 		return repo
 	}
@@ -153,8 +157,12 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 		result := make(chan string, transport.QKDQueueDepth)
 		done := make(chan bool)
 		go func() {
-			_ = transport.Serve(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
-				repo.HandleFrame, limit, cfg.RateWindow, cfg.MaxClockSkew, slog.New(slog.DiscardHandler))
+			_ = transport.Serve(transport.ServerConfig{
+				Address: cfg.ListenAddress, PSK: psk, DirOut: dirOut, DirIn: dirIn,
+				KeyIDs: result, Done: done, PQC: repo.HandleFrame,
+				RateLimit: limit, RateWindow: cfg.RateWindow, MaxClockSkew: cfg.MaxClockSkew,
+				Log: slog.New(slog.DiscardHandler),
+			})
 		}()
 		return repo
 	}

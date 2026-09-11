@@ -55,8 +55,14 @@ func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *test
 	addr := freeUDPPort(t)
 	result := make(chan string, queueDepth)
 	done := make(chan bool)
-	go Serve(addr, psk, srvOut, srvIn, result, done, handle,
-		10000, time.Minute, time.Minute, slog.New(slog.DiscardHandler))
+	go func() {
+		_ = Serve(ServerConfig{
+			Address: addr, PSK: psk, DirOut: srvOut, DirIn: srvIn,
+			KeyIDs: result, Done: done, PQC: handle,
+			RateLimit: 10000, RateWindow: time.Minute, MaxClockSkew: time.Minute,
+			Log: slog.New(slog.DiscardHandler),
+		})
+	}()
 
 	conn, err := net.Dial("udp", addr)
 	if err != nil {
