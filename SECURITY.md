@@ -289,6 +289,15 @@ the Arnika user having read access only.
 This is a defense-in-depth measure complementary to the application-level validation that checks
 for empty or whitespace-only keys.
 
+### SKIP Protocol (`KMS_PROTOCOL=skip`)
+
+When configured to use the alternative SKIP protocol (`KMS_PROTOCOL=skip`), Arnika relies on `SKIP_REMOTE_SYSTEM_ID` to correctly target the remote peer's identifier on the KMS endpoint.
+
+- **Remote System ID Validation**: Both peers must correctly configure `SKIP_REMOTE_SYSTEM_ID` to match the expected remote system ID. A mismatch leads to key retrieval failures or incorrect key mapping.
+- **Transport Security**: The `KMS_URL` endpoint must enforce TLS validation (using proper `CA_CERTIFICATE` or system roots) to prevent man-in-the-middle attacks, identical to the standard ETSI014 protocol adapter.
+- **Input Sanitization**: All incoming identifiers and key material values handled via the SKIP adapter are strictly validated and hex-encoded.
+
+
 ---
 
 ## Secure Deployment Checklist
@@ -326,6 +335,7 @@ for empty or whitespace-only keys.
 - [ ] Arnika logs are treated as sensitive: the startup banner prints `ARNIKA_PSK` in cleartext
 - [ ] Process is isolated with `ProtectSystem=strict`, `PrivateTmp=true`, and
   `NoNewPrivileges=true` in the systemd unit
+- [ ] When using `KMS_PROTOCOL=skip`, `SKIP_REMOTE_SYSTEM_ID` is correctly configured and matches the expected peer identifier
 
 ### Example Minimal systemd Hardening Snippet
 

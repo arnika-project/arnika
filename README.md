@@ -445,20 +445,23 @@ start without them.
 >
 > Note that the startup banner prints this value in cleartext.
 
-## Key reader — QKD / KMS (ETSI GS QKD 014)
+## Key reader — QKD / KMS (ETSI GS QKD 014 and SKIP)
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `KMS_URL` | ✅ | — | KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA` |
+| `KMS_URL` | ✅ | — | KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA` (ETSI014) or `https://kms.example:8200` (SKIP) |
 | `KMS_HTTP_TIMEOUT` | ➖ | `10s` | HTTP timeout for KMS requests |
 | `KMS_BACKOFF_MAX_RETRIES` | ➖ | `5` | Retry attempts per failed KMS request |
 | `KMS_BACKOFF_BASE_DELAY` | ➖ | `100ms` | First backoff delay; grows exponentially per retry |
 | `KMS_RETRY_INTERVAL` | ➖ | `INTERVAL / 2` | Wait before the next rotation attempt after all retries failed |
+| `KMS_PROTOCOL` | ➖ | `etsi014` | Protocol to use for KMS: `etsi014` (ETSI GS QKD 014) or `skip` (SKIP protocol) |
+| `SKIP_REMOTE_SYSTEM_ID` | ⚠️* | `""` | SKIP-only: System ID of the peer's KP identifier (required when `KMS_PROTOCOL=skip`) |
 | `CERTIFICATE` | ➖* | _(none)_ | Client certificate presented to the **KMS** |
 | `PRIVATE_KEY` | ➖* | _(none)_ | Private key for `CERTIFICATE` |
 | `CA_CERTIFICATE` | ➖* | _(none)_ | CA bundle used to verify the **KMS** certificate |
 
 > [!NOTE]
+> \* `SKIP_REMOTE_SYSTEM_ID` is **required when `KMS_PROTOCOL=skip`**, optional otherwise.
 > \* These three are **all-or-nothing**: client-certificate authentication is enabled only when
 > all three are set. If any one of them is empty, all three are ignored, and the KMS connection
 > falls back to a plain HTTPS client that validates the server against the system root store

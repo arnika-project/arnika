@@ -6,7 +6,15 @@ import (
 	"github.com/arnika-project/arnika/services"
 )
 
+func getSKIPService(cfg *config.Config) *services.KeyReaderService {
+	skipAuth := repositories.NewKMSClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
+	skipRepo := repositories.NewSKIPRepository(cfg.KMSURL, cfg.SKIPRemoteSystemID, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, skipAuth)
+	var managed services.KeyReaderManaged = skipRepo
+	return services.NewKeyReaderService(&managed)
+}
+
 func getQKDService(cfg *config.Config) *services.KeyReaderService {
+
 	kmsAuth := repositories.NewKMSClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
 	kmsRepo := repositories.NewHTTPKMSRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
 	var managed services.KeyReaderManaged = kmsRepo

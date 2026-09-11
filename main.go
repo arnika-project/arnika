@@ -123,7 +123,12 @@ func main() {
 	done := make(chan bool)
 	skip := make(chan bool, 1)
 	result := make(chan string)
-	qkd := getQKDService(cfg)
+	var qkd *services.KeyReaderService
+	if cfg.UsesSKIP() {
+    	qkd = getSKIPService(cfg)
+	} else {
+		qkd = getQKDService(cfg)
+	}
 	pqc := getPQCService(cfg)
 	keyWriter, err := getKeyWriterService(cfg)
 	if err != nil {

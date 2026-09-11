@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,7 @@ type Config struct {
 	KMSBackoffMaxRetries   int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests
 	KMSBackoffBaseDelay    time.Duration // KMS_BACKOFF_BASE_DELAY, Base delay for KMS request retries, will get exponentially increased
 	KMSRetryInterval       time.Duration // KMS_RETRY_INTERVAL, Interval between KMS request retries
+	KMSProtocol            string        // KMS_PROTOCOL, Protocol to use for KMS ("etsi014" or "skip")
 	Interval               time.Duration // INTERVAL, Interval between key updates
 	WireGuardInterface     string        // WIREGUARD_INTERFACE, Name of the WireGuard interface to configure
 	WireguardPeerPublicKey string        // WIREGUARD_PEER_PUBLIC_KEY, Public key of the WireGuard peer
@@ -35,6 +37,7 @@ type Config struct {
 	RateLimit              int           // RATE_LIMIT, Max requests per IP per window
 	RateWindow             time.Duration // RATE_WINDOW, Window duration for rate limiting
 	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
+	SKIPRemoteSystemID     string        // SKIP_REMOTE_SYSTEM_ID, system ID of peer
 }
 
 // UsePQC returns a boolean indicating whether the PQC PSK file is set in the Config struct.
@@ -112,7 +115,14 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Rate Limit:               %d\n", c.RateLimit)
 	fmt.Printf("Rate Window:              %s\n", c.RateWindow)
 	fmt.Printf("Max Clock Skew:           %s\n", c.MaxClockSkew)
+	if c.UsesSKIP() {
+		fmt.Print("KMS Protocol:            SKIP\n")
+		fmt.Printf("Remote System ID:         %s\n", c.SKIPRemoteSystemID)
+	} else {
+		fmt.Printf("KMS Protocol:        ETSI014\n")
+	}
 	fmt.Println("============================")
+
 }
 
 // Parse parses the configuration values from environment variables and returns a Config pointer.
@@ -148,6 +158,10 @@ func Parse() (*Config, error) {
 			return nil, fmt.Errorf("[ERROR] failed to extract port from LISTEN_ADDRESS: %w", err)
 		}
 		config.ArnikaID = port
+	}
+	config.KMSProtocol = strings.ToLower(getEnvOrDefault("KMS_PROTOCOL", ""))
+	if config.KMSProtocol != "" && config.KMSProtocol != "etsi014" && config.KMSProtocol != "skip" {
+		return nil, fmt.Errorf("[ERROR] invalid KMS_PROTOCOL: %s (must be 'etsi014' or 'skip')", config.KMSProtocol)
 	}
 	config.Certificate = getEnvOrDefault("CERTIFICATE", "")
 	config.PrivateKey = getEnvOrDefault("PRIVATE_KEY", "")
@@ -230,7 +244,12 @@ func Parse() (*Config, error) {
 		return nil, fmt.Errorf("[ERROR] failed to parse MAX_CLOCK_SKEW: %w", err)
 	}
 	config.MaxClockSkew = maxClockSkew
+	config.SKIPRemoteSystemID = getEnvOrDefault("SKIP_REMOTE_SYSTEM_ID", "")
+	if config.UsesSKIP() && config.SKIPRemoteSystemID == "" {
+		return nil, fmt.Errorf("[ERROR] Remote system ID is required when selected protocol is SKIP")
+	}
 	return config, nil
+
 }
 
 // GetEnvOrDefault returns the value of the environment variable named by the key.
@@ -266,4 +285,12 @@ func getEnv(key string) (string, error) {
 		return "", fmt.Errorf("[ERROR] failed to get environment variable: %s", key)
 	}
 	return v, nil
+}
+
+func (c *Config) UsesSKIP() bool {
+	return c.KMSProtocol == "skip"
+}
+
+func (c *Config) UsesETSI014() bool {
+	return c.KMSProtocol == "etsi014" || c.KMSProtocol == ""
 }
