@@ -30,7 +30,7 @@ func NewWireguardNetlinkNetnsRepository(interfaceName, peerPublicKey, netnsPath 
 }
 
 func (r *WireguardNetlinkNetnsRepository) InvalidateTunnel() error {
-	psk, err := generatePSK()
+	psk, err := wgtypes.GenerateKey()
 	if err != nil {
 		return err
 	}
@@ -56,8 +56,4 @@ func (r *WireguardNetlinkNetnsRepository) SetPSK(psk string) (err error) {
 		defer func() { _ = delegateRepo.Close() }()
 		return delegateRepo.SetPSK(psk)
 	})
-}
-
-func generatePSK() (wgtypes.Key, error) {
-	return wgtypes.GenerateKey()
 }

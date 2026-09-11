@@ -20,6 +20,7 @@ import (
 
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/kdf"
+	"github.com/arnika-project/arnika/repositories"
 	"github.com/arnika-project/arnika/services"
 )
 
@@ -130,19 +131,37 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 // peers compute the same moment from the clock alone, roughly halfway
 // between one round's publish window and the next, for the widest margin.
 //
-// Only used when no QKD reader is available; with QKD, the peer's key_id
-// message keeps both sides in sync instead.
+// The second grid comes from the PQC scheduler itself (PQCRoundSeconds) rather
+// than from a second rounding rule here. The two must agree exactly: this
+// instant is only in the scheduler's quiet window if both derive the boundary
+// from the same whole seconds, and a peer that landed on a different grid would
+// read a different round's key.
 func nextPQCSetPSKAt(now time.Time, roundInterval, roundTimeout time.Duration) time.Time {
-	secs := int64(roundInterval.Seconds())
-	if secs < 1 {
-		secs = 1
-	}
+	secs := repositories.PQCRoundSeconds(roundInterval)
 	boundary := time.Unix((now.Unix()/secs+1)*secs, 0)
 	quiet := time.Duration(secs)*time.Second - roundTimeout
 	if quiet <= 0 {
 		return boundary
 	}
 	return boundary.Add(quiet / 2)
+}
+
+// runPQCSetPSKLoop installs a PQC-only PSK on every nextPQCSetPSKAt instant,
+// until the process ends. Both peers pick that instant from the clock alone,
+// which is what keeps them on the same PQC key with no message between them;
+// waking on INTERVAL instead could put them on different rounds.
+//
+// due gates each instant and reports whether a PSK is owed, so the caller can
+// log why. A nil due installs on every instant, which is what a binary with no
+// QKD key reader wants.
+func runPQCSetPSKLoop(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, cfg *config.Config, due func() bool) {
+	for {
+		time.Sleep(time.Until(nextPQCSetPSKAt(time.Now(), cfg.PQCRoundInterval, cfg.PQCRoundTimeout)))
+		if due != nil && !due() {
+			continue
+		}
+		setPSK(keyWriter, pqc, nil, cfg, ARNIKALOGPREFIX)
+	}
 }
 
 func main() {
@@ -228,24 +247,22 @@ func main() {
 
 	go udpServer(cfg.ListenAddress, cfg.ArnikaPSK, dirOut, dirIn, result, done, pqcHandle, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
 	if qkdCompiled {
-		// This backup timer only runs for MODE=AtLeastPqcRequired or
-		// EitherQkdOrPqcRequired with PQC_ENABLED=true. It sets its own
-		// PQC-only PSK only after two intervals with no QKD key
-		// (lastQKDPSKAt), so rotation keeps going during a KMS outage
-		// without colliding with the QKD path.
+		// Without this the PSK would stay unchanged for as long as the KMS is
+		// down. After two INTERVALs without a key both peers switch, at the same
+		// moment taken from the wall clock, to a PSK built from the PQC key alone,
+		// and renew it every PQC_ROUND_INTERVAL until the KMS returns. Two and not
+		// one, because one late or lost key often affects only one of the two
+		// peers, and switching on it would leave them with different PSKs.
 		if cfg.UsePQC() && !cfg.IsQKDRequired() {
 			lastQKDPSKAt.Store(time.Now().UnixNano())
-			go func() {
-				for {
-					time.Sleep(time.Until(nextPQCSetPSKAt(time.Now(), cfg.PQCRoundInterval, cfg.PQCRoundTimeout)))
-					if time.Since(time.Unix(0, lastQKDPSKAt.Load())) < 2*interval {
-						continue
-					}
-					log.Printf("[WARNING] %s no QKD key for %s, installing a PQC-only PSK since mode is set to %s",
-						ARNIKALOGPREFIX, 2*interval, cfg.Mode)
-					setPSK(keyWriter, pqc, nil, cfg, ARNIKALOGPREFIX)
+			go runPQCSetPSKLoop(keyWriter, pqc, cfg, func() bool {
+				if time.Since(time.Unix(0, lastQKDPSKAt.Load())) < 2*interval {
+					return false
 				}
-			}()
+				log.Printf("[WARNING] %s no QKD key for %s, installing a PQC-only PSK since mode is set to %s",
+					ARNIKALOGPREFIX, 2*interval, cfg.Mode)
+				return true
+			})
 		}
 		qkd := getQKDService(cfg)
 		go runQKDWorker(done, result, func(r string) {
@@ -336,16 +353,9 @@ func main() {
 		go runQKDWorker(done, result, func(r string) {
 			log.Printf("[WARNING] %s received key_id %s from the peer, but this binary has no QKD key reader", ARNIKALOGPREFIX, r)
 		})
-		// Both peers pick the same moment from the clock (nextPQCSetPSKAt),
-		// keeping them on the same key without ever exchanging a key_id.
-		// Using INTERVAL here instead could put the two peers on different
-		// rounds and break the tunnel.
-		go func() {
-			for {
-				time.Sleep(time.Until(nextPQCSetPSKAt(time.Now(), cfg.PQCRoundInterval, cfg.PQCRoundTimeout)))
-				setPSK(keyWriter, pqc, nil, cfg, ARNIKALOGPREFIX)
-			}
-		}()
+		// The PQC key agreement is the only key source here, so every instant
+		// is due and there is nothing to gate on.
+		go runPQCSetPSKLoop(keyWriter, pqc, cfg, nil)
 	}
 	<-done
 	cfg.ZeroSecrets()
