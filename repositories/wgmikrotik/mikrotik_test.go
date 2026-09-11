@@ -1,4 +1,4 @@
-package repositories
+package wgmikrotik
 
 import (
 	"encoding/base64"

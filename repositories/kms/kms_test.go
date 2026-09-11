@@ -1,4 +1,4 @@
-package repositories
+package kms
 
 import (
 	"errors"

@@ -8,7 +8,7 @@ package main
 
 import (
 	"github.com/arnika-project/arnika/config"
-	"github.com/arnika-project/arnika/repositories"
+	"github.com/arnika-project/arnika/repositories/kms"
 	"github.com/arnika-project/arnika/services"
 )
 
@@ -27,8 +27,8 @@ const qkdCompiled = true
 // Nothing is dialled here, so a KMS that is unreachable or misconfigured
 // surfaces on the first key request rather than at startup.
 func getQKDService(cfg *config.Config) *services.KeyReaderService {
-	kmsAuth := repositories.NewKMSClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
-	kmsRepo := repositories.NewHTTPKMSRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
+	kmsAuth := kms.NewKMSClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
+	kmsRepo := kms.NewHTTPKMSRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
 	var managed services.KeyReaderManaged = kmsRepo
 	return services.NewKeyReaderService(&managed)
 }

@@ -1,4 +1,6 @@
-package repositories
+// Package wgnetlink writes the WireGuard PSK through netlink, optionally
+// inside a network namespace.
+package wgnetlink
 
 import (
 	"fmt"

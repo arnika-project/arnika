@@ -2,7 +2,7 @@
 
 // containernetworking/plugins/pkg/ns is Linux-only, hence we restrict the build.
 
-package repositories
+package wgnetlink
 
 import (
 	"errors"

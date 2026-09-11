@@ -1,4 +1,6 @@
-package repositories
+// Package wgmikrotik writes the WireGuard PSK to a MikroTik RouterOS device
+// through its REST API.
+package wgmikrotik
 
 import (
 	"bytes"

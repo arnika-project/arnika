@@ -12,7 +12,7 @@ import (
 
 	"github.com/arnika-project/arnika/auth"
 	"github.com/arnika-project/arnika/config"
-	"github.com/arnika-project/arnika/repositories"
+	"github.com/arnika-project/arnika/repositories/pqchpke"
 	"github.com/arnika-project/arnika/services"
 )
 
@@ -108,7 +108,7 @@ func getPQCService(cfg *config.Config, dirOut, dirIn auth.Direction) (
 		return cfg.IsPrimary(uint64(round))
 	}
 
-	pqcRepo, err := repositories.NewPQCHPKERepository(
+	pqcRepo, err := pqchpke.NewPQCHPKERepository(
 		PQCHPKELOGPREFIX, send, recv, isInitiator,
 		cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge,
 	)

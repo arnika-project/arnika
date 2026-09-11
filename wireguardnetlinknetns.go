@@ -6,13 +6,13 @@ import (
 	"os"
 
 	"github.com/arnika-project/arnika/config"
-	"github.com/arnika-project/arnika/repositories"
+	"github.com/arnika-project/arnika/repositories/wgnetlink"
 	"github.com/arnika-project/arnika/services"
 )
 
 func getKeyWriterService(cfg *config.Config) (*services.KeyWriterService, error) {
 	netnsPath := os.Getenv("WIREGUARD_NETNS_PATH")
-	wireguardRepo, err := repositories.NewWireguardNetlinkNetnsRepository(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, netnsPath)
+	wireguardRepo, err := wgnetlink.NewWireguardNetlinkNetnsRepository(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, netnsPath)
 	if err != nil {
 		return nil, err
 	}

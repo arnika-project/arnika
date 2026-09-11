@@ -1,4 +1,4 @@
-// Package repositories - pqc-hpke key reader.
+// Package pqchpke is the pqc-hpke key reader.
 //
 // This adapter derives the 32-byte PQC key by running an HPKE (RFC 9180) key
 // agreement directly with the Arnika peer, replacing the reader that took the
@@ -21,7 +21,7 @@
 //  1. frame layer         - splitting and reassembling messages that exceed one datagram
 //  2. HPKE core           - the key agreement itself, plus mandatory key confirmation
 //  3. transport/scheduler - rounds, retries and the KeyReaderUnmanaged surface
-package repositories
+package pqchpke
 
 import (
 	"context"

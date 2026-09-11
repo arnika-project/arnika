@@ -1,5 +1,5 @@
-// Package repositories provides data access implementations for keys and external services.
-package repositories
+// Package kms reads QKD keys from an ETSI GS QKD 014 key management system.
+package kms
 
 import (
 	"crypto/tls"

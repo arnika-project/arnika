@@ -20,7 +20,7 @@ import (
 
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/kdf"
-	"github.com/arnika-project/arnika/repositories"
+	"github.com/arnika-project/arnika/repositories/pqchpke"
 	"github.com/arnika-project/arnika/services"
 )
 
@@ -137,7 +137,7 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 // from the same whole seconds, and a peer that landed on a different grid would
 // read a different round's key.
 func nextPQCSetPSKAt(now time.Time, roundInterval, roundTimeout time.Duration) time.Time {
-	secs := repositories.PQCRoundSeconds(roundInterval)
+	secs := pqchpke.PQCRoundSeconds(roundInterval)
 	boundary := time.Unix((now.Unix()/secs+1)*secs, 0)
 	quiet := time.Duration(secs)*time.Second - roundTimeout
 	if quiet <= 0 {

@@ -8,7 +8,7 @@ import (
 
 	"github.com/arnika-project/arnika/auth"
 	"github.com/arnika-project/arnika/config"
-	"github.com/arnika-project/arnika/repositories"
+	"github.com/arnika-project/arnika/repositories/pqchpke"
 )
 
 // TestPQCAgreementOverRealSockets is the end-to-end test for the wiring, and
@@ -36,7 +36,7 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 
 	// The role is fixed here rather than derived from the PSK, so the test does
 	// not depend on which side IsPrimary happens to elect for this round.
-	start := func(cfg *config.Config, initiator bool) *repositories.PQCHPKERepository {
+	start := func(cfg *config.Config, initiator bool) *pqchpke.PQCHPKERepository {
 		t.Helper()
 		id := 2
 		if !initiator {
@@ -47,7 +47,7 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pqcDial: %v", err)
 		}
-		repo, err := repositories.NewPQCHPKERepository("PQC-HPKE[e2e]", send, recv,
+		repo, err := pqchpke.NewPQCHPKERepository("PQC-HPKE[e2e]", send, recv,
 			func(uint32) bool { return initiator },
 			cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge)
 		if err != nil {
@@ -129,7 +129,7 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 	cfgB := newCfg(addrB, addrA, "3")
 
 	limit := rateBudget(cfgA)
-	start := func(cfg *config.Config, id int) *repositories.PQCHPKERepository {
+	start := func(cfg *config.Config, id int) *pqchpke.PQCHPKERepository {
 		t.Helper()
 		dirOut, dirIn := auth.DirectionFor(id)
 		send, recv, err := pqcDial(cfg, dirOut, dirIn)
@@ -138,7 +138,7 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 		}
 		// The production role derivation, so the two peers alternate initiator
 		// and responder across rounds instead of one side always answering.
-		repo, err := repositories.NewPQCHPKERepository("PQC-HPKE[cadence]", send, recv,
+		repo, err := pqchpke.NewPQCHPKERepository("PQC-HPKE[cadence]", send, recv,
 			func(round uint32) bool { return cfg.IsPrimary(uint64(round)) },
 			cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge)
 		if err != nil {
