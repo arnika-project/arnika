@@ -29,7 +29,7 @@ const (
 	// The responder's reply frames leave the listening socket rather than
 	// arriving on it, and rate limiting applies only to inbound reads, so they
 	// contribute nothing.
-	pqcInboundPerRound = pqchpke.PQCMessageFrames*pqchpke.PQCMaxSendAttempts + 1
+	pqcInboundPerRound = pqchpke.MessageFrames*pqchpke.MaxSendAttempts + 1
 )
 
 // eventsIn is the largest number of events spaced step apart that can fall
@@ -57,7 +57,7 @@ func eventsIn(window, step time.Duration) int {
 func rateBudget(cfg *config.Config) int {
 	n := eventsIn(cfg.RateWindow, cfg.Interval) * qkdInboundPerInterval
 	if cfg.UsePQC() {
-		spacing := time.Duration(pqchpke.PQCRoundSeconds(cfg.PQCRoundInterval)) * time.Second
+		spacing := time.Duration(pqchpke.RoundSeconds(cfg.PQCRoundInterval)) * time.Second
 		// One round on top of the scheduled boundaries: Run serves the current
 		// index immediately at startup, before the first boundary.
 		n += (eventsIn(cfg.RateWindow, spacing) + 1) * pqcInboundPerRound

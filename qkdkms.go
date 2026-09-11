@@ -19,7 +19,7 @@ const qkdCompiled = true
 
 // getQKDService wires the kms key reader against the KMS named by KMS_URL.
 //
-// Client-certificate authentication is all-or-nothing: NewKMSClientCertificateAuth
+// Client-certificate authentication is all-or-nothing: NewClientCertificateAuth
 // returns nil unless CERTIFICATE, PRIVATE_KEY and CA_CERTIFICATE are all set,
 // and the repository then falls back to a plain HTTPS client that validates
 // the KMS against the system roots.
@@ -27,8 +27,8 @@ const qkdCompiled = true
 // Nothing is dialled here, so a KMS that is unreachable or misconfigured
 // surfaces on the first key request rather than at startup.
 func getQKDService(cfg *config.Config) *services.KeyReaderService {
-	kmsAuth := kms.NewKMSClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
-	kmsRepo := kms.NewHTTPKMSRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
+	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
+	kmsRepo := kms.NewRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
 	var managed services.KeyReaderManaged = kmsRepo
 	return services.NewKeyReaderService(&managed)
 }

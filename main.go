@@ -131,13 +131,13 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 // peers compute the same moment from the clock alone, roughly halfway
 // between one round's publish window and the next, for the widest margin.
 //
-// The second grid comes from the PQC scheduler itself (PQCRoundSeconds) rather
+// The second grid comes from the PQC scheduler itself (RoundSeconds) rather
 // than from a second rounding rule here. The two must agree exactly: this
 // instant is only in the scheduler's quiet window if both derive the boundary
 // from the same whole seconds, and a peer that landed on a different grid would
 // read a different round's key.
 func nextPQCSetPSKAt(now time.Time, roundInterval, roundTimeout time.Duration) time.Time {
-	secs := pqchpke.PQCRoundSeconds(roundInterval)
+	secs := pqchpke.RoundSeconds(roundInterval)
 	boundary := time.Unix((now.Unix()/secs+1)*secs, 0)
 	quiet := time.Duration(secs)*time.Second - roundTimeout
 	if quiet <= 0 {

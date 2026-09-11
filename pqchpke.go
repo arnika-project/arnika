@@ -108,7 +108,7 @@ func getPQCService(cfg *config.Config, dirOut, dirIn auth.Direction) (
 		return cfg.IsPrimary(uint64(round))
 	}
 
-	pqcRepo, err := pqchpke.NewPQCHPKERepository(
+	pqcRepo, err := pqchpke.NewRepository(
 		PQCHPKELOGPREFIX, send, recv, isInitiator,
 		cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge,
 	)

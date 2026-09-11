@@ -9,25 +9,25 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-type WireguardNetlinkRepository struct {
+type Repository struct {
 	InterfaceName string
 	PeerPublicKey string
 	conn          *wgctrl.Client
 }
 
-func NewWireguardNetlinkRepository(interfaceName, peerPublicKey string) (*WireguardNetlinkRepository, error) {
+func NewRepository(interfaceName, peerPublicKey string) (*Repository, error) {
 	client, err := wgctrl.New()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WireGuard client: %w", err)
 	}
-	return &WireguardNetlinkRepository{
+	return &Repository{
 		InterfaceName: interfaceName,
 		PeerPublicKey: peerPublicKey,
 		conn:          client,
 	}, nil
 }
 
-func (r *WireguardNetlinkRepository) InvalidateTunnel() error {
+func (r *Repository) InvalidateTunnel() error {
 	psk, err := wgtypes.GenerateKey()
 	if err != nil {
 		return err
@@ -35,7 +35,7 @@ func (r *WireguardNetlinkRepository) InvalidateTunnel() error {
 	return r.SetPSK(psk.String())
 }
 
-func (r *WireguardNetlinkRepository) SetPSK(psk string) error {
+func (r *Repository) SetPSK(psk string) error {
 	// Verify the specified interface exists
 	peers, err := r.conn.Device(r.InterfaceName)
 	if err != nil {
@@ -73,6 +73,6 @@ func (r *WireguardNetlinkRepository) SetPSK(psk string) error {
 	return r.conn.ConfigureDevice(r.InterfaceName, wgtypes.Config{Peers: []wgtypes.PeerConfig{peer}})
 }
 
-func (r *WireguardNetlinkRepository) Close() error {
+func (r *Repository) Close() error {
 	return r.conn.Close()
 }

@@ -435,13 +435,13 @@ func mustNotInitiate() (func([]byte) error, func(time.Time) ([]byte, error)) {
 		}
 }
 
-func newPQCTestRepo(t *testing.T, interval, timeout, maxAge time.Duration) *PQCHPKERepository {
+func newPQCTestRepo(t *testing.T, interval, timeout, maxAge time.Duration) *Repository {
 	t.Helper()
 	send, recv := mustNotInitiate()
-	r, err := NewPQCHPKERepository("PQC-HPKE[test]", send, recv,
+	r, err := NewRepository("PQC-HPKE[test]", send, recv,
 		func(uint32) bool { return false }, interval, timeout, maxAge)
 	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
+		t.Fatalf("NewRepository: %v", err)
 	}
 	return r
 }
@@ -451,7 +451,7 @@ func newPQCTestRepo(t *testing.T, interval, timeout, maxAge time.Duration) *PQCH
 // socket does; the responder is driven by a single pump goroutine calling
 // HandleFrame, as the UDP read loop does, and answers through reply.
 type pqcPipe struct {
-	initiator, responder *PQCHPKERepository
+	initiator, responder *Repository
 
 	mu      sync.Mutex
 	sent    []pqcFrame // every frame handed to the transport, dropped or not
@@ -535,18 +535,18 @@ func newPQCPipeWith(t *testing.T, drop func(fromInitiator bool, f pqcFrame) bool
 		}
 	}
 
-	initiator, err := NewPQCHPKERepository("PQC-HPKE[init]",
+	initiator, err := NewRepository("PQC-HPKE[init]",
 		deliver(toResponder, true), recv(toInitiator),
 		func(uint32) bool { return true }, interval, timeout, 2*interval)
 	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
+		t.Fatalf("NewRepository: %v", err)
 	}
 	// The responder never initiates, so its own channel must stay unused.
 	send, recvUnused := mustNotInitiate()
-	responder, err := NewPQCHPKERepository("PQC-HPKE[resp]", send, recvUnused,
+	responder, err := NewRepository("PQC-HPKE[resp]", send, recvUnused,
 		func(uint32) bool { return false }, interval, timeout, 2*interval)
 	if err != nil {
-		t.Fatalf("NewPQCHPKERepository: %v", err)
+		t.Fatalf("NewRepository: %v", err)
 	}
 	p.initiator, p.responder = initiator, responder
 
@@ -606,7 +606,7 @@ func (p *pqcPipe) framesSent() []pqcFrame {
 func (p *pqcPipe) settle() { time.Sleep(200 * time.Millisecond) }
 
 // waitPublished polls until a key is available or the budget runs out.
-func waitPublished(r *PQCHPKERepository, wait time.Duration) ([]byte, error) {
+func waitPublished(r *Repository, wait time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(wait)
 	for {
 		key, err := r.GetNewKey()
@@ -1002,7 +1002,7 @@ func TestPQCConstructorValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewPQCHPKERepository("", tc.send, tc.recv, tc.role,
+			if _, err := NewRepository("", tc.send, tc.recv, tc.role,
 				tc.interval, tc.timeout, tc.maxAge); err == nil {
 				t.Fatal("expected a constructor error")
 			}
@@ -1336,7 +1336,7 @@ func TestPQCPublishKeepsTheNewerRound(t *testing.T) {
 
 // staleRepo is a repository whose keys go stale in staleAfter, so a test can
 // reach the stale branch of publish without waiting out a real maxAge.
-func staleRepo(t *testing.T, staleAfter time.Duration) *PQCHPKERepository {
+func staleRepo(t *testing.T, staleAfter time.Duration) *Repository {
 	t.Helper()
 	// maxAge must exceed the round interval, so both scale down together.
 	return newPQCTestRepo(t, staleAfter/5, staleAfter/10, staleAfter)

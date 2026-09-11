@@ -22,11 +22,11 @@ const peersPath = "/rest/interface/wireguard/peers"
 // and filtering client-side. See docs/wireguard-mikrotik.md.
 const peersPrintPath = peersPath + "/print"
 
-// WireguardMikrotikRepository provisions the WireGuard PSK onto a remote
+// Repository provisions the WireGuard PSK onto a remote
 // MikroTik RouterOS device through its REST API (RouterOS v7+). It implements
-// the same keyWriterRepository contract as WireguardNetlinkRepository, so it is
+// the same keyWriterRepository contract as Repository, so it is
 // selected via the wireguard_mikrotik build tag without any change to main.go.
-type WireguardMikrotikRepository struct {
+type Repository struct {
 	baseURL       string // RouterOS base URL, e.g. https://192.168.88.1 (no trailing /rest)
 	username      string
 	password      string
@@ -43,12 +43,12 @@ type mikrotikPeer struct {
 	PublicKey string `json:"public-key"`
 }
 
-// NewWireguardMikrotikRepository builds a repository targeting the RouterOS REST
+// NewRepository builds a repository targeting the RouterOS REST
 // API at baseURL. The caller supplies the HTTP client so that TLS trust
 // (system roots, a pinned CA, or an explicit insecure opt-in) is configured
 // once, at the wiring layer, alongside the rest of the transport concerns.
-func NewWireguardMikrotikRepository(baseURL, username, password, interfaceName, peerPublicKey string, client *http.Client) *WireguardMikrotikRepository {
-	return &WireguardMikrotikRepository{
+func NewRepository(baseURL, username, password, interfaceName, peerPublicKey string, client *http.Client) *Repository {
+	return &Repository{
 		baseURL:       strings.TrimRight(baseURL, "/"),
 		username:      username,
 		password:      password,
@@ -60,7 +60,7 @@ func NewWireguardMikrotikRepository(baseURL, username, password, interfaceName, 
 
 // InvalidateTunnel sets a fresh random PSK on the peer, tearing down the current
 // WireGuard session. Used as a fail-safe when no valid key material is available.
-func (r *WireguardMikrotikRepository) InvalidateTunnel() error {
+func (r *Repository) InvalidateTunnel() error {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return fmt.Errorf("failed to generate random PSK: %w", err)
@@ -71,7 +71,7 @@ func (r *WireguardMikrotikRepository) InvalidateTunnel() error {
 // SetPSK resolves the configured peer on the router and updates its
 // preshared-key. The peer is re-resolved on every call so the writer stays
 // correct across RouterOS restarts that may reassign internal ids.
-func (r *WireguardMikrotikRepository) SetPSK(psk string) error {
+func (r *Repository) SetPSK(psk string) error {
 	id, err := r.findPeerID()
 	if err != nil {
 		return err
@@ -93,7 +93,7 @@ func (r *WireguardMikrotikRepository) SetPSK(psk string) error {
 // `[find public-key=...]`), so only the matching peer is returned rather than
 // the entire peers table. The interface is verified on the returned peer,
 // guarding against the rare case of the same public key on multiple interfaces.
-func (r *WireguardMikrotikRepository) findPeerID() (string, error) {
+func (r *Repository) findPeerID() (string, error) {
 	query, err := json.Marshal(map[string]any{
 		".proplist": []string{".id", "interface", "public-key"},
 		".query":    []string{"public-key=" + r.peerPublicKey},
@@ -121,7 +121,7 @@ func (r *WireguardMikrotikRepository) findPeerID() (string, error) {
 
 // do issues an authenticated JSON request to the RouterOS REST API and returns
 // the response for any 2xx status, converting non-2xx responses into errors.
-func (r *WireguardMikrotikRepository) do(method, path string, body io.Reader) (*http.Response, error) {
+func (r *Repository) do(method, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(method, r.baseURL+path, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build RouterOS request: %w", err)

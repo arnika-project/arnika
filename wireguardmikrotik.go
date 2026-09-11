@@ -68,7 +68,7 @@ func getKeyWriterService(cfg *config.Config) (*services.KeyWriterService, error)
 		},
 	}
 
-	repo := wgmikrotik.NewWireguardMikrotikRepository(
+	repo := wgmikrotik.NewRepository(
 		baseURL,
 		username,
 		password,

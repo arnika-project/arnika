@@ -12,24 +12,24 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-type WireguardNetlinkNetnsRepository struct {
+type NetnsRepository struct {
 	ifaceName     string
 	peerPublicKey string
 	netnsPath     string
 }
 
-func NewWireguardNetlinkNetnsRepository(interfaceName, peerPublicKey, netnsPath string) (*WireguardNetlinkNetnsRepository, error) {
+func NewNetnsRepository(interfaceName, peerPublicKey, netnsPath string) (*NetnsRepository, error) {
 	if netnsPath == "" {
 		return nil, errors.New("WIREGUARD_NETNS_PATH must be set")
 	}
-	return &WireguardNetlinkNetnsRepository{
+	return &NetnsRepository{
 		ifaceName:     interfaceName,
 		peerPublicKey: peerPublicKey,
 		netnsPath:     netnsPath,
 	}, nil
 }
 
-func (r *WireguardNetlinkNetnsRepository) InvalidateTunnel() error {
+func (r *NetnsRepository) InvalidateTunnel() error {
 	psk, err := wgtypes.GenerateKey()
 	if err != nil {
 		return err
@@ -37,7 +37,7 @@ func (r *WireguardNetlinkNetnsRepository) InvalidateTunnel() error {
 	return r.SetPSK(psk.String())
 }
 
-func (r *WireguardNetlinkNetnsRepository) SetPSK(psk string) (err error) {
+func (r *NetnsRepository) SetPSK(psk string) (err error) {
 	targetNS, err := ns.GetNS(r.netnsPath)
 	if err != nil {
 		return fmt.Errorf("failed to open network namespace %s: %w", r.netnsPath, err)
@@ -49,7 +49,7 @@ func (r *WireguardNetlinkNetnsRepository) SetPSK(psk string) (err error) {
 	}()
 
 	return targetNS.Do(func(_ ns.NetNS) error {
-		delegateRepo, err := NewWireguardNetlinkRepository(r.ifaceName, r.peerPublicKey)
+		delegateRepo, err := NewRepository(r.ifaceName, r.peerPublicKey)
 		if err != nil {
 			return fmt.Errorf("failed to create netlink repository in namespace %s: %w", r.netnsPath, err)
 		}

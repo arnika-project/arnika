@@ -10,17 +10,10 @@ import (
 	"time"
 )
 
-// newKMSTestRepo builds an HTTPKMSRepository against a test server without
-// going through NewHTTPKMSRepository, which calls log.Fatal on certificate
-// problems.
-//
-// Named for the repository it builds rather than `newTestRepo`, because
-// repositories/ now holds more than one kind: wireguard-mikrotik_test.go
-// declares its own helper of that name returning a
-// WireguardMikrotikRepository, and two cannot coexist in one package. Keeping
-// the type in the name leaves room for the next key writer.
-func newKMSTestRepo(baseURL string, maxRetries int) *HTTPKMSRepository {
-	return &HTTPKMSRepository{
+// newTestRepo builds a Repository against a test server without going through
+// NewRepository, which calls log.Fatal on certificate problems.
+func newTestRepo(baseURL string, maxRetries int) *Repository {
+	return &Repository{
 		baseURL:          baseURL,
 		maxRetries:       maxRetries,
 		backoffBaseDelay: time.Millisecond,
@@ -68,7 +61,7 @@ func TestKMSRequestNonOKDoesNotReadClosedBody(t *testing.T) {
 				srv := busyKMS(status)
 				defer srv.Close()
 
-				_, _, err := newKMSTestRepo(srv.URL, retries).kmsRequest("/enc_keys")
+				_, _, err := newTestRepo(srv.URL, retries).kmsRequest("/enc_keys")
 				if err == nil {
 					t.Fatal("expected an error when the KMS never returns 200")
 				}
@@ -87,7 +80,7 @@ func TestKMSRequestReportsAnExhaustedRetryLoop(t *testing.T) {
 	srv := busyKMS(http.StatusServiceUnavailable)
 	defer srv.Close()
 
-	_, _, err := newKMSTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
+	_, _, err := newTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -102,7 +95,7 @@ func TestKMSRequestSucceedsOnOK(t *testing.T) {
 	srv := okKMS()
 	defer srv.Close()
 
-	id, key, err := newKMSTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
+	id, key, err := newTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,7 +123,7 @@ func TestKMSRequestRetriesUntilTheKMSRecovers(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, _, err := newKMSTestRepo(srv.URL, 3).kmsRequest("/enc_keys")
+	id, _, err := newTestRepo(srv.URL, 3).kmsRequest("/enc_keys")
 	if err != nil {
 		t.Fatalf("expected recovery on the third attempt, got: %v", err)
 	}
@@ -148,7 +141,7 @@ func TestKMSRequestReportsATransportError(t *testing.T) {
 	url := srv.URL
 	srv.Close() // nothing is listening now
 
-	_, _, err := newKMSTestRepo(url, 0).kmsRequest("/enc_keys")
+	_, _, err := newTestRepo(url, 0).kmsRequest("/enc_keys")
 	if err == nil {
 		t.Fatal("expected a transport error")
 	}
@@ -156,7 +149,7 @@ func TestKMSRequestReportsATransportError(t *testing.T) {
 	// transport failure is NOT the exhausted-retry case, and asking that
 	// question of the sentinel says so directly -- where matching on wording
 	// only holds until someone rephrases the message.
-	if errors.Is(err, ErrKMSUnavailable) {
+	if errors.Is(err, ErrUnavailable) {
 		t.Errorf("a transport error was reported as a status problem: %v", err)
 	}
 }
@@ -177,7 +170,7 @@ func TestKMSRequestKeepsTheObservedStatus(t *testing.T) {
 		http.StatusNotFound,           // permanent: wrong SAE path in KMS_URL
 	} {
 		srv := busyKMS(code)
-		_, _, err := newKMSTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
+		_, _, err := newTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
 		srv.Close()
 
 		if err == nil {
@@ -197,9 +190,9 @@ func TestExhaustedRetriesAreIdentifiableWithoutStringMatching(t *testing.T) {
 	srv := busyKMS(http.StatusServiceUnavailable)
 	defer srv.Close()
 
-	_, _, err := newKMSTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
-	if !errors.Is(err, ErrKMSUnavailable) {
-		t.Errorf("errors.Is(err, ErrKMSUnavailable) is false, so a caller can "+
+	_, _, err := newTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
+	if !errors.Is(err, ErrUnavailable) {
+		t.Errorf("errors.Is(err, ErrUnavailable) is false, so a caller can "+
 			"only tell by reading the message: %v", err)
 	}
 }
@@ -214,7 +207,7 @@ func TestTheErrorLeaksNeitherBodyNorPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := newKMSTestRepo(srv.URL, 0).kmsRequest("/dec_keys?key_ID=SECRET-KEY-ID")
+	_, _, err := newTestRepo(srv.URL, 0).kmsRequest("/dec_keys?key_ID=SECRET-KEY-ID")
 	if err == nil {
 		t.Fatal("expected an error")
 	}

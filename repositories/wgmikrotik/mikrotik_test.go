@@ -84,10 +84,10 @@ func (f *fakeRouterOS) handler(t *testing.T) http.HandlerFunc {
 	}
 }
 
-func newTestRepo(t *testing.T, fake *fakeRouterOS) (*WireguardMikrotikRepository, *httptest.Server) {
+func newTestRepo(t *testing.T, fake *fakeRouterOS) (*Repository, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(fake.handler(t))
-	repo := NewWireguardMikrotikRepository(srv.URL, testMikrotikUser, testMikrotikPass, testMikrotikIface, testMikrotikPeerKey, srv.Client())
+	repo := NewRepository(srv.URL, testMikrotikUser, testMikrotikPass, testMikrotikIface, testMikrotikPeerKey, srv.Client())
 	return repo, srv
 }
 

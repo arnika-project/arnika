@@ -12,7 +12,7 @@ import (
 
 func getKeyWriterService(cfg *config.Config) (*services.KeyWriterService, error) {
 	netnsPath := os.Getenv("WIREGUARD_NETNS_PATH")
-	wireguardRepo, err := wgnetlink.NewWireguardNetlinkNetnsRepository(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, netnsPath)
+	wireguardRepo, err := wgnetlink.NewNetnsRepository(cfg.WireGuardInterface, cfg.WireguardPeerPublicKey, netnsPath)
 	if err != nil {
 		return nil, err
 	}
