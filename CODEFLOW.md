@@ -37,62 +37,74 @@ sequenceDiagram
 ## Step-by-Step Code Flow
 
 ### 1. **Role Calculation**
+
 - **Where:** `config/config.go` (`IsPrimary()` method)
 - **What:** Both nodes deterministically calculate their role (PRIMARY or BACKUP) for the current interval as `HMAC-SHA256(ARNIKA_PSK, intervalNumber)` XOR `ARNIKA_ID`, taking the lowest bit.
 - **Why:** Ensures only one node acts as PRIMARY per interval, preventing race conditions.
 - **Requires:** the same `ARNIKA_PSK` and the same `INTERVAL` on both peers, and `ARNIKA_ID` values of **different parity** — only the lowest bit of the ID enters the calculation, so two even or two odd IDs give both nodes the same role in every interval.
 
 ### 2. **PRIMARY Requests Key from KMS**
+
 - **Where:** `main.go`, via `services.KeyReaderService` (`repositories/kms.go`)
 - **What:** PRIMARY node requests a new key from the Key Management Server (KMS).
 - **Why:** Only PRIMARY initiates key rotation.
 
 ### 3. **KMS Returns Key**
+
 - **Where:** `repositories/kms.go`
 - **What:** KMS responds with the new key.
 - **Why:** PRIMARY needs the key to start the exchange.
 
 ### 4. **PRIMARY Sends DATA Packet**
+
 - **Where:** `auth/auth.go` (`PacketData`, `Encrypt`, `Packet.Marshal`)
 - **What:** PRIMARY encrypts the key ID with AES-256-GCM, signs the packet with HMAC-SHA256, and sends it to BACKUP.
 - **Why:** Single roundtrip — securely transmits key material in one step.
 
 ### 5. **BACKUP Verifies DATA, Decrypts Key**
+
 - **Where:** `auth/auth.go` (`UnmarshalPacket`, `Verify`, `Decrypt`)
 - **What:** BACKUP checks rate limit, verifies HMAC signature, checks timestamp, then decrypts the payload.
 - **Why:** Layered security — cheapest checks first, expensive decryption only after authentication passes.
 
 ### 5a. **A Failing Key Source Reaches `MODE`**
-- **Where:** `main.go` (`installOnQKDFailure`, `setPSK`)
+
+- **Where:** `main.go` (`shouldSetPSKOnQKDFailure`, `setPSK`)
 - **What:** Every path on which the QKD key does not arrive is handed to `setPSK` with a nil QKD key so `MODE` decides: invalidate the tunnel where QKD is mandatory, carry on from the PQC key where it is optional. That covers the PRIMARY's KMS request failing, an empty `key_id`, a failing lookup by `key_id`, and a **BACKUP interval that ends without a `key_id` from the peer** - checked once at the end of the interval, which is why the `skip` signal has exactly one consumer per interval.
-- **Why:** These paths used to return to the interval ticker instead, which left the whole fallback and fail-closed logic in `setPSK` unreachable and the superseded PSK installed. In a QKD-optional mode the local tick deliberately does *not* install: the PQC-only installer owns the PSK there, on the instant both peers derive from the wall clock (`nextPQCInstall`), because installing on a local tick as well put the two peers on different keys.
+- **Why:** These paths used to return to the interval ticker instead, which left the whole fallback and fail-closed logic in `setPSK` unreachable and the superseded PSK installed. In a QKD-optional mode the local tick deliberately does *not* set a new PSK: a separate backup timer owns the PSK there, on the instant both peers derive from the wall clock (`nextPQCSetPSKAt`), because setting one on a local tick as well put the two peers on different keys. This relies on both peers' clocks being synchronized closely enough (see "PQC Key Agreement Round" below).
 
 ### 6. **BACKUP Enqueues the Key ID**
+
 - **Where:** `udpserver.go` (`qkdQueueDepth`), `main.go` (`result` channel)
 - **What:** The read loop hands the decrypted key ID to a bounded queue with a non-blocking send. A full queue leaves the identifier unacknowledged, logs a throttled warning without key material, and lets the sender retry.
 - **Why:** The worker below performs the KMS request and the key-writer operation synchronously. A blocking hand-off stalled the read loop for the length of a KMS outage, and with it every PQC frame arriving on the same socket - far longer than `PQC_ROUND_TIMEOUT`. The queue is bounded because unbounded buffering would only accumulate identifiers whose keys are superseded by the time they are served.
 
 ### 7. **BACKUP Sends ACK Packet**
+
 - **Where:** `auth/auth.go` (`PacketAck`, `Packet.Marshal`)
 - **What:** BACKUP sends an ACK to PRIMARY, **only after** the enqueue in step 6 succeeded.
 - **Why:** The ACK is the sender's only signal that it need not retry, so it has to reflect in-process acceptance rather than a successful decryption. Acknowledging first would discard an identifier the peer believes was taken.
 
 ### 8. **PRIMARY Verifies ACK**
+
 - **Where:** `auth/auth.go` (`UnmarshalPacket`, `Verify`)
 - **What:** PRIMARY checks the ACK packet.
 - **Why:** Ensures BACKUP accepted the key ID.
 
 ### 9. **Worker Requests Key from KMS**
+
 - **Where:** `udpserver.go` (`runQKDWorker`), `main.go`, `repositories/kms.go`
 - **What:** One worker drains the queue and requests the key from KMS using the key ID.
 - **Why:** Ensures both nodes have the same key. One worker and not a pool: the channel is FIFO, so a single consumer is what keeps the PSK writes in the order the peer sent the identifiers. It returns on the server's `done` channel, so it cannot outlive the listener.
 
 ### 10. **KMS Returns Key**
+
 - **Where:** `repositories/kms.go`
 - **What:** KMS responds with the key.
 - **Why:** Synchronizes key material.
 
 ### 11. **Both Set New Key in WireGuard**
+
 - **Where:** `main.go` (`setPSK`), via `services.KeyWriterService` and the selected key writer adapter (`repositories/wireguard-*.go`)
 - **What:** Both nodes update their WireGuard PSK. In hybrid mode the QKD key is first combined with the PQC key via `kdf.DeriveKey` (HKDF-SHA3-256).
 - **Why:** Secure VPN communication.
@@ -119,12 +131,14 @@ independent of the QKD flow above: `setPSK()` simply consumes whichever key is
 current.
 
 In a binary built with `qkd_none` this exchange is the *only* key source: there
-is no `key_id` message and no PRIMARY/BACKUP alternation. `main()` installs the
+is no `key_id` message and no PRIMARY/BACKUP alternation. `main()` sets the
 PSK once per round, at the midpoint of the window in which `Run` never
-publishes, which is `nextPQCInstall`. Both peers derive that instant from the
-wall clock, so unlike the QKD rekey instant it is the same on both sides and
-cannot straddle a publish. See [`KEYCONTROL.md`](KEYCONTROL.md) for the reader
-build tags.
+publishes, which is `nextPQCSetPSKAt`. Both peers derive that instant from the
+wall clock alone, with no message between them to confirm it, so unlike the
+QKD rekey instant it is the same on both sides only if their clocks are kept
+in sync (see [INSTALL.md](INSTALL.md) for NTP setup); a clock drifting too
+far apart can shift a peer onto a different round or have it straddle a
+publish. See [`KEYCONTROL.md`](KEYCONTROL.md) for the reader build tags.
 
 Three messages, two round trips, in the same send-and-wait-for-the-reply shape
 `udpClient` uses for the key id. The initiator owns the schedule, the retries and

@@ -11,7 +11,7 @@ Arnika installs the derived PSK through a **key writer** adapter. Two are shippe
 (see [`KEYCONTROL.md`](KEYCONTROL.md)), and they have different security boundaries:
 
 | Key writer | Build tag | How the PSK reaches WireGuard | Security boundary |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | netlink (default) | _(none)_ / `wireguard_netlink` | Local kernel WireGuard interface via Generic Netlink (`NETLINK_GENERIC`) using `wgctrl` | Kernel Netlink socket, `CAP_NET_ADMIN` |
 | MikroTik | `wireguard_mikrotik` | REST API call to a remote RouterOS router over HTTPS | Authenticated TLS session to the router |
 
@@ -32,8 +32,8 @@ We take security very seriously and encourage responsible disclosure from the co
 Only the latest stable release receives security fixes. Please ensure you are running the latest
 release before reporting a vulnerability.
 
-| Version       | Supported          |
-|---------------|--------------------|
+| Version       | Supported           |
+|---------------|---------------------|
 | latest (main) | ✅ Yes              |
 | v1.x          | ✅ Yes              |
 | < v1.x        | ❌ No               |
@@ -133,7 +133,6 @@ AES-256-GCM payload, see [`CODEFLOW.md`](CODEFLOW.md)):
   rate limiting (`RATE_LIMIT`, `RATE_WINDOW`)
 - Any leakage of `ARNIKA_PSK`, or a code path that accepts packets that fail verification
 
-
 ### Dependencies
 
 - Vulnerabilities in Go modules: `golang.zx2c4.com/wireguard/wgctrl`,
@@ -204,7 +203,7 @@ Key implications for security:
   a container without `CAP_IPC_LOCK` logs a warning and keeps running, so **check the startup log**
   if these guarantees matter to your deployment.
 - **Swap protection needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`.** A finite `RLIMIT_MEMLOCK`
-  does not work and cannot be tuned around: the limit is charged against locked *address space*,
+  does not work and cannot be tuned around: the limit is charged against locked _address space_,
   and the Go runtime reserves roughly 1.2 GB of heap arena, so `mlockall` returns `ENOMEM` for
   anything short of unlimited. Verified in a container on `golang:1.27`: `VmLck` 1261164 kB with
   `CAP_IPC_LOCK`, `ENOMEM` without it even at a 1 GiB limit. A refused lock is safe, not merely
@@ -249,7 +248,7 @@ Which peer requests a new key in a given interval is decided locally by
 
 - **The two peers' `ARNIKA_ID` values MUST have different parity** — one odd, one even. Only the
   lowest bit of `ARNIKA_ID` enters the decision, so two peers with different but same-parity IDs
-  (e.g. `100` and `102`) elect the *same* role in every interval, and both or neither will rotate.
+  (e.g. `100` and `102`) elect the _same_ role in every interval, and both or neither will rotate.
 - **`ARNIKA_ID` defaults to the port from `LISTEN_ADDRESS`.** If both peers listen on the same
   port, they inherit the same ID and role election never separates them. Set it explicitly.
 - **Both peers MUST use the same `INTERVAL`.** The election is only guaranteed to produce opposite
@@ -265,7 +264,7 @@ connection and for nothing else — in particular they do not protect the inter-
 They are **all-or-nothing**: if any one of them is empty, client-certificate authentication is
 silently disabled and the KMS connection falls back to server-only validation against the system
 root store (TLS 1.2 minimum). Where the KMS requires mutual TLS, configure all three, keep the
-private key `0600` and owned by the Arnika user, and note that `CA_CERTIFICATE` then *replaces*
+private key `0600` and owned by the Arnika user, and note that `CA_CERTIFICATE` then _replaces_
 the system roots for that connection.
 
 A deployment that believes it is using mutual TLS towards the KMS while one of the three variables
@@ -305,12 +304,12 @@ What replaces it, and what to watch:
   the QKD key-id exchange already depends on, so the PQC path is no weaker than the path beside
   it — but it is not stronger either.
 - **Key confirmation is load-bearing and must not be removed.** FIPS 203 ML-KEM decapsulation
-  never fails: a malformed encapsulation yields a *pseudorandom* shared secret rather than an
+  never fails: a malformed encapsulation yields a _pseudorandom_ shared secret rather than an
   error. Without the mandatory confirmation exchange the two peers would hold different keys
   silently, poisoning the WireGuard PSK an interval later. Any change that weakens or skips it is
   a high-severity finding.
 - **Quantum confidentiality rests on ML-KEM-1024 alone.** The P-384 half falls to Shor; it is
-  there to cover an ML-KEM *implementation* flaw exploited classically (the KyberSlash/Clangover
+  there to cover an ML-KEM _implementation_ flaw exploited classically (the KyberSlash/Clangover
   scenario), and to satisfy the hybrid requirement in the German and EU positions. QKD, when
   present, is the only non-computational hedge.
 - **No new listener.** PQC frames ride the existing port as one additional packet type; outbound
@@ -337,8 +336,8 @@ Passive classification is a different matter. The envelope's type byte and 8-byt
 are authenticated but **not encrypted**, so deep packet inspection can
 still recognise Arnika traffic and distinguish its packet types. WireGuard has the same property
 with its cleartext message-type byte. The PQC agreement adds one new type value and a short burst
-of larger datagrams once per interval. Claims about this port should say *unscannable*, not
-*unfingerprintable*.
+of larger datagrams once per interval. Claims about this port should say _unscannable_, not
+_unfingerprintable_.
 
 ---
 

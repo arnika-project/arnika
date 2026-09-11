@@ -59,7 +59,7 @@ not working), starts the simulator, and then runs a peer pair in each of the
 three operational modes in turn:
 
 | `MODE` | Mode | Key sources |
-|---|---|---|
+| --- | --- | --- |
 | `QkdAndPqcRequired` | (C) hybrid | both mandatory, no fallback |
 | `AtLeastQkdRequired` | (A) QKD | QKD mandatory, PQC mixed in |
 | `AtLeastPqcRequired` | (B) PQC | PQC mandatory, QKD optional |
@@ -111,7 +111,7 @@ Lines from all three are merged in timestamp order, prefixed by peer, and set
 in a **gutter of their own** so a block of log output can never be read as part
 of a result. A blank line goes in wherever the output changes kind:
 
-```
+```text
   ─── cycle 1/3 ─────────────────────────────────
 
     │ kms| 2026/09/08 10:00:01 [DEBUG] [REQ] method=POST path=/api/v1/keys/CONSA/enc_keys
@@ -140,7 +140,7 @@ timeouts, dropped PQC frames — are unconditional and need no flag.
 Either way they are written to files, and each mode ends with a count per log so
 an anomaly is visible at a glance:
 
-```
+```text
 ==> MODE=QkdAndPqcRequired log summary
           peer a[9998]: 7 PQC exchanges, 6 PSK writes, 0 debug lines, 0 warnings/errors
           peer b[9999]: 7 PQC exchanges, 6 PSK writes, 0 debug lines, 0 warnings/errors
@@ -157,7 +157,7 @@ message actually observed for a test that ran, its declared description for one
 that did not. A failed pre-test prints it too, before it stops the run, which is
 when the `SKIP` lines say the most:
 
-```
+```text
 ─── summary ──────────────────────────
 
   1  setup
@@ -239,15 +239,15 @@ Two conventions run through it:
 under a heading naming the device, its profile and its `ARNIKA_ID`, because the
 dump itself carries no name:
 
-```
+```text
           wg dump utun23 (profile qcicat1, ARNIKA_ID 9998):
-          PRIVKEY=	PUBKEY=	41194	off
-          PEERKEY=	(none)	127.0.0.1:41195	100.1.2.2/32,100.1.2.3/32	1788813930	92	180	10
+          PRIVKEY= PUBKEY= 41194 off
+          PEERKEY= (none) 127.0.0.1:41195 100.1.2.2/32,100.1.2.3/32 1788813930 92 180 10
 ```
 
 The run closes with a ruled verdict, so it is not lost in the scrollback:
 
-```
+```text
 ══════════════════════════════════════════════════════════════════════
   PASS - all checks passed
 ══════════════════════════════════════════════════════════════════════
@@ -266,7 +266,7 @@ tunnel route and the send fails outright with `No route to host`.)
 Two things fix it. `qcicat1.conf` carries a **probe address** that belongs to no
 interface, so the tunnel route is the only match for it:
 
-```
+```text
 AllowedIPs = 100.1.2.2/32, 100.1.2.3/32, fdac::2/128
 ```
 
@@ -282,7 +282,7 @@ Four 1000-byte pings, so both must grow by more than 2 KB — well clear of the
 32-byte keepalives moving in the same window. Nothing owns the probe address,
 so there is no reply and nothing to print; one line comes out:
 
-```
+```text
     PASS  traffic traversed the tunnel: utun23 tx +4304 B, utun24 rx +4304 B
 ```
 
@@ -324,8 +324,8 @@ The contract under test, from `IsQKDRequired` / `IsPQCRequired` in
 [`main.go`](../../main.go):
 
 | `MODE` | PQC | QKD | PSK `setPSK` installs | Invalidates with a random PSK |
-|---|---|---|---|---|
-| `QkdAndPqcRequired` _(default)_ | must | must | `HKDF(QKD ‖ PQC)` | QKD **or** PQC is missing |
+| --- | --- | --- | --- | --- |
+| `QkdAndPqcRequired` *(default)* | must | must | `HKDF(QKD ‖ PQC)` | QKD **or** PQC is missing |
 | `AtLeastQkdRequired` | can fail | must | `HKDF(QKD ‖ PQC)`, else QKD alone | QKD is missing |
 | `AtLeastPqcRequired` | must | can fail | `HKDF(QKD ‖ PQC)`, else PQC alone | PQC is missing |
 | `EitherQkdOrPqcRequired` | can fail | can fail | whichever source answered | both are missing |
@@ -345,7 +345,7 @@ in `MODES`, for the reason given under [Running it](#running-it).
 Every check has a **fixed number**, `<section>.<n>`, and the run prints it beside
 each verdict:
 
-```
+```text
     [  3.5] PASS  cycle 2/3: rotated, both ends match (key …fjz6mmI4=)
 ```
 
@@ -365,7 +365,7 @@ current numbering.
 
 `./run.sh --list` prints it:
 
-```
+```text
 1  setup
      1.1  wg, wg-quick, wireguard-go and go are present
      1.2  sudo is available
@@ -487,7 +487,7 @@ both return an error from `GetNewKey`, and that error goes to the same
 identically, in every mode:
 
 | Tests | Symptom |
-|---|---|
+| --- | --- |
 | **3.9/3.10** and **3.12/3.13** (`QkdAndPqcRequired`) | `kept both ends on one key`, and `no QKD key received` never logged |
 | **4.9/4.10** and **4.12/4.13** (`AtLeastQkdRequired`) | same |
 | **5.9/5.10** and **5.12/5.13** (`AtLeastPqcRequired`) | `stopped rotating in step`, and `switching to PQC key` never logged — rotation cannot carry on when nothing calls `setPSK` |
@@ -507,7 +507,7 @@ A mode is a statement about which key source may be absent. Tests
 turn — **three faults, each followed by a recovery**:
 
 | Tests | Fault | How |
-|---|---|---|
+| --- | --- | --- |
 | **x.8**–**x.11** | the KMS is **hung** | the simulator is restarted with `FREEZE=CONSA,CONSB` |
 | **x.12**–**x.15** | the KMS is **not running** | the simulator is stopped |
 | **x.16**–**x.18** | **PQC** cannot agree a key | the pair is restarted with `PQC_ROUND_TIMEOUT=1ns` |
@@ -528,7 +528,7 @@ there was none.
 What each mode must do, with the same expectation for both QKD faults:
 
 | Section, `MODE` | QKD gone (x.9, x.12) | in peer a's log (x.10, x.13) | PQC gone (x.16) | in peer a's log (x.17) |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 3 `QkdAndPqcRequired` | invalidate | `no QKD key received` | invalidate | `Abort since mode is set to` |
 | 4 `AtLeastQkdRequired` | invalidate | `no QKD key received` | keep rotating | `switching to QKD key` |
 | 5 `AtLeastPqcRequired` | keep rotating | `switching to PQC key` | invalidate | `Abort since mode is set to` |

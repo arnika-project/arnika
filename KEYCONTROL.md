@@ -28,10 +28,10 @@ belongs in that module's own document under [`docs/`](docs/), never here.
 Arnika follows a **ports-and-adapters** (hexagonal) design for key I/O:
 
 - A **Key Reader** is a *source* of key material. It answers the question
-  _"give me the next key"_. Examples: a QKD/KMS server, an HPKE key agreement
+  *"give me the next key"*. Examples: a QKD/KMS server, an HPKE key agreement
   with the peer.
 - A **Key Writer** is a *sink* for key material. It answers the question
-  _"install this PSK into WireGuard"_. Examples: the local WireGuard kernel
+  *"install this PSK into WireGuard"*. Examples: the local WireGuard kernel
   interface, a remote MikroTik router.
 
 Each side is a thin **service** (the port) wrapping a **repository** (the
@@ -85,7 +85,7 @@ Arnika distinguishes two classes of platform, and the distinction decides what a
 allowed to do when a dependency is not portable:
 
 | Class | Platforms | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | **Supported** | `linux/amd64`, `linux/arm64` | Deployment targets. Released, integration-tested, documented. |
 | **Build-only** | `darwin/amd64`, `darwin/arm64` | Must **compile**, so that maintainers can build, test and run editor tooling on macOS. Not a deployment target, and never exercised against a real kernel. |
 
@@ -105,18 +105,19 @@ signal.
 ## Module Index
 
 | Module | Kind | Adapter | Build tag | Platform | Document |
-|---|---|---|---|---|---|
-| `kms` | Reader (managed) | [`repositories/kms.go`](repositories/kms.go) | _(default)_ / `qkd_kms` | any | _pending_ — see [`KMS.md`](KMS.md) |
-| `pqc-hpke` | Reader (unmanaged) | [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) | _(none, sole PQC backend)_ | any | [`docs/pqc-hpke.md`](docs/pqc-hpke.md) |
-| `wireguard-netlink` | Writer | [`repositories/wireguard-netlink.go`](repositories/wireguard-netlink.go) | _(default)_ / `wireguard_netlink` | linux _(compiles elsewhere, no device)_ | [`docs/wireguard-netlink.md`](docs/wireguard-netlink.md) |
+| --- | --- | --- | --- | --- | --- |
+| `kms` | Reader (managed) | [`repositories/kms.go`](repositories/kms.go) | *(default)* / `qkd_kms` | any | *pending* — see [`KMS.md`](KMS.md) |
+| `pqc-hpke` | Reader (unmanaged) | [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) | *(none, sole PQC backend)* | any | [`docs/pqc-hpke.md`](docs/pqc-hpke.md) |
+| `wireguard-netlink` | Writer | [`repositories/wireguard-netlink.go`](repositories/wireguard-netlink.go) | *(default)* / `wireguard_netlink` | linux *(compiles elsewhere, no device)* | [`docs/wireguard-netlink.md`](docs/wireguard-netlink.md) |
 | `wireguard-netlink-netns` | Writer | [`repositories/wireguard-netlink-netns.go`](repositories/wireguard-netlink-netns.go) | `wireguard_netlink_netns` | linux | [`docs/wireguard-netlink-netns.md`](docs/wireguard-netlink-netns.md) |
 | `wireguard-mikrotik` | Writer | [`repositories/wireguard-mikrotik.go`](repositories/wireguard-mikrotik.go) | `wireguard_mikrotik` | any | [`docs/wireguard-mikrotik.md`](docs/wireguard-mikrotik.md) |
+
 ---
 
 ## Code Map
 
 | Concern | Port (service) | Adapter interface | Adapters (repositories) |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Read keys | [`services/keyreader.go`](services/keyreader.go) `KeyReaderService` | `KeyReaderManaged`, `KeyReaderUnmanaged` | [`repositories/kms.go`](repositories/kms.go), [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) |
 | Write keys | [`services/keywriter.go`](services/keywriter.go) `KeyWriterService` | `keyWriterRepository` (`SetPSK`, `InvalidateTunnel`) | [`repositories/wireguard-netlink.go`](repositories/wireguard-netlink.go), [`repositories/wireguard-mikrotik.go`](repositories/wireguard-mikrotik.go) |
 
@@ -128,7 +129,7 @@ A module called `<module-name>` (lower-case, dash-separated) occupies a fixed
 set of paths. Following them is what makes a module discoverable:
 
 | Path | Purpose | Backend-selection tag? |
-|---|---|---|
+| --- | --- | --- |
 | `repositories/<module-name>.go` | The adapter, all backend logic | **No**, always compiled. May carry a *platform* constraint |
 | `repositories/<module-name>_test.go` | Adapter unit tests | **No**, always run. Same platform constraint as the adapter |
 | `<moduletag>.go` (repo root) | Wiring: the `getQKDService`, `getPQCService` or `getKeyWriterService` factory | **Yes** |
@@ -178,7 +179,7 @@ cannot contain dashes), while file and document names use dashes.
 The reader service distinguishes two flavours of source:
 
 | Flavour | Interface | Semantics | Example backend |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Managed** | `KeyReaderManaged` | Keys carry an ID. `GetNewKey()` returns `(keyID, key)`; the peer can later fetch the same key with `GetKeyByID(keyID)`. | QKD via KMS (ETSI GS QKD 014) |
 | **Unmanaged** | `KeyReaderUnmanaged` | Keys have no ID. `GetNewKey()` returns only the key. | PQC via HPKE with the peer |
 
@@ -205,10 +206,10 @@ A reader port whose family has more than one backend selects exactly one wiring
 file per build, and that file defines exactly one factory:
 
 | Port | Factory | Wiring file | Build constraint |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | QKD (managed) | `getQKDService` | [`qkdkms.go`](qkdkms.go) | `qkd_kms \|\| !qkd_none` |
 | | | [`qkdnone.go`](qkdnone.go) | `qkd_none` |
-| PQC (unmanaged) | `getPQCService` | [`pqchpke.go`](pqchpke.go) | _(none, sole backend)_ |
+| PQC (unmanaged) | `getPQCService` | [`pqchpke.go`](pqchpke.go) | *(none, sole backend)* |
 
 `pqchpke.go` carries **no tag**, because a family with one member has nothing to
 select. The preparation for a second PQC backend is the file *name*: adding, say,
@@ -220,7 +221,7 @@ The QKD family earns its tags, and `qkdnone.go` is where the size goes.
 Measured on `linux/amd64` with `-w -s`:
 
 | Build | Size (bytes) | Saved |
-|---|---|---|
+| --- | --- | --- |
 | default (netlink, kms, pqc-hpke) | 7 430 304 | (reference) |
 | `qkd_none` | 4 477 088 | **-2.8 MB (-40 %)** |
 | `wireguard_mikrotik` | 7 221 408 | (reference) |
@@ -235,9 +236,11 @@ The `qkdCompiled` constant is what lets the linker drop the code: `main.go`
 guards the whole key_id flow with `if qkdCompiled`, a compile-time constant, so
 in a `qkd_none` binary neither the flow nor the KMS client is emitted. Without
 a QKD reader there is no `key_id` message and no PRIMARY/BACKUP alternation:
-the PSK is installed once per PQC round, in the middle of the part of the round
-in which the scheduler never publishes (`nextPQCInstall`). Both peers derive
-that instant from the wall clock, which is what keeps them on the same key.
+the PSK is set once per PQC round, in the middle of the part of the round
+in which the scheduler never publishes (`nextPQCSetPSKAt`). Both peers derive
+that instant from the wall clock alone, so this only keeps them on the same
+key if the peers' clocks are synchronized (e.g. via NTP, see
+[INSTALL.md](INSTALL.md)).
 
 Which compiled-in reader must actually contribute to the PSK stays a **runtime**
 decision (`MODE`, `PQC_ENABLED`). `Config.ValidateKeySources(qkdCompiled)` runs
@@ -264,6 +267,7 @@ at startup rather than at the first rotation.
    ```go
    //go:build qkd_kms || (!qkd_none && !qkd_foo)
    ```
+
 5. **Test** the adapter with `httptest` (network backends) or a `t.TempDir()`
    fixture (file backends).
 6. **Document it** at `docs/<module-name>.md`, add a row to the
@@ -311,7 +315,7 @@ The mechanism is a single factory function, `getKeyWriterService(cfg)`, that is
 **defined in exactly one file**, chosen by build constraint:
 
 | File | Build constraint |
-|---|---|
+| --- | --- |
 | [`wireguardnetlink.go`](wireguardnetlink.go) | `//go:build wireguard_netlink \|\| (!wireguard_mikrotik && !wireguard_netlink_netns)` |
 | [`wireguardmikrotik.go`](wireguardmikrotik.go) | `//go:build wireguard_mikrotik` |
 | [`wireguardnetlinknetns.go`](wireguardnetlinknetns.go) | `//go:build wireguard_netlink_netns` |
@@ -321,8 +325,8 @@ it. The constraints are designed so that netlink is the **default** and so that
 you can never accidentally compile two writers at once:
 
 | `-tags` passed | netlink | mikrotik | netns | Result |
-|---|:---:|:---:|:---:|---|
-| _(none)_ | ✅ (negated clause) | ❌ | ❌ | **netlink** (default) |
+| --- | :---: | :---: | :---: | --- |
+| *(none)* | ✅ (negated clause) | ❌ | ❌ | **netlink** (default) |
 | `wireguard_netlink` | ✅ | ❌ | ❌ | **netlink** (explicit) |
 | `wireguard_mikrotik` | ❌ | ✅ | ❌ | **mikrotik** |
 | `wireguard_netlink_netns` | ❌ | ❌ | ✅ | **netns** |
@@ -472,7 +476,7 @@ Every tag Arnika currently understands. At most **one tag per family**; a family
 that is not named keeps its default:
 
 | Family | Tag | Default | Effect |
-|---|---|:---:|---|
+| --- | --- | :---: | --- |
 | Key writer | `wireguard_netlink` | ✅ | Local kernel WireGuard interface via `wgctrl` |
 | | `wireguard_netlink_netns` | | Same, inside a network namespace (`linux` only) |
 | | `wireguard_mikrotik` | | MikroTik RouterOS REST API |

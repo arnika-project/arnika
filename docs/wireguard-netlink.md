@@ -28,7 +28,7 @@ follow, see [`KEYCONTROL.md`](../KEYCONTROL.md).
 ## At a Glance
 
 | | |
-|---|---|
+| --- | --- |
 | **Module name** | `wireguard-netlink` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | _(default)_ — or `wireguard_netlink` explicitly |
@@ -39,7 +39,7 @@ follow, see [`KEYCONTROL.md`](../KEYCONTROL.md).
 | **Transport** | `wgctrl` over netlink (no network I/O) |
 | **Dependencies** | `golang.zx2c4.com/wireguard/wgctrl` |
 | **Privileges** | `CAP_NET_ADMIN` — it reconfigures a network device |
-| **Alternative** | [`wireguard-mikrotik`](wireguard-mikrotik.md), which writes to a *remote* MikroTik router over REST |
+| **Alternative** | [`wireguard-mikrotik`](wireguard-mikrotik.md), which writes to a _remote_ MikroTik router over REST |
 
 Use this module when the WireGuard tunnel terminates **on the same host** that
 runs Arnika — the classic deployment described in
@@ -206,7 +206,7 @@ This module has **no settings of its own**. It uses only the shared WireGuard
 values, which here name a local interface and peer:
 
 | Env var | Required | Description |
-|---|:---:|---|
+| --- | :---: | --- |
 | `WIREGUARD_INTERFACE` | ✅ | Name of the local WireGuard interface, e.g. `qcicat0` |
 | `WIREGUARD_PEER_PUBLIC_KEY` | ✅ | `public key` of the peer whose PSK is rotated |
 
@@ -316,7 +316,7 @@ the environment file and any KMS certificates remain readable.
 journalctl -u arnika -f
 ```
 
-```
+```text
 [INFO] PRIMARY[9999] [OK] PSK configured on WireGuard interface: qcicat0 for peer: uUD5lB2Ze5oi…=
 ```
 

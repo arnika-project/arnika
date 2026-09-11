@@ -244,7 +244,7 @@ or flood traffic into a logging denial of service.
 ## 8. Acceptance Criteria
 
 | ID | Scenario | Expected result |
-|---|---|---|
+| --- | --- | --- |
 | AC-1.1 | `INTERVAL=10s`, `PQC_ROUND_INTERVAL=120s`, `PQC_MAX_KEY_AGE` unset | Effective maximum key age is `240s`. |
 | AC-1.2 | PQC enabled with maximum key age equal to or shorter than the round interval | Startup fails with both values in the error. |
 | AC-1.3 | Explicit maximum key age greater than the round interval | The explicit value is retained. |

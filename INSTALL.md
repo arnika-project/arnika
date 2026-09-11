@@ -117,6 +117,7 @@ Run on both Alice and Bob:
   ```
 
   **For Alice**:
+
   ```bash
   sudo tee /etc/wireguard/qcicat0.conf > /dev/null << EOF
   [Interface]
@@ -133,6 +134,7 @@ Run on both Alice and Bob:
   ```
 
   **For Bob**:
+
   ```bash
   sudo tee /etc/wireguard/qcicat0.conf > /dev/null << EOF
   [Interface]
@@ -173,7 +175,6 @@ port. It is **enabled by default** on both peers — see
 
 Earlier releases read the key via file from an external PQC provider, configured with
 `PQC_PSK_FILE`. That mechanism has been removed; the variable is ignored.
-
 
 ## Build from Source
 
@@ -324,6 +325,7 @@ Run on both Alice and Bob:
 - Copy certificates for KMS (if using KMS mode):
 
   **For Alice**:
+
   ```bash
   sudo cp <CA_CERT_FILE> /opt/arnika/kms_certs/ca.crt
   sudo cp <ALICE_CERT_FILE> /opt/arnika/kms_certs/arnika-alice.crt
@@ -334,6 +336,7 @@ Run on both Alice and Bob:
   ```
 
   **For Bob**:
+
   ```bash
   sudo cp <CA_CERT_FILE> /opt/arnika/kms_certs/ca.crt
   sudo cp <BOB_CERT_FILE> /opt/arnika/kms_certs/arnika-bob.crt
@@ -346,6 +349,7 @@ Run on both Alice and Bob:
 - Create an environment file for Arnika:
 
   **For Alice**:
+
   ```bash
   sudo tee /opt/arnika/arnika.env > /dev/null << EOF
   INTERVAL="120s"
@@ -369,6 +373,7 @@ Run on both Alice and Bob:
   ```
 
   **For Bob**:
+
   ```bash
   sudo tee /opt/arnika/arnika.env > /dev/null << EOF
   INTERVAL="120s"
@@ -405,6 +410,8 @@ Run on both Alice and Bob:
   > - **`INTERVAL` must be identical.** Roles are elected per interval number, so different
   >   interval lengths drift the two peers apart. Earlier releases suggested offsetting Bob's
   >   interval to avoid flapping; that is obsolete and now harmful.
+
+  <!-- -->
 
   > [!NOTE]
   > The `KMS_URL` above points at a real KMS. With the bundled simulator instead, use
@@ -465,6 +472,7 @@ Run on both Alice and Bob:
 - Create utility scripts:
 
   **KMS key request script** (for retrieving and managing keys from the KMS server):
+
   ```bash
   sudo tee /opt/arnika-tools/keyreq.sh > /dev/null << EOF
   #!/bin/bash
@@ -500,6 +508,7 @@ Run on both Alice and Bob:
   ```
 
   **Arnika service management script** (for starting/stopping all services):
+
   ```bash
   sudo tee /opt/arnika-tools/init_arnika.sh > /dev/null << EOF
   #!/bin/bash
@@ -532,6 +541,7 @@ Run on both Alice and Bob:
   ```
 
   **Wireguard show script** (displays the current Wireguard status):
+
   ```bash
   sudo tee /opt/arnika-tools/wg-show.sh > /dev/null << EOF
   #!/bin/bash
@@ -540,6 +550,7 @@ Run on both Alice and Bob:
   ```
 
   **Wireguard watch script** (continuously monitors Wireguard status):
+
   ```bash
   sudo tee /opt/arnika-tools/wg-watch.sh > /dev/null << EOF
   #!/bin/bash
@@ -548,6 +559,7 @@ Run on both Alice and Bob:
   ```
 
   **Tmux init script** (for starting all services in tmux sessions):
+
   ```bash
   sudo tee /opt/arnika-tools/init_tmux.sh > /dev/null << EOF
   #!/bin/sh
@@ -574,6 +586,7 @@ Run on both Alice and Bob:
   ```
 
   **Fping init script** (for monitoring connectivity):
+
   ```bash
   sudo tee /opt/arnika-tools/init_fping.sh > /dev/null << EOF
   #!/bin/bash
@@ -587,6 +600,7 @@ Run on both Alice and Bob:
   ```
 
   **Iperf init script** (for testing network performance):
+
   ```bash
   sudo tee /opt/arnika-tools/init_iperf.sh > /dev/null << EOF
   #!/bin/bash
@@ -600,6 +614,7 @@ Run on both Alice and Bob:
   ```
 
   **Tcpdump init script** (for capturing and analyzing packets):
+
   ```bash
   sudo tee /opt/arnika-tools/init_tcpdump.sh > /dev/null << EOF
   #!/bin/bash
@@ -723,6 +738,7 @@ tmux attach -t <session>   # kms, arnika, wg or ping
 - Test connectivity between Alice and Bob:
 
   **On Alice**:
+
   ```bash
   # Ping Bob's IPv6 address
   ping fdac::2
@@ -732,6 +748,7 @@ tmux attach -t <session>   # kms, arnika, wg or ping
   ```
 
   **On Bob**:
+
   ```bash
   # Ping Alice's IPv6 address
   ping fdac::1
@@ -743,11 +760,13 @@ tmux attach -t <session>   # kms, arnika, wg or ping
 - Test network performance (optional):
 
   **On Alice**:
+
   ```bash
   init_iperf.sh
   ```
 
   **On Bob**:
+
   ```bash
   # Edit the script first to uncomment the client line
   init_iperf.sh

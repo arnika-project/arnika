@@ -28,7 +28,7 @@ follow, see [`KEYCONTROL.md`](../KEYCONTROL.md).
 ## At a Glance
 
 | | |
-|---|---|
+| --- | --- |
 | **Module name** | `wireguard-mikrotik` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | `wireguard_mikrotik` |
@@ -136,7 +136,7 @@ RouterOS syntax.
 Placeholders:
 
 | Placeholder | Meaning | Example |
-|---|---|---|
+| --- | --- | --- |
 | `<ROUTER_IP>` | Address Arnika reaches the router on — must be in the certificate SAN | `100.102.202.1` |
 | `<PEER_PUBKEY>` | Public key of the **remote** WireGuard peer | `uUD5lB2Ze5oi…=` |
 | `<ARNIKA_SOURCE_IP>` | Address Arnika connects from — its container veth IP | `100.102.204.22` |
@@ -241,7 +241,7 @@ and write one property.
 > unrelated to the `api` *service* disabled in Step 3.
 
 | Policy | Why |
-|---|---|
+| --- | --- |
 | `rest-api` | Access to `/rest` at all |
 | `api` | Permission to execute the commands behind it |
 | `read` | The `peers/print` lookup |
@@ -291,11 +291,11 @@ MikroTik settings are read from the environment **only** in the
 `WIREGUARD_*` values — which here name an interface and peer **on the router**.
 
 | Env var | Required | Default | Description |
-|---|:---:|---|---|
+| --- | :---: | --- | --- |
 | `MIKROTIK_URL` | ✅ | — | Base URL, e.g. `https://100.102.202.1`. **No trailing `/rest`.** Must match the certificate SAN |
 | `MIKROTIK_USERNAME` | ✅ | — | The `arnika` user from [Step 5](#step-5--a-restricted-user-for-arnika) |
 | `MIKROTIK_PASSWORD` | ✅ | — | Password for that user |
-| `MIKROTIK_CA_CERTIFICATE` | ➖ | _(system roots)_ | PEM CA from [Step 4](#step-4--export-the-ca-for-arnika). **Effectively mandatory in a container** — a `FROM scratch` image has no system roots to fall back to |
+| `MIKROTIK_CA_CERTIFICATE` | ➖ | *(system roots)* | PEM CA from [Step 4](#step-4--export-the-ca-for-arnika). **Effectively mandatory in a container** — a `FROM scratch` image has no system roots to fall back to |
 | `MIKROTIK_TLS_INSECURE` | ➖ | `false` | Disables verification — **lab only** |
 | `MIKROTIK_HTTP_TIMEOUT` | ➖ | `10s` | Go duration string |
 | `WIREGUARD_INTERFACE` | ✅ | — | Interface name **on the router** |
@@ -358,7 +358,7 @@ so they do not cover [`wireguardmikrotik.go`](../wireguardmikrotik.go):
 ```bash
 GOEXPERIMENT=runtimesecret go vet -tags wireguard_mikrotik ./...
 go version -m build/arnika-linux-arm64-mikrotik | grep "build\s\+-tags"
-# build	-tags=wireguard_mikrotik
+# build -tags=wireguard_mikrotik
 ```
 
 Requesting both writers is a deliberate compile error — this **must** fail:
@@ -435,7 +435,7 @@ EOF
 ```
 
 | File | Purpose | Env var |
-|---|---|---|
+| --- | --- | --- |
 | `api-ca.crt` | Verifies **this router's** `www-ssl` certificate ([Step 4](#step-4--export-the-ca-for-arnika)) | `MIKROTIK_CA_CERTIFICATE` |
 | `kms-ca.crt` | Verifies the **KMS / QKD** endpoint | `CA_CERTIFICATE` |
 | `client.crt` / `client.key` | Arnika's client certificate for mTLS **to the KMS** | `CERTIFICATE` / `PRIVATE_KEY` |
@@ -503,7 +503,7 @@ Every certificate value is a path **inside** the container, under the
 When two Arnika instances form a pair, these differ per node:
 
 | Env var | Meaning |
-|---|---|
+| --- | --- |
 | `SERVER_ADDRESS` | The **peer** Arnika's `LISTEN_ADDRESS` |
 | `ARNIKA_ID` | Decides which side is PRIMARY for a given interval. Set it explicitly on both nodes, and give the two values **different parity** — one odd, one even. Only the lowest bit is used, so two odd or two even IDs make both nodes pick the same role in every interval |
 | `WIREGUARD_PEER_PUBLIC_KEY` | The **other** router's public key |
@@ -512,7 +512,7 @@ When two Arnika instances form a pair, these differ per node:
 And these must be **identical** on both nodes:
 
 | Env var | Meaning |
-|---|---|
+| --- | --- |
 | `ARNIKA_PSK` | Shared secret authenticating and encrypting the peer channel. Must be set — with it unset the channel keys derive from the empty string and provide no protection |
 | `INTERVAL` | Roles are elected per interval number, so differing intervals drift the two nodes apart |
 | `MODE` | Both sides must agree on which key sources are mandatory |
@@ -548,7 +548,7 @@ And these must be **identical** on both nodes:
 /log/print where topics~"container"
 ```
 
-```
+```text
 arnika: [INFO] PRIMARY[2] [OK] PSK configured on WireGuard interface: wg1 for peer: uUD5lB2Ze5oi…=
 ```
 
@@ -581,7 +581,7 @@ The endpoints this module uses, and the hand-run equivalents for debugging.
 ### Verb mapping
 
 | HTTP | RouterOS action | CLI equivalent |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | print (list/read) | `/path/print` |
 | `PUT` | **add (create)** | `/path/add` |
 | `PATCH` | set (update) | `/path/set` |
@@ -594,7 +594,7 @@ module uses only `POST …/print` and `PATCH …/<id>`.
 ### Which service serves REST
 
 | Service | Port | Serves REST? |
-|---|---|---|
+| --- | --- | --- |
 | `www` | 80 | Yes — plaintext, do not use |
 | `www-ssl` | 443 | **Yes — use this** |
 | `api` | 8728 | No — legacy binary API |
@@ -670,7 +670,7 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -run TestWireguardMikrotik -v
 stands up an `httptest.Server` impersonating the RouterOS peers collection:
 
 | Test | What it pins down |
-|---|---|
+| --- | --- |
 | `…_SetPSK` | Basic auth is sent; the id is resolved with a server-side `.query` (exactly one `print`); a single `PATCH` targets the right `.id` with the right PSK |
 | `…_SetPSK_PeerNotFound` | A missing peer is an error, and **no** `PATCH` is attempted |
 | `…_InvalidateTunnel` | The written PSK is valid base64 of exactly 32 bytes, and differs between calls |

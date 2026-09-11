@@ -4,7 +4,7 @@
 -->
 
 <div align="center">
-    <img src="img/ARNIKA_banner.png">
+    <img src="img/ARNIKA_banner.png" alt="Arnika banner">
     <h1> Arnika - Quantum secure VPN</h1>
 </div>
 
@@ -18,14 +18,13 @@ It gathers a 256-bit symmetric encryption key from a Key Management System (**KM
 
 Arnika offers an additional security layer for cryptography enthusiasts. It can integrate Post-Quantum Cryptography (**PQC**) by leveraging a PQC key provided by an external PQC framework. This key is then used to create an even stronger Preshared Key (PSK) for WireGuard. This PSK benefits from both **PQC** and **QKD**, offering enhanced protection against potential security threats.
 
-
 Arnika integrates with WireGuard to establish quantum-resistant VPN connections, adding a significant layer of security to your communication
 
-Arnika v1.x has been developed in scope of EU **EUROQCI** / **QCI-CAT** research program for the Use-Case **HSM BACKUP USING QKD** - https://qci-cat.at/hsm-backup-using-qkd
+Arnika v1.x has been developed in scope of EU **EUROQCI** / **QCI-CAT** research program for the Use-Case **HSM BACKUP USING QKD** - <https://qci-cat.at/hsm-backup-using-qkd>
 
 ## Contact
 
-If you want to contact us, feel free to join the public **Matrix** room `#arnika:matrix.org` ([https://matrix.to/#/#arnika:matrix.org](https://matrix.to/#/#arnika:matrix.org)) or `arnika` channel on **IRC** `irc.oftc.net` or send us an email at arnika@unbox.at .
+If you want to contact us, feel free to join the public **Matrix** room `#arnika:matrix.org` ([https://matrix.to/#/#arnika:matrix.org](https://matrix.to/#/#arnika:matrix.org)) or `arnika` channel on **IRC** `irc.oftc.net` or send us an email at <arnika@unbox.at> .
 
 ## Quantum secure VPN
 
@@ -42,7 +41,6 @@ If you want to contact us, feel free to join the public **Matrix** room `#arnika
   </tr>
 </table>
 
-
 ## Wireguard + PQC + Arnika
 
 SAE (Secure Application Entity) = Wireguard + PQC + Arnika
@@ -54,6 +52,7 @@ The approach of combining symmetric keys from Quantum Key Distribution (QKD) and
 ### QKD | PQC key handling
 
 The setup supports 3 operational modes, A, B, and C
+
 * (A) ... QKD mode
 * (B) ... PQC mode
 * (C) ... QKD+PQC hyprid mode
@@ -62,7 +61,7 @@ At runtime the mode is selected with the `MODE` environment variable, which expr
 is allowed to fall back to if one key source fails:
 
 | Mode | `MODE` value | Key sources | Behaviour |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | (A) QKD | `AtLeastQkdRequired` | QKD, PQC optional | QKD key is mandatory; PQC is mixed in unless `PQC_ENABLED=false` |
 | (B) PQC | `AtLeastPqcRequired` | PQC, QKD optional | PQC key is mandatory, so `PQC_ENABLED` must stay enabled |
 | (C) hybrid | `QkdAndPqcRequired` _(default)_ | QKD **and** PQC | Both keys mandatory — no fallback, the strictest mode |
@@ -73,12 +72,12 @@ invalidated with a random PSK, so a failed rotation never extends the life of th
 replace. When a source the mode treats as **optional** cannot deliver, rotation carries on from the
 other one: without QKD the two peers install the PQC-only PSK on an instant they both derive from the
 wall clock, because the `key_id` message that normally puts them on the same key is exactly what a KMS
-outage takes away.
+outage takes away. This only lands both peers on the same instant if their clocks are kept in sync
+(e.g. via NTP, see [INSTALL.md](INSTALL.md)).
 
 Regardless of the selected mode, WireGuard always receives a single 256bit (32byte) key as PSK which is used for WireGuard internal `MixKeyAndHash()` using **HKDF**.
 
 _Figure 3_ shows the key path of 2 interconnected sites for the hyprid mode (C) (QKD+PQC). In this scenario, the **KEY-CONTROL function** serves as a control entity, responsible for obtaining a **key** and transferring it to the encryption function (WireGuard).
-
 
 <table border="0" cellpadding="0" cellspacing="0" width="100%">
   <tr>
@@ -91,10 +90,8 @@ _Figure 3_ shows the key path of 2 interconnected sites for the hyprid mode (C) 
 
 The QKD key is obtained via ETSI014 from the QKDs embedded KMS. The PQC key is agreed by Arnika itself with its peer, using HPKE (RFC 9180) with the MLKEM1024-P384 hybrid KEM over the existing Arnika socket — see [`docs/pqc-hpke.md`](docs/pqc-hpke.md). Earlier releases read it from a file written by an external PQC provider; that mechanism has been replaced.
 
-
 Subsequently, the **KEY-CONTROL function** uses the **QKD key** and **PQC key** by using a **HKDF HMAC Key Derivation Function** with SHA3-256 as the hash function, to derive a single key from the two input keys (QKD, PQC).
 The specific derivation function, whether **HKDF** or an alternative, is a topic open for discussion among cryptographic experts.
-
 
 ## Portability
 
@@ -120,16 +117,15 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 * PQC crypto agility
 * unaffected by patent "Method of integrating QKD with IPSec" (US7602919B2,CN101142779A,...)
 
-
 # Improvements since v2.x (>v1.x)
 
-- Hexagonal Architecture (Ports & Adapters) provides capability to develop own key-reader and key-writer adapters - see [`KEYCONTROL.md`](KEYCONTROL.md) for details.
-- In-band PQC key agreement (**pqc-hpke**) - Arnika negotiates the PQC key directly with its peer using HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)) with the MLKEM1024-P384 hybrid KEM, carried inside the existing authenticated UDP envelope. No external PQC provider, no PQC key on disk, no additional port, and no third-party dependency - the whole cryptographic path is the Go standard library. A fresh key pair every round gives forward secrecy, and a mandatory key-confirmation step catches ML-KEM implicit rejection before anything is published - see [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for details.
-- symmetric-PSK based (_quantum secure_) mutual authentication of Arnika peers - (HMAC-SHA256 + AES-256-GCM authenticated UDP protocol), with per-direction key separation so a reflected packet fails at its own sender
-- Arnika listening port is undetectable and unscannable, like wireguard
-- Per-IP UDP rate limiting against flood/DoS attempts
-- Memory hardening — key material is explicitly zeroed after use (`runtime/secret`)
-- KMS request retry with exponential backoff for resilience
+* Hexagonal Architecture (Ports & Adapters) provides capability to develop own key-reader and key-writer adapters - see [`KEYCONTROL.md`](KEYCONTROL.md) for details.
+* In-band PQC key agreement (**pqc-hpke**) - Arnika negotiates the PQC key directly with its peer using HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)) with the MLKEM1024-P384 hybrid KEM, carried inside the existing authenticated UDP envelope. No external PQC provider, no PQC key on disk, no additional port, and no third-party dependency - the whole cryptographic path is the Go standard library. A fresh key pair every round gives forward secrecy, and a mandatory key-confirmation step catches ML-KEM implicit rejection before anything is published - see [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for details.
+* symmetric-PSK based (_quantum secure_) mutual authentication of Arnika peers - (HMAC-SHA256 + AES-256-GCM authenticated UDP protocol), with per-direction key separation so a reflected packet fails at its own sender
+* Arnika listening port is undetectable and unscannable, like wireguard
+* Per-IP UDP rate limiting against flood/DoS attempts
+* Memory hardening — key material is explicitly zeroed after use (`runtime/secret`)
+* KMS request retry with exponential backoff for resilience
 
 # Live Demo
 
@@ -143,33 +139,31 @@ The **PQC-QKD Hybrid PoC** implements a three-layer hybrid QKD-PQC key model:
 
 Two VPN lanes consume the fused key in parallel:
 
-- **WireGuard**, where the key is installed as a preshared key and enters the `Noise_IKpsk2` chaining key (ChaCha20-Poly1305).
-- **IPsec/IKEv2** via strongSwan's VICI socket, where the key is used as an RFC 8784 Post-quantum Preshared Key alongside RFC 9370 ML-KEM-768 (AES-GCM-256).
+* **WireGuard**, where the key is installed as a preshared key and enters the `Noise_IKpsk2` chaining key (ChaCha20-Poly1305).
+* **IPsec/IKEv2** via strongSwan's VICI socket, where the key is used as an RFC 8784 Post-quantum Preshared Key alongside RFC 9370 ML-KEM-768 (AES-GCM-256).
 
 The **Console** section exposes live views of the layered architecture, container status, BB84 key generation, key flow, network topology, benchmarks, physics parameters, a PQC validator, verification runs and hardware-in-the-loop tests. Key rotation is configured at 30 seconds.
 
-
 ---
-
 
 # Requirements
 
 The `Secure Application Entity` consists of following components running on a secure and hardened linux system:
+
 * WireGuard
 * Arnika
 * PQC (optional)
 
-### WireGuard
+## WireGuard
 
 WireGuard must be installed/setup separately before Arnika can be used. For further installation instructions, refer to the [WireGuard](https://www.wireguard.com/) homepage.
 
-### PQC 
+## PQC
 
-PQC is optional, Arnika can run without PQC, then it will run in QKD mode only. 
+PQC is optional, Arnika can run without PQC, then it will run in QKD mode only.
 For further installation instructions, refer to the PQC key provider.
 
-
-### golang version
+## golang version
 
 Go **1.26 or newer** is required (see `go.mod`).
 
@@ -184,14 +178,15 @@ Go **1.26 or newer** is required (see `go.mod`).
 >
 > `make build` sets it for you. Building without it fails on the `runtime/secret` import.
 
-
 # Limitations for version v1.x (<v2.x)
 
 > [!IMPORTANT]
 > This section describes **v1.x** only. In v2.x the key writer is an adapter (see
 > [`KEYCONTROL.md`](KEYCONTROL.md)), so the same-host restriction applies to the default netlink
-> key writer, not to Arnika as a whole, the MikroTik key writer can install the PSK on a **remote** or **local** 
+> key writer, not to Arnika as a whole, the MikroTik key writer can install the PSK on a **remote** or **local**
 > RouterOS router over the REST API.
+
+<!-- -->
 
 > [!IMPORTANT]
 > **ARNIKA** is intended to supply a **PSK** exclusively to a local WireGuard instance.
@@ -208,7 +203,7 @@ Go **1.26 or newer** is required (see `go.mod`).
 # Documentation
 
 | Document | Contents |
-|---|---|
+| --- | --- |
 | [`KEYCONTROL.md`](KEYCONTROL.md) | Developer guide for the key reader / key writer layer |
 | [`docs/pqc-hpke.md`](docs/pqc-hpke.md) | The PQC key agreement (HPKE) that replaces the external PQC provider |
 | [`docs/`](docs/) | One document per key reader / key writer backend |
@@ -242,6 +237,7 @@ go version go1.26.0 linux/amd64
 > [!CAUTION]
 > The golang version shipped by older distributions does not meet the requirements. Building with
 > a too-old toolchain fails while reading `go.mod`:
+>
 > ```shell
 > $ go version
 > go version go1.18.1 linux/amd64
@@ -249,9 +245,7 @@ go version go1.26.0 linux/amd64
 > /home/arnika/arnika/go.mod:3: invalid go version '1.26': must match format 1.23
 > ```
 
-
 ---
-
 
 # Build binaries from source
 
@@ -307,7 +301,7 @@ Arnika ID:                9999
 Arnika PSK:               (set, 44 bytes)
 Arnika Listen Address:    127.0.0.1:9999
 Arnika Peer Address:      127.0.0.1:9998
-Arnika Peer Timeout:			500ms
+Arnika Peer Timeout:   500ms
 KMS URL:                  http://localhost:8080/api/v1/keys/CONSA
 KMS HTTP Timeout:         10s
 KMS Backoff Max Retries:  5
@@ -349,12 +343,13 @@ simulator does not use `runtime/secret`, so `GOEXPERIMENT` is not required to bu
 
 > [!Note]
 > **kms** aka `mock` was originally designed to test **Arnika** and not intended to be a certified ETSI014 Simulator.
-> 
-> However, since v2.x the KMS Simulator is compliant to the ETSI014 standard and can be tested with [ci/test-kms.sh](ci/test-kms.sh).
-> It has been sucessfully tested with commercial security appliances from various vendors auch as like from **Palo Alto** or **MikroTik**. For more details contact quantum@xbc-digital.com
 >
-> 
+> However, since v2.x the KMS Simulator is compliant to the ETSI014 standard and can be tested with [ci/test-kms.sh](ci/test-kms.sh).
+> It has been sucessfully tested with commercial security appliances from various vendors auch as like from **Palo Alto** or **MikroTik**. For more details contact <quantum@xbc-digital.com>
+>
+>
 > pseudo values are used:
+>
 > * `http` only, no TLS
 > * `CONSA` and `CONSB` as **SAE**
 > * `key` and `key_ID`
@@ -365,11 +360,7 @@ simulator does not use `runtime/secret`, so `GOEXPERIMENT` is not required to bu
 > `DEBUG=true`. Everything else requires a source change. See [`KMS.md`](KMS.md) for the full
 > endpoint matrix, ETSI GS QKD 014 compliance notes and test requests.
 
-
-
-
 ---
-
 
 # Start Dev Environment
 
@@ -389,7 +380,6 @@ tools/kms
 
 The QKD KMS simulator is now accessible at `http://127.0.0.1:8080`.
 
-
 ## Start Arnika #1
 
 ```bash
@@ -405,7 +395,6 @@ WIREGUARD_INTERFACE=qcicat0 \
 WIREGUARD_PEER_PUBLIC_KEY="****************=" \
 build/arnika
 ```
-
 
 ## Start Arnika #2
 
@@ -423,7 +412,6 @@ WIREGUARD_PEER_PUBLIC_KEY="****************=" \
 build/arnika
 ```
 
-
 # Configuration
 
 Arnika must be configured via environment variables. Defaults below are the values from
@@ -433,7 +421,7 @@ start without them.
 ## Peer identity and inter-peer channel
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `LISTEN_ADDRESS` | ✅ | — | `host:port` Arnika listens on for the peer channel (UDP), e.g. `127.0.0.1:9999` |
 | `SERVER_ADDRESS` | ✅ | — | `host:port` of the remote Arnika peer — its `LISTEN_ADDRESS` |
 | `ARNIKA_PSK` | ✅ | — | Shared secret authenticating and encrypting the peer channel, minimum 32 bytes. **Must be identical on both peers** — see the warning below |
@@ -454,7 +442,7 @@ start without them.
 ## Key reader — QKD / KMS (ETSI GS QKD 014)
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `KMS_URL` | ✅ | — | KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA`. Must be **unset** in a `qkd_none` (PQC-only) build |
 | `KMS_HTTP_TIMEOUT` | ➖ | `10s` | HTTP timeout for KMS requests |
 | `KMS_BACKOFF_MAX_RETRIES` | ➖ | `5` | Retry attempts per failed KMS request |
@@ -468,7 +456,7 @@ start without them.
 > \* These three are **all-or-nothing**: client-certificate authentication is enabled only when
 > all three are set. If any one of them is empty, all three are ignored, and the KMS connection
 > falls back to a plain HTTPS client that validates the server against the system root store
-> (TLS 1.2 minimum). When all three are set, `CA_CERTIFICATE` *replaces* the system roots, so the
+> (TLS 1.2 minimum). When all three are set, `CA_CERTIFICATE` _replaces_ the system roots, so the
 > KMS certificate must be issued by that CA. Unreadable or invalid files abort startup.
 >
 > They apply to the KMS connection **only** — the inter-peer channel is not TLS and does not use
@@ -480,7 +468,7 @@ start without them.
 ## Key reader — PQC
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `PQC_ENABLED` | ➖ | `true` | The **pqc-hpke** key agreement: Arnika negotiates the PQC key with its peer over the existing socket, using HPKE (RFC 9180) with MLKEM1024-P384. No external daemon, no key on disk, no new port. **On by default** — set `false` to run QKD-only |
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
 | `PQC_MAX_KEY_AGE` | ➖ | `2 × PQC_ROUND_INTERVAL` | Staleness threshold for the agreed key. **Must be longer than `PQC_ROUND_INTERVAL`**, or the key is stale for part of every healthy round; this is rejected at startup with both values in the error |
@@ -502,7 +490,7 @@ module document.
 ## Key writer — WireGuard
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `WIREGUARD_INTERFACE` | ✅ | — | WireGuard interface whose peer PSK is rotated, e.g. `qcicat0`. With the MikroTik key writer this is the interface **on the router** |
 | `WIREGUARD_PEER_PUBLIC_KEY` | ✅ | — | Public key of the WireGuard peer whose PSK is rotated |
 
@@ -512,20 +500,17 @@ The MikroTik key writer (`wireguard_mikrotik` build tag) adds `MIKROTIK_URL`,
 
 ---
 
-
-#  Credits
+# Credits
 
 ## CANCOM Converged Services GmbH (CCS)
 
 The initial **Arnika** prototype and earlier versions were developed within the research activities of [CANCOM Converged Services GmbH](https://www.cancom.at/en/industry-focus/provider) as part of the [QCI-CAT](https://qci-cat.at/) project, and the source code was released under the [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) license.
 
-
 ## XBC Digital GmbH (XBC)
 
 In Q2 2026, the people behind **Arnika** moved to [XBC Digital GmbH](https://xbc-digital.com/quantum-communication), where the **Arnika project** is now actively maintained, supported and recent versions are being developed.
 
-
-## WireGuard
+## WireGuard project
 
 [WireGuard](https://www.wireguard.com/) is an extremely simple fast and modern VPN that utilizes state-of-the-art cryptography.
 
@@ -535,25 +520,19 @@ In Q2 2026, the people behind **Arnika** moved to [XBC Digital GmbH](https://xbc
 
 [WireGuard](https://www.wireguard.com/) supports the use of an optional 256-bit (32-byte) preshared key (PSK) as an additional layer of security. The preshared key (PSK) is combined with the ephemeral keys generated during the initial handshake using the HKDF (HMAC-based Key Derivation Function). When a preshared key (PSK) is not used, the preshared key value used internally is an all-zero string of 32 bytes.
 
-
-
 To ensure perfect forward secrecy (**PFS**) and minimizing the impact of key compromise [WireGuard](https://www.wireguard.com/) re-keying timer is **120 seconds** or **2^60 messages**.
 
 Refer to [WireGuard](https://www.wireguard.com/) Homepage [https://www.wireguard.com/protocol/] and Whitepaper [https://www.wireguard.com/papers/wireguard.pdf] for more technical details.
 
 [WireGuard Source Code Repositories and Official Projects](https://www.wireguard.com/repositories/)
 
-
-
 [WireGuard](https://www.wireguard.com/) is free and open-source software (FOSS) and licensed under GPLv2.
 
 [WireGuard](https://www.wireguard.com/) and the [WireGuard](https://www.wireguard.com/) **logo** are registered trademarks of Jason A. Donenfeld.
 
-
 ## Rosenpass
 
 Many thanks to the [**Rosenpass**](https://github.com/rosenpass/rosenpass) project.
-
 
 ## QCI-CAT
 
@@ -566,22 +545,19 @@ Additionally, [QCI-CAT](https://qci-cat.at/) will also leverage a research testb
 
 This project has received funding from the [DIGITAL-2021-QCI-01 Digital European Program](https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/digital-2021-qci-01-deploy-national) under Project number No 101091642 and the [National Foundation for Research, Technology and Development](https://www.stiftung-fte.at/).
 
-
 ## AIT Austrian Institute of Technology
 
 [AIT Austrian Institute of Technology (AIT)](https://www.ait.ac.at/) is Austria’s largest research and technology organization.
 The institute takes a leading position in the Austrian innovation system and a key role in Europe.
 With its expertise of handling large EU quantum communication projects such as [OPENQKD](https://openqkd.eu/), [AIT](https://www.ait.ac.at/) will coordinate [QCI-CAT](https://qci-cat.at/) from an administrative point, as well as act as the technical manager and project lead.
 
-
 ## Amon Koike
 
 Special thanks to **Amon Koike** for:
 
-- building, hosting and maintaining a live demo page **[PQC-QKD Hybrid PoC](https://pqc-qkd-hybrid.daemons.jp/)**,
-- extensive testing of Arnika against real WireGuard and strongSwan deployments,
-- and his collaboration on the Arnika project.
-
+* building, hosting and maintaining a live demo page **[PQC-QKD Hybrid PoC](https://pqc-qkd-hybrid.daemons.jp/)**,
+* extensive testing of Arnika against real WireGuard and strongSwan deployments,
+* and his collaboration on the Arnika project.
 
 ## Status
 

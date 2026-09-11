@@ -22,7 +22,7 @@ provider: no external daemon, no key on disk, no new port.
 ## At a Glance
 
 | Property | Value |
-|---|---|
+| --- | --- |
 | Kind | Key reader (unmanaged) |
 | Exchange | 3 messages, 2 round trips, 5 datagrams per round |
 | Selection | Runtime, via `PQC_ENABLED`, **enabled by default** |
@@ -39,7 +39,7 @@ provider: no external daemon, no key on disk, no new port.
 
 One round per interval, **three messages, two round trips**:
 
-```
+```text
 initiator -> responder   pubKey        2 frames, 1007 + 872 bytes on the wire
 initiator <- responder   enc ‖ tag_R   2 frames, 1007 + 888 bytes
 initiator -> responder   tag_I         1 frame,  123 bytes
@@ -71,7 +71,7 @@ starts its side of the round.
 ### Why the confirmation tags are mandatory
 
 ML-KEM uses **implicit rejection**. FIPS 203 decapsulation never fails: handed a
-malformed ciphertext it returns a *pseudorandom* shared secret rather than an
+malformed ciphertext it returns a _pseudorandom_ shared secret rather than an
 error. Without an explicit check, a corrupted encapsulation would leave the two
 peers holding **different keys, silently, with no error anywhere** — and the
 first symptom would be a WireGuard handshake failure one interval later,
@@ -88,7 +88,7 @@ This looks redundant — both peers export from one HPKE context, so they
 fails. Do not remove the check.
 
 **The tag is bound to the sender's role**, `I` or `R`, as well as to the round.
-Without the role label both peers compute the *identical* tag, and the second
+Without the role label both peers compute the _identical_ tag, and the second
 one sent is a pure echo of the first: it proves possession of `ARNIKA_PSK`,
 which the envelope already proved, and nothing at all about the agreed key. With
 the label, each direction is a real possession proof.
@@ -99,7 +99,7 @@ the label, each direction is a real possession proof.
 Publication keeps the highest round, which is what makes two peers converge when
 overlapping rounds complete in different orders. Round numbers come from wall
 time, so a backward step across a boundary put every newly confirmed round
-*below* the published one: the old key kept aging on the monotonic clock,
+_below_ the published one: the old key kept aging on the monotonic clock,
 `GetNewKey()` began failing once it passed `PQC_MAX_KEY_AGE`, and no lower round
 could replace it until wall time reached the previous round again or the process
 restarted.
@@ -145,7 +145,7 @@ different one.
   expected and logged at INFO.
 - **Later rounds are scheduled to finish before their boundary**, by waking one
   round timeout early, so a key for that boundary exists rather than being
-  published at it. The round served is always the boundary that *follows* now,
+  published at it. The round served is always the boundary that _follows_ now,
   so it is in the future by construction; if the ideal start has already passed
   the round begins late rather than being skipped, because skipping made the
   choice depend on which side of the wake instant each peer evaluated, and peers
@@ -179,18 +179,18 @@ different one.
 > [!IMPORTANT]
 > **Scheduling does not align the two peers' reads.** Arnika's rekey instant is
 > independent of the round boundary, so if a publish lands between the two
-> peers' `setPSK` calls, one derives the PSK from round *N* and the other from
-> *N−1*, and the tunnel drops until the next rekey. The probability is the read
+> peers' `setPSK` calls, one derives the PSK from round _N_ and the other from
+> _N−1_, and the tunnel drops until the next rekey. The probability is the read
 > gap divided by the interval — a few tens of milliseconds over
 > `PQC_ROUND_INTERVAL` — and it does not depend on where in the interval the
 > publish sits, so no schedule can remove it. Closing it needs the peers to
-> agree on *which* round's key a given rekey uses. That is an open design
+> agree on _which_ round's key a given rekey uses. That is an open design
 > question, not a settled part of this module.
 
 ## How the Module Is Constructed
 
 | Concern | Location |
-|---|---|
+| --- | --- |
 | Frame layer, HPKE core, transport, scheduler | [`repositories/pqc-hpke.go`](../repositories/pqc-hpke.go) |
 | Wiring, envelope sealing, peer socket | [`pqchpke.go`](../pqchpke.go) |
 | Packet type and dispatch | [`auth/auth.go`](../auth/auth.go), [`udpserver.go`](../udpserver.go) |
@@ -241,7 +241,7 @@ Requirements:
 ## Part 2 — Configuration Reference
 
 | Env var | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `PQC_ENABLED` | ➖ | `true` | The PQC key agreement. **On by default**: set `false` to run QKD-only |
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
 | `PQC_MAX_KEY_AGE` | ➖ | `2 × PQC_ROUND_INTERVAL` | Staleness threshold; one round of loss tolerance. **Must be longer than `PQC_ROUND_INTERVAL`** — a shorter value makes the key stale during every healthy round, so it is rejected at startup with both durations in the error, and `NewPQCHPKERepository` enforces the same invariant |
@@ -277,7 +277,7 @@ boundary.
 from the file-based reader:
 
 | `MODE` | PQC key unavailable |
-|---|---|
+| --- | --- |
 | `QkdAndPqcRequired` _(default)_ | Fatal for the interval; the tunnel is invalidated |
 | `AtLeastPqcRequired` | Fatal for the interval |
 | `AtLeastQkdRequired` | Falls back to the QKD key alone |
@@ -326,7 +326,7 @@ differ in parity), and its own `KMS_URL`.
 
 The startup banner reports the agreement settings:
 
-```
+```text
 PQC key agreement:        ENABLED (pqc-hpke)
 PQC round interval:       2m0s
 PQC round timeout:        30s
@@ -335,7 +335,7 @@ PQC max key age:          4m0s
 
 A successful round logs:
 
-```
+```text
 [INFO] PQC-HPKE[9999] [OK] round 13845672 agreed a fresh PQC key (initiator)
 [INFO] PRIMARY[9999] [OK] HKDF derivation completed for QKD+PQC key
 ```
@@ -371,7 +371,7 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
 ```
 
 | Test | What it pins down |
-|---|---|
+| --- | --- |
 | `TestPQCFrameRoundTrip` | 1- and 2-frame messages, including exact boundaries |
 | `TestPQCFrameRejectsMalformed` | Truncated and inconsistent frames rejected, never a panic |
 | `TestPQCJoinerOutOfOrderAndDuplicate` | Reordering and duplicates handled |
@@ -404,10 +404,10 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
 - **`ARNIKA_PSK` is the sole authentication root** for this exchange. There is
   no second, independent factor: an attacker holding it can MITM the agreement.
   See [`SECURITY.md`](../SECURITY.md).
-- **Confidentiality** rests on ML-KEM-1024 *and* ECDH P-384 through the HPKE key
+- **Confidentiality** rests on ML-KEM-1024 _and_ ECDH P-384 through the HPKE key
   schedule; recovery requires breaking both. Against a quantum adversary the
   P-384 half contributes nothing — it falls to Shor — and exists to cover an
-  ML-KEM *implementation* flaw exploited classically. QKD, when present, is the
+  ML-KEM _implementation_ flaw exploited classically. QKD, when present, is the
   only non-computational hedge.
 - **Forward secrecy** per round: no long-term key material exists in this path.
 - **No key at rest.** The agreed key lives in process memory only and is zeroed
@@ -434,7 +434,7 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
   needs no PSK. The responder therefore accepts only a round the schedule could
   be serving — the boundary that follows now, the current index the startup
   round uses, and one interval of slack for clock skew — and never lets a public
-  key for an *older* round replace the round in flight. Without both guards a
+  key for an _older_ round replace the round in flight. Without both guards a
   replay landing between the real public key and the real confirmation discarded
   the pending key, so the responder could not confirm and the initiator
   published alone.
@@ -457,6 +457,6 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
 - [FIPS 203 — Module-Lattice-Based Key-Encapsulation Mechanism](https://csrc.nist.gov/pubs/fips/203/final)
 - `draft-ietf-hpke-pq` — post-quantum KEMs for HPKE
 - BSI TR-02102-1 — cryptographic mechanisms, key lengths
-- Alwen et al., *Analysing the HPKE Standard*, Eurocrypt 2021 ([ePrint 2020/1499](https://eprint.iacr.org/2020/1499))
+- Alwen et al., _Analysing the HPKE Standard_, Eurocrypt 2021 ([ePrint 2020/1499](https://eprint.iacr.org/2020/1499))
 - Key I/O architecture: [`KEYCONTROL.md`](../KEYCONTROL.md)
 - Protocol flow: [`CODEFLOW.md`](../CODEFLOW.md)
