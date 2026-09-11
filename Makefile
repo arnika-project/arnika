@@ -39,8 +39,13 @@ build-mikrotik:
 build-pqc-only:
 	$(MAKE) build BUILD_TAGS=qkd_none
 
+# End to end lab: two Arnika nodes and the KMS simulator in containers
+E2E_FLAGS ?=
+test-e2e:
+	$(GO) test -C ci/e2e -v -count=1 -timeout 15m $(E2E_FLAGS) ./...
+
 # Clean rule: remove build artifacts
 clean:
 	rm -rf $(BUILD_DIR)/*
 
-.PHONY: default build build-netlink build-mikrotik build-pqc-only clean
+.PHONY: default build build-netlink build-mikrotik build-pqc-only test-e2e clean
