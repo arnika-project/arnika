@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"fmt"
@@ -17,7 +17,7 @@ import (
 // budget behind.
 const (
 	// qkdInboundPerInterval is what one QKD interval can legitimately deliver
-	// to a listening socket: udpClient sends one DATA packet per attempt and
+	// to a listening socket: SendKeyID sends one DATA packet per attempt and
 	// retries when no ACK arrives.
 	qkdInboundPerInterval = udpClientMaxAttempts
 
@@ -44,7 +44,7 @@ func eventsIn(window, step time.Duration) int {
 	return int(window/step) + 1
 }
 
-// rateBudget is the per-IP packet budget one legitimate peer needs inside
+// RateBudget is the per-IP packet budget one legitimate peer needs inside
 // RATE_WINDOW.
 //
 // It assumes the maximum inbound role allocation rather than an even split:
@@ -54,7 +54,7 @@ func eventsIn(window, step time.Duration) int {
 //
 // The PQC term uses the scheduler's whole-second round spacing, not
 // PQC_ROUND_INTERVAL itself, because the round index is second-granular.
-func rateBudget(cfg *config.Config) int {
+func RateBudget(cfg *config.Config) int {
 	n := eventsIn(cfg.RateWindow, cfg.Interval) * qkdInboundPerInterval
 	if cfg.UsePQC() {
 		spacing := time.Duration(pqchpke.RoundSeconds(cfg.PQCRoundInterval)) * time.Second
@@ -65,15 +65,15 @@ func rateBudget(cfg *config.Config) int {
 	return n
 }
 
-// effectiveRateLimit resolves RATE_LIMIT against the calculated budget.
+// EffectiveRateLimit resolves RATE_LIMIT against the calculated budget.
 //
 // An unset RATE_LIMIT (zero) takes the budget. An explicit value stays an
 // operator override even when it is lower, because pre-authentication flood
 // protection is exactly what an operator may want to tighten; a value below the
 // budget returns a non-empty warning naming both numbers and the cadences that
 // produced them, so the resulting drops are diagnosable.
-func effectiveRateLimit(cfg *config.Config) (limit, budget int, warning string) {
-	budget = rateBudget(cfg)
+func EffectiveRateLimit(cfg *config.Config) (limit, budget int, warning string) {
+	budget = RateBudget(cfg)
 	if cfg.RateLimit == 0 {
 		return budget, budget, ""
 	}

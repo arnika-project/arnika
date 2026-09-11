@@ -16,6 +16,7 @@ import (
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/repositories/pqchpke"
 	"github.com/arnika-project/arnika/services"
+	"github.com/arnika-project/arnika/transport"
 )
 
 // pqcDial opens the initiator's request/response channel to the peer: a
@@ -96,7 +97,7 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 // are returned as functions, not as the concrete repository, so that a second
 // PQC backend can be wired behind its own build tag without touching main.go.
 func getPQCService(cfg *config.Config, logger *slog.Logger, dirOut, dirIn auth.Direction) (
-	*services.KeyReaderService, func(context.Context), pqcHandler, error,
+	*services.KeyReaderService, func(context.Context), transport.PQCHandler, error,
 ) {
 	send, recv, err := pqcDial(cfg, dirOut, dirIn)
 	if err != nil {

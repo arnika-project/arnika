@@ -1,4 +1,8 @@
-package main
+// Package transport carries Arnika's peer protocol: the authenticated UDP
+// listener that both the QKD key identifier and the PQC key-agreement frames
+// travel over, the client that sends one identifier and waits for its
+// acknowledgement, and the per-IP rate limit that bounds all of it.
+package transport
 
 import (
 	"fmt"
@@ -12,7 +16,7 @@ import (
 	"github.com/arnika-project/arnika/auth"
 )
 
-// qkdQueueDepth bounds the hand-off between the UDP read loop and the QKD
+// QKDQueueDepth bounds the hand-off between the UDP read loop and the QKD
 // worker. It is deliberately small: the worker performs one KMS request and one
 // key-writer operation per identifier, so a deeper queue would only accumulate
 // identifiers whose keys are superseded by the time they are served. Eight
@@ -21,20 +25,20 @@ import (
 //
 // Not externally configurable: an operator has no information with which to
 // size this better than the protocol does.
-const qkdQueueDepth = 8
+const QKDQueueDepth = 8
 
 // qkdQueueWarnEvery throttles the queue-full warning. It is emitted from a
 // packet path, so an unthrottled one would let flood traffic turn logging into
 // a denial of service.
 const qkdQueueWarnEvery = 10 * time.Second
 
-// pqcHandler consumes one verified, decrypted PQC frame and may answer the
+// PQCHandler consumes one verified, decrypted PQC frame and may answer the
 // sender through reply, which sends one plaintext frame back. Implemented by
 // pqchpke.Repository.HandleFrame. Neither the handler nor reply may
 // block: both run on the UDP read loop, which also carries the QKD path.
-type pqcHandler func(frame []byte, reply func(frame []byte) error) error
+type PQCHandler func(frame []byte, reply func(frame []byte) error) error
 
-// udpServer listens for incoming UDP packets using the security-hardened protocol:
+// Serve listens for incoming UDP packets using the security-hardened protocol:
 //   - HMAC-SHA256 signature verification (authentication)
 //   - Timestamp validation (replay protection)
 //   - Per-IP rate limiting (flood protection)
@@ -53,7 +57,7 @@ type pqcHandler func(frame []byte, reply func(frame []byte) error) error
 // used to hold preformatted role prefixes, assigned inside main() after the
 // configuration was parsed, so anything logging before that point silently
 // emitted an empty prefix.
-func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result chan string, done chan bool, pqcHandle pqcHandler, rateLimit int, rateWindow, maxClockSkew time.Duration, logger *slog.Logger) {
+func Serve(address string, psk []byte, dirOut, dirIn auth.Direction, result chan string, done chan bool, pqcHandle PQCHandler, rateLimit int, rateWindow, maxClockSkew time.Duration, logger *slog.Logger) error {
 	// Receiving is the BACKUP side of an interval by definition: the peer only
 	// sends a key_id when it is PRIMARY.
 	backupLog := logger.With("role", "backup")
@@ -64,11 +68,11 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 	)
 	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
-		fatal("failed to resolve the UDP listen address", "address", address, "err", err)
+		return fmt.Errorf("failed to resolve the UDP listen address %s: %w", address, err)
 	}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		fatal("failed to listen on UDP", "address", address, "err", err)
+		return fmt.Errorf("failed to listen on UDP %s: %w", address, err)
 	}
 	logger.Info("UDP server started", "address", address)
 
@@ -90,7 +94,7 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 		if err != nil {
 			select {
 			case <-done:
-				return
+				return nil
 			default:
 				logger.Error("UDP read error", "err", err)
 				continue
@@ -195,18 +199,18 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 	}
 }
 
-// udpClientMaxAttempts is how many times udpClient sends one key id while
+// udpClientMaxAttempts is how many times SendKeyID sends one key id while
 // waiting for an ACK, so it is also how many DATA packets one QKD interval can
 // legitimately deliver to the peer's listening socket. Shared with the
 // rate-limit budget so the two cannot drift.
 const udpClientMaxAttempts = 3
 
-// udpClient sends an encrypted, HMAC-signed key ID to the peer via the security-hardened
+// SendKeyID sends an encrypted, HMAC-signed key ID to the peer via the security-hardened
 // UDP protocol. Retries up to udpClientMaxAttempts times on timeout.
 //
 // Protocol flow:
 //  1. Send DATA (signed + encrypted keyID) -> Receive ACK
-func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID string, timeout time.Duration, maxClockSkew time.Duration, logger *slog.Logger) error {
+func SendKeyID(address string, psk []byte, dirOut, dirIn auth.Direction, keyID string, timeout time.Duration, maxClockSkew time.Duration, logger *slog.Logger) error {
 	if address == "" {
 		return fmt.Errorf("address is empty")
 	}
@@ -270,7 +274,7 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 	return fmt.Errorf("unreachable")
 }
 
-// runQKDWorker services the bounded QKD queue until done is closed.
+// RunKeyIDWorker services the bounded QKD queue until done is closed.
 //
 // One worker, not a pool: handle performs the KMS request and the key-writer
 // operation, so two of them running concurrently could install PSKs in the
@@ -279,7 +283,7 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 //
 // It returns on done rather than looping forever, so the worker cannot outlive
 // the UDP server that feeds it.
-func runQKDWorker(done <-chan bool, queue <-chan string, handle func(keyID string)) {
+func RunKeyIDWorker(done <-chan bool, queue <-chan string, handle func(keyID string)) {
 	for {
 		select {
 		case <-done:

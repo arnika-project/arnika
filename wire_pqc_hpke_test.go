@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/arnika-project/arnika/auth"
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/repositories/pqchpke"
+	"github.com/arnika-project/arnika/transport"
 )
 
 // TestPQCAgreementOverRealSockets is the end-to-end test for the wiring, and
@@ -56,8 +59,10 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 		}
 		result := make(chan string, 1)
 		done := make(chan bool)
-		go udpServer(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
-			repo.HandleFrame, 10000, time.Minute, time.Minute, slog.New(slog.DiscardHandler))
+		go func() {
+			_ = transport.Serve(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
+				repo.HandleFrame, 10000, time.Minute, time.Minute, slog.New(slog.DiscardHandler))
+		}()
 		return repo
 	}
 
@@ -129,7 +134,7 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 	cfgA := newCfg(addrA, addrB, "2")
 	cfgB := newCfg(addrB, addrA, "3")
 
-	limit := rateBudget(cfgA)
+	limit := transport.RateBudget(cfgA)
 	start := func(cfg *config.Config, id int) *pqchpke.Repository {
 		t.Helper()
 		dirOut, dirIn := auth.DirectionFor(id)
@@ -145,10 +150,12 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRepository: %v", err)
 		}
-		result := make(chan string, qkdQueueDepth)
+		result := make(chan string, transport.QKDQueueDepth)
 		done := make(chan bool)
-		go udpServer(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
-			repo.HandleFrame, limit, cfg.RateWindow, cfg.MaxClockSkew, slog.New(slog.DiscardHandler))
+		go func() {
+			_ = transport.Serve(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
+				repo.HandleFrame, limit, cfg.RateWindow, cfg.MaxClockSkew, slog.New(slog.DiscardHandler))
+		}()
 		return repo
 	}
 
@@ -181,4 +188,26 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 	if !haveKey {
 		t.Fatalf("no PQC key agreed within %s", runFor)
 	}
+}
+
+// freeUDPPort asks the kernel for an unused port and hands it back.
+//
+// A copy of the transport package's own helper: test helpers are not shared
+// across package boundaries, and eight lines are cheaper than exporting a
+// testing-only function from transport.
+func freeUDPPort(t *testing.T) string {
+	t.Helper()
+	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	c, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := c.LocalAddr().(*net.UDPAddr).Port
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port)
 }

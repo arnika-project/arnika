@@ -62,7 +62,7 @@ initiator -> responder   tag_I         1 frame,  123 bytes
    and publishes too. That tag is both the confirmation and the acknowledgement
    of the reply.
 
-The exchange is the same shape `udpClient` uses for the QKD key id: send a
+The exchange is the same shape `transport.SendKeyID` uses for the QKD key id: send a
 request, read the reply off the dialled socket, retry the whole message on
 timeout. The initiator owns the schedule, the retries and the timeout; the
 responder has none of the three, because the initiator's first message is what
@@ -193,7 +193,7 @@ different one.
 | --- | --- |
 | Frame layer, HPKE core, transport, scheduler | [`repositories/pqchpke/pqchpke.go`](../repositories/pqchpke/pqchpke.go) |
 | Wiring, envelope sealing, peer socket | [`wire_pqc_hpke.go`](../wire_pqc_hpke.go) |
-| Packet type and dispatch | [`auth/auth.go`](../auth/auth.go), [`udpserver.go`](../udpserver.go) |
+| Packet type and dispatch | [`auth/auth.go`](../auth/auth.go), [`transport/server.go`](../transport/server.go) |
 | Configuration | [`config/config.go`](../config/config.go) |
 
 The adapter owns **no socket**. As initiator it sends and receives plaintext
@@ -262,7 +262,7 @@ confirmation tag, so seven inbound packets per round on the responder's
 listening socket. The reply frames leave that socket rather than arriving on it,
 and rate limiting applies only to inbound reads, so they cost nothing. `RATE_LIMIT`
 is sized from these counts when it is unset — see
-[`ratebudget.go`](../ratebudget.go) and the `RATE_LIMIT` row in
+[`transport/budget.go`](../transport/budget.go) and the `RATE_LIMIT` row in
 [`README.md`](../README.md).
 
 The agreement runs unless it is switched off, so an upgraded deployment starts

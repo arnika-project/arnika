@@ -5,7 +5,7 @@
 This document describes the step-by-step code flow of the Arnika key exchange protocol, including a flow diagram and references to the relevant code sections.
 
 The exchange runs over **UDP** between `LISTEN_ADDRESS` and the peer's `SERVER_ADDRESS`
-(`udpserver.go`). Every packet is signed and encrypted with keys derived from the shared secret
+(`transport/server.go`). Every packet is signed and encrypted with keys derived from the shared secret
 `ARNIKA_PSK`, which therefore must be identical on both peers — see
 [`SECURITY.md`](SECURITY.md#inter-peer-channel-authentication-arnika_psk).
 
@@ -75,7 +75,7 @@ sequenceDiagram
 
 ### 6. **BACKUP Enqueues the Key ID**
 
-- **Where:** `udpserver.go` (`qkdQueueDepth`), `main.go` (`result` channel)
+- **Where:** `transport/server.go` (`transport.QKDQueueDepth`), `main.go` (`result` channel)
 - **What:** The read loop hands the decrypted key ID to a bounded queue with a non-blocking send. A full queue leaves the identifier unacknowledged, logs a throttled warning without key material, and lets the sender retry.
 - **Why:** The worker below performs the KMS request and the key-writer operation synchronously. A blocking hand-off stalled the read loop for the length of a KMS outage, and with it every PQC frame arriving on the same socket - far longer than `PQC_ROUND_TIMEOUT`. The queue is bounded because unbounded buffering would only accumulate identifiers whose keys are superseded by the time they are served.
 
@@ -93,7 +93,7 @@ sequenceDiagram
 
 ### 9. **Worker Requests Key from KMS**
 
-- **Where:** `udpserver.go` (`runQKDWorker`), `main.go`, `repositories/kms/kms.go`
+- **Where:** `transport/server.go` (`transport.RunKeyIDWorker`), `main.go`, `repositories/kms/kms.go`
 - **What:** One worker drains the queue and requests the key from KMS using the key ID.
 - **Why:** Ensures both nodes have the same key. One worker and not a pool: the channel is FIFO, so a single consumer is what keeps the PSK writes in the order the peer sent the identifiers. It returns on the server's `done` channel, so it cannot outlive the listener.
 
@@ -115,7 +115,7 @@ sequenceDiagram
 
 - **HMAC-SHA256:** Used for all packet signatures (`Sign`, `Verify`), keyed by `ARNIKA_PSK` with domain separation (`deriveHMACKey`).
 - **AES-256-GCM:** Used for encrypting key material (`Encrypt`, `Decrypt`), keyed by `ARNIKA_PSK` (`deriveKey`).
-- **Rate Limiting:** Per-IP sliding window checked before any crypto — `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `ratebudget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, assuming the maximum inbound role allocation for one peer rather than an even split. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers; the limiter itself is unchanged, so unauthenticated traffic is still bounded per source IP.
+- **Rate Limiting:** Per-IP sliding window checked before any crypto — `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `transport/budget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, assuming the maximum inbound role allocation for one peer rather than an even split. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers; the limiter itself is unchanged, so unauthenticated traffic is still bounded per source IP.
 - **Timestamp Validation:** Replay protection over a ±`MAX_CLOCK_SKEW` window, default ±1m.
 - **Zeroization:** All sensitive key material is handled inside `runtime/secret.Do` blocks to minimize memory exposure. This requires `GOEXPERIMENT=runtimesecret` at build time. `secret.Do` erases registers, stack and unreachable heap allocations **only on `linux/amd64` and `linux/arm64`**; on every other platform it just calls its function. `main()` probes this at startup (`secret.Enabled()` from inside a `Do` block, since it reports the nesting depth) and logs a warning when the erasure is inert, so a build for an unsupported `GOARCH` cannot silently look hardened. The WireGuard PSK additionally never becomes a Go string on the netlink path: the key writer port takes `[]byte` precisely so that the buffer stays clearable, for the same reason `ARNIKA_PSK` is held as `[]byte` on `config.Config`.
 - **Process hardening:** `hardening.Process()` (`hardening/hardening_linux.go`) runs before the configuration is read, so `ARNIKA_PSK` never exists in an exposed process. It sets `PR_SET_DUMPABLE=0` (no core dump; `/proc/<pid>/{mem,environ,maps}` become root-owned and `ptrace` attach needs `CAP_SYS_PTRACE`), `RLIMIT_CORE=0` (a piped `kernel.core_pattern` ignores the dumpable flag), and `mlockall(MCL_CURRENT|MCL_FUTURE)` to keep key material out of swap. Each step is best effort and failures are logged, not fatal: a container without `CAP_IPC_LOCK` must still rekey its tunnel. `mlockall` needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`, since the limit is charged against locked address space and Go reserves ~1.2 GB of arena; a refused lock is safe because `MCL_FUTURE` only takes effect once `mlockall` succeeds.
@@ -141,7 +141,7 @@ far apart can shift a peer onto a different round or have it straddle a
 publish. See [`KEYCONTROL.md`](KEYCONTROL.md) for the reader build tags.
 
 Three messages, two round trips, in the same send-and-wait-for-the-reply shape
-`udpClient` uses for the key id. The initiator owns the schedule, the retries and
+`transport.SendKeyID` uses for the key id. The initiator owns the schedule, the retries and
 the timeout; the responder is driven entirely by the messages it receives.
 
 ```mermaid

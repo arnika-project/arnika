@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"fmt"
@@ -52,8 +52,8 @@ func TestRateBudget(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			want := tc.qkdEvents*qkdPerInterval + tc.pqcEvents*pqcPerRound
-			if got := rateBudget(budgetCfg(tc.interval, tc.round, tc.window, tc.pqc)); got != want {
-				t.Fatalf("rateBudget = %d, want %d", got, want)
+			if got := RateBudget(budgetCfg(tc.interval, tc.round, tc.window, tc.pqc)); got != want {
+				t.Fatalf("RateBudget = %d, want %d", got, want)
 			}
 		})
 	}
@@ -65,7 +65,7 @@ func TestRateBudget(t *testing.T) {
 // included, and only then start rejecting.
 func TestRateBudgetAdmitsMaximumLegitimateTraffic(t *testing.T) {
 	cfg := budgetCfg(5*time.Second, 5*time.Second, time.Minute, true)
-	limit := rateBudget(cfg)
+	limit := RateBudget(cfg)
 
 	limiter := newRateLimiter(limit, cfg.RateWindow)
 	for i := 0; i < limit; i++ {
@@ -103,11 +103,11 @@ func TestRateLimitIsPerSourceIP(t *testing.T) {
 // a warning naming both numbers and the cadences behind them.
 func TestEffectiveRateLimit(t *testing.T) {
 	cfg := budgetCfg(5*time.Second, 5*time.Second, time.Minute, true)
-	budget := rateBudget(cfg)
+	budget := RateBudget(cfg)
 
 	t.Run("unset takes the calculated budget", func(t *testing.T) {
 		cfg.RateLimit = 0
-		limit, got, warning := effectiveRateLimit(cfg)
+		limit, got, warning := EffectiveRateLimit(cfg)
 		if limit != budget || got != budget {
 			t.Fatalf("limit=%d budget=%d, want both %d", limit, got, budget)
 		}
@@ -118,7 +118,7 @@ func TestEffectiveRateLimit(t *testing.T) {
 
 	t.Run("an explicit value at or above the budget is silent", func(t *testing.T) {
 		cfg.RateLimit = budget + 100
-		limit, _, warning := effectiveRateLimit(cfg)
+		limit, _, warning := EffectiveRateLimit(cfg)
 		if limit != budget+100 {
 			t.Fatalf("limit = %d, want the override %d", limit, budget+100)
 		}
@@ -129,7 +129,7 @@ func TestEffectiveRateLimit(t *testing.T) {
 
 	t.Run("an explicit value below the budget is kept and warned about", func(t *testing.T) {
 		cfg.RateLimit = 30
-		limit, got, warning := effectiveRateLimit(cfg)
+		limit, got, warning := EffectiveRateLimit(cfg)
 		if limit != 30 {
 			t.Fatalf("limit = %d, want the override 30", limit)
 		}
@@ -146,7 +146,7 @@ func TestEffectiveRateLimit(t *testing.T) {
 	t.Run("the warning says so when PQC is off", func(t *testing.T) {
 		off := budgetCfg(5*time.Second, 5*time.Second, time.Minute, false)
 		off.RateLimit = 1
-		_, _, warning := effectiveRateLimit(off)
+		_, _, warning := EffectiveRateLimit(off)
 		if !strings.Contains(warning, "disabled") {
 			t.Fatalf("warning %q does not report PQC as disabled", warning)
 		}

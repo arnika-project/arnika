@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"bytes"
@@ -38,14 +38,14 @@ type testPeer struct {
 	done            chan bool
 }
 
-func startTestServer(t *testing.T, handle pqcHandler) *testPeer {
+func startTestServer(t *testing.T, handle PQCHandler) *testPeer {
 	t.Helper()
 	return startTestServerQueue(t, handle, 1)
 }
 
 // startTestServerQueue starts a server whose QKD queue holds queueDepth key
 // ids, so a test can fill it deterministically.
-func startTestServerQueue(t *testing.T, handle pqcHandler, queueDepth int) *testPeer {
+func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *testPeer {
 	t.Helper()
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
 	// Peer signs with its outbound label; the server verifies with dirIn.
@@ -55,7 +55,7 @@ func startTestServerQueue(t *testing.T, handle pqcHandler, queueDepth int) *test
 	addr := freeUDPPort(t)
 	result := make(chan string, queueDepth)
 	done := make(chan bool)
-	go udpServer(addr, psk, srvOut, srvIn, result, done, handle,
+	go Serve(addr, psk, srvOut, srvIn, result, done, handle,
 		10000, time.Minute, time.Minute, slog.New(slog.DiscardHandler))
 
 	conn, err := net.Dial("udp", addr)
@@ -283,7 +283,7 @@ func TestRunQKDWorkerProcessesInReceiveOrder(t *testing.T) {
 	defer close(done)
 
 	seen := make(chan string, n)
-	go runQKDWorker(done, queue, func(keyID string) { seen <- keyID })
+	go RunKeyIDWorker(done, queue, func(keyID string) { seen <- keyID })
 
 	for i := 0; i < n; i++ {
 		want := fmt.Sprintf("key-id-%02d", i)
@@ -317,14 +317,14 @@ func TestRunQKDWorkerStopsOnShutdown(t *testing.T) {
 			exited := make(chan struct{})
 			go func() {
 				defer close(exited)
-				runQKDWorker(done, queue, func(string) {})
+				RunKeyIDWorker(done, queue, func(string) {})
 			}()
 
 			close(done)
 			select {
 			case <-exited:
 			case <-time.After(2 * time.Second):
-				t.Fatal("runQKDWorker did not return after shutdown: goroutine leak")
+				t.Fatal("RunKeyIDWorker did not return after shutdown: goroutine leak")
 			}
 		})
 	}

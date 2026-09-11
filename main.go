@@ -22,6 +22,7 @@ import (
 	"github.com/arnika-project/arnika/kdf"
 	"github.com/arnika-project/arnika/repositories/pqchpke"
 	"github.com/arnika-project/arnika/services"
+	"github.com/arnika-project/arnika/transport"
 )
 
 var (
@@ -210,7 +211,7 @@ func main() {
 	if err := os.Unsetenv("ARNIKA_PSK"); err != nil {
 		slog.Warn("failed to drop ARNIKA_PSK from the environment", "err", err)
 	}
-	limit, budget, warning := effectiveRateLimit(cfg)
+	limit, budget, warning := transport.EffectiveRateLimit(cfg)
 	if warning != "" {
 		slog.Warn(warning)
 	}
@@ -234,14 +235,14 @@ func main() {
 	// says "take the signal if there is one" in a single expression, so a reader
 	// cannot consume twice or forget to consume.
 	var peerSentKeyID atomic.Bool
-	result := make(chan string, qkdQueueDepth)
+	result := make(chan string, transport.QKDQueueDepth)
 	keyWriter, err := getKeyWriterService(cfg)
 	if err != nil {
 		fatal("failed to create the WireGuard key writer", "err", err)
 	}
 	dirOut, dirIn := auth.DirectionFor(arnikaID)
 	var pqc *services.KeyReaderService
-	var pqcHandle pqcHandler
+	var pqcHandle transport.PQCHandler
 	if cfg.UsePQC() {
 		pqcService, pqcRun, handle, err := getPQCService(cfg, arnikaLog, dirOut, dirIn)
 		if err != nil {
@@ -253,7 +254,14 @@ func main() {
 		go pqcRun(pqcCtx)
 	}
 
-	go udpServer(cfg.ListenAddress, cfg.ArnikaPSK, dirOut, dirIn, result, done, pqcHandle, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew, arnikaLog)
+	// Serve returns an error rather than ending the process itself, so the
+	// failure surfaces here, next to every other startup failure.
+	go func() {
+		if err := transport.Serve(cfg.ListenAddress, cfg.ArnikaPSK, dirOut, dirIn, result, done,
+			pqcHandle, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew, arnikaLog); err != nil {
+			fatal("UDP server stopped", "err", err)
+		}
+	}()
 	if qkdCompiled {
 		// Without this the PSK would stay unchanged for as long as the KMS is
 		// down. After two INTERVALs without a key both peers switch, at the same
@@ -273,7 +281,7 @@ func main() {
 			})
 		}
 		qkd := getQKDService(cfg)
-		go runQKDWorker(done, result, func(r string) {
+		go transport.RunKeyIDWorker(done, result, func(r string) {
 			peerSentKeyID.Store(true)
 			backupLog.Info("requesting the QKD key for the peer's key_id", "key_id", r, "kms", cfg.KMSURL)
 			key, err := qkd.GetKeyByID(r)
@@ -328,7 +336,7 @@ func main() {
 								}
 							} else {
 								primaryLog.Info("sending the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress)
-								err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew, primaryLog)
+								err = transport.SendKeyID(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew, primaryLog)
 								if err != nil {
 									primaryLog.Error("failed to send the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress, "err", err)
 								}
@@ -363,7 +371,7 @@ func main() {
 		// PQC-only build: so any key_id from the peer means a misconfigured
 		// build or MODE mismatch. Drain and log it here, or it would just fill
 		// the shared queue and get silently dropped.
-		go runQKDWorker(done, result, func(r string) {
+		go transport.RunKeyIDWorker(done, result, func(r string) {
 			arnikaLog.Warn("received a key_id from the peer, but this binary has no QKD key reader", "key_id", r)
 		})
 		// The PQC key agreement is the only key source here, so every instant
