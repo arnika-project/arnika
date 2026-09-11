@@ -233,15 +233,32 @@ Measured on `linux/amd64` with `-w -s`:
 
 | Build | Size (bytes) | Saved |
 | --- | --- | --- |
-| default (netlink, kms, pqc-hpke) | 7 430 304 | (reference) |
-| `qkd_none` | 4 477 088 | **-2.8 MB (-40 %)** |
-| `wireguard_mikrotik` | 7 221 408 | (reference) |
-| `qkd_none wireguard_mikrotik` | 6 918 304 | -296 KB |
+| default (netlink, kms, pqc-hpke) | 7 544 992 | (reference) |
+| `qkd_none` | 4 505 760 | **-3.0 MB (-40 %)** |
+| `wireguard_mikrotik` | 7 323 808 | (reference) |
+| `qkd_none wireguard_mikrotik` | 7 016 608 | -300 KB |
 
-The whole difference is `net/http` plus `crypto/tls`, which only the `kms`
+What the tag removes is `net/http` plus `crypto/tls`, which only the `kms`
 reader needs. The mikrotik writer keeps them alive on its own, so dropping the
 KMS reader saves little there. A PQC reader costs almost nothing next to that:
 `crypto/tls` already pulls in ML-KEM, SHA-3 and the elliptic-curve stack.
+
+Two changes have moved this number, in opposite directions, and both are worth
+knowing before reading too much into it:
+
+- Splitting `repositories/` into one package per adapter took the saving from
+  40 % to 53 %, because the build tag then controls linkage and not merely
+  which wiring compiles.
+- Adopting `log/slog` gave most of that back: it costs the `qkd_none` build
+  about 1 MB (+28 %) and the default build about 120 KB (+2 %). `log/slog`
+  pulls in `encoding/json` and much more of `reflect` than `log` did, and in a
+  build that still has `net/http` those are alive anyway, so only the build
+  without one pays for them.
+
+The saving is therefore back at 40 %, for a different reason than before. The
+reason to build `qkd_none` is that the binary contains no reachable HTTP or TLS
+code at all, which `go list -tags qkd_none -deps .` confirms independently of
+any byte count.
 
 The `qkdCompiled` constant is what lets the linker drop the code: `main.go`
 guards the whole key_id flow with `if qkdCompiled`, a compile-time constant, so
