@@ -228,11 +228,12 @@ func main() {
 
 	go udpServer(cfg.ListenAddress, cfg.ArnikaPSK, dirOut, dirIn, result, done, pqcHandle, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
 	if qkdCompiled {
-		// This backup timer only runs for MODE=AtLeastPqcRequired or
-		// EitherQkdOrPqcRequired with PQC_ENABLED=true. It sets its own
-		// PQC-only PSK only after two intervals with no QKD key
-		// (lastQKDPSKAt), so rotation keeps going during a KMS outage
-		// without colliding with the QKD path.
+		// Without this the PSK would stay unchanged for as long as the KMS is
+		// down. After two INTERVALs without a key both peers switch, at the same
+		// moment taken from the wall clock, to a PSK built from the PQC key alone,
+		// and renew it every PQC_ROUND_INTERVAL until the KMS returns. Two and not
+		// one, because one late or lost key often affects only one of the two
+		// peers, and switching on it would leave them with different PSKs.
 		if cfg.UsePQC() && !cfg.IsQKDRequired() {
 			lastQKDPSKAt.Store(time.Now().UnixNano())
 			go func() {
