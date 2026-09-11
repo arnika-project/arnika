@@ -2,7 +2,7 @@
 
 - **Status:** Draft
 - **Scope:** PQC key lifetime, UDP dispatch, peer rate limiting, and clock rollback recovery
-- **Related components:** [`config/config.go`](../config/config.go), [`udpserver.go`](../udpserver.go), [`ratelimiter.go`](../ratelimiter.go), [`repositories/pqc-hpke.go`](../repositories/pqc-hpke.go)
+- **Related components:** [`config/config.go`](../config/config.go), [`udpserver.go`](../udpserver.go), [`ratelimiter.go`](../ratelimiter.go), [`repositories/pqchpke/pqchpke.go`](../repositories/pqchpke/pqchpke.go)
 
 ## 1. Summary
 

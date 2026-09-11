@@ -32,9 +32,9 @@ follow, see [`KEYCONTROL.md`](../KEYCONTROL.md).
 | **Module name** | `wireguard-netlink` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | _(default)_ — or `wireguard_netlink` explicitly |
-| **Adapter** | [`repositories/wireguard-netlink.go`](../repositories/wireguard-netlink.go) |
+| **Adapter** | [`repositories/wgnetlink/netlink.go`](../repositories/wgnetlink/netlink.go) |
 | **Tests** | _none_ — see [Testing the Module](#testing-the-module) |
-| **Wiring** | [`wireguardnetlink.go`](../wireguardnetlink.go) |
+| **Wiring** | [`wire_wireguard_netlink.go`](../wire_wireguard_netlink.go) |
 | **Target** | A **local** WireGuard interface on the same host as Arnika |
 | **Transport** | `wgctrl` over netlink (no network I/O) |
 | **Dependencies** | `golang.zx2c4.com/wireguard/wgctrl` |
@@ -88,7 +88,7 @@ the same path, so the session stops matching and traffic stops.
 Two files, following the layout in
 [`KEYCONTROL.md`](../KEYCONTROL.md#naming-and-file-layout-conventions).
 
-### The adapter — `repositories/wireguard-netlink.go`
+### The adapter — `repositories/wgnetlink/netlink.go`
 
 Implements the `keyWriterRepository` contract (`SetPSK`, `InvalidateTunnel`).
 It carries **no build tag**, so it compiles and lints on every build regardless
@@ -114,7 +114,7 @@ Two points distinguish it from the MikroTik adapter:
    anything that is not 32 bytes of valid base64, so malformed PSKs fail before
    reaching the kernel.
 
-### The wiring — `wireguardnetlink.go`
+### The wiring — `wire_wireguard_netlink.go`
 
 ```go
 //go:build wireguard_netlink || !wireguard_mikrotik
@@ -127,7 +127,7 @@ environment beyond the shared config, because this module has no
 backend-specific settings.
 
 Because both this file and
-[`wireguardmikrotik.go`](../wireguardmikrotik.go) define
+[`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go) define
 `getKeyWriterService`, asking for both tags at once is a compile error rather
 than a silent choice.
 
@@ -343,7 +343,7 @@ rotation landing on only one end stops traffic, which is exactly what
 ## Testing the Module
 
 **This module has no unit tests.** There is no
-`repositories/wireguard-netlink_test.go` — unlike the MikroTik adapter, which
+`repositories/wgnetlink/netlink_test.go` — unlike the MikroTik adapter, which
 is covered by an `httptest`-driven suite.
 
 The gap is structural rather than accidental: `wgctrl.New()` is called inside

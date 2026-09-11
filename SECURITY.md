@@ -196,8 +196,8 @@ Key implications for security:
   window and passed directly to the kernel via Netlink. Any path that causes the PSK to be logged
   or written to disk is a high-severity finding.
 - **Two implicit paths to disk are closed at startup, not by policy.** Memory-only is not the same
-  as disk-free: a core dump and the swap file both write the heap out. `hardenProcess()`
-  (`hardening_linux.go`) therefore sets `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0` and
+  as disk-free: a core dump and the swap file both write the heap out. `hardening.Process()`
+  (`hardening/hardening_linux.go`) therefore sets `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0` and
   `mlockall(MCL_CURRENT|MCL_FUTURE)` before the configuration is read, so `ARNIKA_PSK` never exists
   in a process that can be dumped, swapped, or `ptrace`d by its own user. Each step is best effort:
   a container without `CAP_IPC_LOCK` logs a warning and keeps running, so **check the startup log**
@@ -258,7 +258,7 @@ Which peer requests a new key in a given interval is decided locally by
 ### KMS Client Certificates (`CERTIFICATE`, `PRIVATE_KEY`, `CA_CERTIFICATE`)
 
 These three variables configure **client-certificate authentication towards the KMS only**
-(`repositories/kms.go`, wired in `qkdkms.go`). They are used for the ETSI GS QKD 014 HTTPS
+(`repositories/kms/kms.go`, wired in `wire_qkd_kms.go`). They are used for the ETSI GS QKD 014 HTTPS
 connection and for nothing else — in particular they do not protect the inter-peer channel.
 
 They are **all-or-nothing**: if any one of them is empty, client-certificate authentication is

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/arnika-project/arnika/config"
+	"github.com/arnika-project/arnika/hardening"
 	"github.com/arnika-project/arnika/kdf"
 	"github.com/arnika-project/arnika/repositories/pqchpke"
 	"github.com/arnika-project/arnika/services"
@@ -177,7 +178,7 @@ func main() {
 
 	// Harden before the configuration is read, so ARNIKA_PSK never exists in a
 	// process that can be core-dumped, ptraced by its own user, or swapped out.
-	for _, err := range hardenProcess() {
+	for _, err := range hardening.Process() {
 		log.Printf("[WARNING] process hardening incomplete: %v", err)
 	}
 	// runtime/secret erases registers, stack and unreachable heap allocations,

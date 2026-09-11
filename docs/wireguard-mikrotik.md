@@ -32,13 +32,13 @@ follow, see [`KEYCONTROL.md`](../KEYCONTROL.md).
 | **Module name** | `wireguard-mikrotik` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | `wireguard_mikrotik` |
-| **Adapter** | [`repositories/wireguard-mikrotik.go`](../repositories/wireguard-mikrotik.go) |
-| **Tests** | [`repositories/wireguard-mikrotik_test.go`](../repositories/wireguard-mikrotik_test.go) |
-| **Wiring** | [`wireguardmikrotik.go`](../wireguardmikrotik.go) |
+| **Adapter** | [`repositories/wgmikrotik/mikrotik.go`](../repositories/wgmikrotik/mikrotik.go) |
+| **Tests** | [`repositories/wgmikrotik/mikrotik_test.go`](../repositories/wgmikrotik/mikrotik_test.go) |
+| **Wiring** | [`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go) |
 | **Target** | MikroTik RouterOS **v7+** with the WireGuard feature |
 | **Transport** | HTTPS to the RouterOS REST API (`/rest`), HTTP Basic auth |
 | **Dependencies** | Go standard library only |
-| **Replaces** | The default [netlink writer](../repositories/wireguard-netlink.go), which configures a *local* WireGuard interface |
+| **Replaces** | The default [netlink writer](../repositories/wgnetlink/netlink.go), which configures a *local* WireGuard interface |
 
 Use this module when the WireGuard tunnel terminates on a **MikroTik router**.
 The deployment documented here runs Arnika **on the router**, as a container
@@ -84,7 +84,7 @@ creates the interface or the peer.
 Two files, following the layout in
 [`KEYCONTROL.md`](../KEYCONTROL.md#naming-and-file-layout-conventions).
 
-### The adapter — `repositories/wireguard-mikrotik.go`
+### The adapter — `repositories/wgmikrotik/mikrotik.go`
 
 Implements the `keyWriterRepository` contract (`SetPSK`, `InvalidateTunnel`).
 It carries **no build tag**, so it is compiled, vetted, linted and unit-tested
@@ -108,7 +108,7 @@ Three design decisions shape it:
 Non-2xx responses become errors carrying the method, path, status and the first
 512 bytes of the RouterOS error body.
 
-### The wiring — `wireguardmikrotik.go`
+### The wiring — `wire_wireguard_mikrotik.go`
 
 Guarded by `//go:build wireguard_mikrotik`. It is the *only* place this
 backend's environment variables are read, which keeps the shared
@@ -118,7 +118,7 @@ backend's environment variables are read, which keeps the shared
 misconfiguration fails immediately rather than at the first rotation.
 
 Because this file defines `getKeyWriterService`, and
-[`wireguardnetlink.go`](../wireguardnetlink.go) defines the same symbol under
+[`wire_wireguard_netlink.go`](../wire_wireguard_netlink.go) defines the same symbol under
 `//go:build wireguard_netlink || !wireguard_mikrotik`, exactly one writer is
 ever compiled — and asking for both tags is a compile error, not a silent
 choice.
@@ -353,7 +353,7 @@ GOOS=linux GOARCH=arm64 make build-mikrotik         # cross-compiled
 ### Verify the right writer was compiled in
 
 `go test ./...` and `golangci-lint` run against the **default (netlink)** build,
-so they do not cover [`wireguardmikrotik.go`](../wireguardmikrotik.go):
+so they do not cover [`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go):
 
 ```bash
 GOEXPERIMENT=runtimesecret go vet -tags wireguard_mikrotik ./...
@@ -365,7 +365,7 @@ Requesting both writers is a deliberate compile error — this **must** fail:
 
 ```bash
 GOEXPERIMENT=runtimesecret go build -tags "wireguard_netlink wireguard_mikrotik" .
-# ./wireguardnetlink.go:11:6: getKeyWriterService redeclared in this block
+# ./wire_wireguard_netlink.go:11:6: getKeyWriterService redeclared in this block
 ```
 
 ---
@@ -666,7 +666,7 @@ The adapter carries no build tag, so its tests run in the ordinary suite:
 GOEXPERIMENT=runtimesecret go test ./repositories/ -run TestWireguardMikrotik -v
 ```
 
-[`repositories/wireguard-mikrotik_test.go`](../repositories/wireguard-mikrotik_test.go)
+[`repositories/wgmikrotik/mikrotik_test.go`](../repositories/wgmikrotik/mikrotik_test.go)
 stands up an `httptest.Server` impersonating the RouterOS peers collection:
 
 | Test | What it pins down |

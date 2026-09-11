@@ -28,8 +28,8 @@ provider: no external daemon, no key on disk, no new port.
 | Selection | Runtime, via `PQC_ENABLED`, **enabled by default** |
 | Build tag | _(none, the sole PQC backend, always compiled)_ |
 | Platform | any |
-| Adapter | [`repositories/pqc-hpke.go`](../repositories/pqc-hpke.go) |
-| Tests | [`repositories/pqc-hpke_test.go`](../repositories/pqc-hpke_test.go) |
+| Adapter | [`repositories/pqchpke/pqchpke.go`](../repositories/pqchpke/pqchpke.go) |
+| Tests | [`repositories/pqchpke/pqchpke_test.go`](../repositories/pqchpke/pqchpke_test.go) |
 | Ciphersuite | MLKEM1024-P384 · HKDF-SHA384 · ExportOnly |
 | Dependencies | Go standard library only (`crypto/hpke`, `crypto/hkdf`, `crypto/sha3`) |
 | Key at rest | none |
@@ -191,8 +191,8 @@ different one.
 
 | Concern | Location |
 | --- | --- |
-| Frame layer, HPKE core, transport, scheduler | [`repositories/pqc-hpke.go`](../repositories/pqc-hpke.go) |
-| Wiring, envelope sealing, peer socket | [`pqchpke.go`](../pqchpke.go) |
+| Frame layer, HPKE core, transport, scheduler | [`repositories/pqchpke/pqchpke.go`](../repositories/pqchpke/pqchpke.go) |
+| Wiring, envelope sealing, peer socket | [`wire_pqc_hpke.go`](../wire_pqc_hpke.go) |
 | Packet type and dispatch | [`auth/auth.go`](../auth/auth.go), [`udpserver.go`](../udpserver.go) |
 | Configuration | [`config/config.go`](../config/config.go) |
 
@@ -426,7 +426,7 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
   destroy method, so the decapsulation key stays in the heap until the GC
   reclaims it. It is per-round and useless without that round's encapsulation off
   the wire, and anyone able to read Arnika's heap can read the published key
-  directly. `hardenProcess()` is what keeps the heap unreadable: `PR_SET_DUMPABLE=0`,
+  directly. `hardening.Process()` is what keeps the heap unreadable: `PR_SET_DUMPABLE=0`,
   `RLIMIT_CORE=0` and `mlockall`, see [`CODEFLOW.md`](../CODEFLOW.md).
 - **Replay freshness.** The envelope authenticates a frame but does not make it
   fresh: its timestamp is only bounded by `MAX_CLOCK_SKEW`, a minute by default,

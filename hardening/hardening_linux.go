@@ -1,6 +1,9 @@
 //go:build linux
 
-package main
+// Package hardening closes the paths by which key material reaches disk or
+// another process. Its one entry point is Process, which is best effort on
+// every platform and reports what it could not do rather than failing.
+package hardening
 
 import (
 	"fmt"
@@ -8,14 +11,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// hardenProcess closes the paths by which key material reaches disk or another
+// Process closes the paths by which key material reaches disk or another
 // process: core dumps, /proc reads by the same user, ptrace, and swap.
 //
 // Every step is best effort. A container without CAP_IPC_LOCK, or a seccomp
 // profile that filters prctl, must not stop Arnika from rekeying a tunnel, so
 // failures are returned for the caller to log rather than being fatal. The
 // operator then sees exactly which guarantee is missing.
-func hardenProcess() []error {
+func Process() []error {
 	var errs []error
 
 	// PR_SET_DUMPABLE 0 suppresses the core dump and, more importantly, makes

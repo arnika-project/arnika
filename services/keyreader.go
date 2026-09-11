@@ -1,11 +1,6 @@
-// Package services implements business logic for key management operations.
 package services
 
-import (
-	"fmt"
-
-	"github.com/arnika-project/arnika/models"
-)
+import "fmt"
 
 // KeyReader is the port every key source implements.
 //
@@ -38,12 +33,12 @@ func NewKeyReaderService(repo KeyReader) *KeyReaderService {
 	return &KeyReaderService{repo: repo}
 }
 
-func (s *KeyReaderService) GetNewKey() (*models.Key, error) {
+func (s *KeyReaderService) GetNewKey() (*Key, error) {
 	id, key, err := s.repo.GetNewKey()
 	if err != nil {
 		return nil, err
 	}
-	return &models.Key{ID: id, Key: key}, nil
+	return &Key{ID: id, Key: key}, nil
 }
 
 // GetKeyByID returns the key the peer identified.
@@ -51,7 +46,7 @@ func (s *KeyReaderService) GetNewKey() (*models.Key, error) {
 // The capability is checked here, at the point of use, in the ordinary Go way.
 // The alternative, requiring every source to implement a method most of them
 // cannot serve, is what the split port avoids.
-func (s *KeyReaderService) GetKeyByID(id string) (*models.Key, error) {
+func (s *KeyReaderService) GetKeyByID(id string) (*Key, error) {
 	resolver, ok := s.repo.(KeyResolver)
 	if !ok {
 		return nil, fmt.Errorf("this key source issues no key identifiers, so %q cannot be resolved", id)
@@ -60,5 +55,5 @@ func (s *KeyReaderService) GetKeyByID(id string) (*models.Key, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &models.Key{ID: id, Key: key}, nil
+	return &Key{ID: id, Key: key}, nil
 }

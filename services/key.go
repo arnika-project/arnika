@@ -1,5 +1,5 @@
-// Package models defines shared data types used across the application.
-package models
+// Package services implements business logic for key management operations.
+package services
 
 // Key is one piece of key material, with the identifier a peer needs to obtain
 // the same key from its own key management system.

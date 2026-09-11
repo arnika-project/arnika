@@ -13,9 +13,9 @@ This is the single document for the `wireguard-netlink-netns` module. For the ge
 | **Module name** | `wireguard-netlink-netns` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | `wireguard_netlink_netns` |
-| **Adapter** | [`repositories/wireguard-netlink-netns.go`](../repositories/wireguard-netlink-netns.go) |
+| **Adapter** | [`repositories/wgnetlink/netns.go`](../repositories/wgnetlink/netns.go) |
 | **Tests** | _no unit tests_, only integration tests in `ci/namespaces` ran by the CI |
-| **Wiring** | [`wireguardnetlinknetns.go`](../wireguardnetlinknetns.go) |
+| **Wiring** | [`wire_wireguard_netlink_netns.go`](../wire_wireguard_netlink_netns.go) |
 | **Target** | A **local** WireGuard interface in a network namespace |
 | **Transport** | `wgctrl` over netlink inside the namespace |
 | **Dependencies** | `golang.zx2c4.com/wireguard/wgctrl`, `github.com/containernetworking/plugins/pkg/ns` |

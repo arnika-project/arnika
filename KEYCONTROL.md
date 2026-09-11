@@ -12,13 +12,14 @@ its configuration, its remote prerequisites, its build and deployment steps —
 belongs in that module's own document under [`docs/`](docs/), never here.
 
 > **Documentation rule:** every key reader and key writer module is documented
-> in **exactly one** file at `docs/<module-name>.md`, where `<module-name>`
-> matches the adapter file name in [`repositories/`](repositories/).
-> For example `repositories/wireguard-mikrotik.go` →
+> in **exactly one** file at `docs/<module-name>.md`, where `<module-name>` is
+> the name in the [Module Index](#module-index).
+> For example the `wireguard-mikrotik` module →
 > [`docs/wireguard-mikrotik.md`](docs/wireguard-mikrotik.md).
-> A `_GOOS` or `_GOARCH` suffix is **not** part of the module name:
-> `repositories/wireguard-netlink-netns_linux.go` is still the
-> `wireguard-netlink-netns` module, documented at `docs/wireguard-netlink-netns.md`.
+> The module name is not the adapter's file name, and not its package name:
+> one package can hold more than one module, as
+> [`repositories/wgnetlink/`](repositories/wgnetlink/) holds both
+> `wireguard-netlink` and `wireguard-netlink-netns`.
 > A module is not finished until that document exists.
 
 ---
@@ -106,11 +107,11 @@ signal.
 
 | Module | Kind | Adapter | Build tag | Platform | Document |
 | --- | --- | --- | --- | --- | --- |
-| `kms` | Reader (managed) | [`repositories/kms.go`](repositories/kms.go) | *(default)* / `qkd_kms` | any | *pending* — see [`KMS.md`](KMS.md) |
-| `pqc-hpke` | Reader (unmanaged) | [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) | *(none, sole PQC backend)* | any | [`docs/pqc-hpke.md`](docs/pqc-hpke.md) |
-| `wireguard-netlink` | Writer | [`repositories/wireguard-netlink.go`](repositories/wireguard-netlink.go) | *(default)* / `wireguard_netlink` | linux *(compiles elsewhere, no device)* | [`docs/wireguard-netlink.md`](docs/wireguard-netlink.md) |
-| `wireguard-netlink-netns` | Writer | [`repositories/wireguard-netlink-netns.go`](repositories/wireguard-netlink-netns.go) | `wireguard_netlink_netns` | linux | [`docs/wireguard-netlink-netns.md`](docs/wireguard-netlink-netns.md) |
-| `wireguard-mikrotik` | Writer | [`repositories/wireguard-mikrotik.go`](repositories/wireguard-mikrotik.go) | `wireguard_mikrotik` | any | [`docs/wireguard-mikrotik.md`](docs/wireguard-mikrotik.md) |
+| `kms` | Reader (managed) | [`repositories/kms/kms.go`](repositories/kms/kms.go) | *(default)* / `qkd_kms` | any | *pending* — see [`KMS.md`](KMS.md) |
+| `pqc-hpke` | Reader (unmanaged) | [`repositories/pqchpke/pqchpke.go`](repositories/pqchpke/pqchpke.go) | *(none, sole PQC backend)* | any | [`docs/pqc-hpke.md`](docs/pqc-hpke.md) |
+| `wireguard-netlink` | Writer | [`repositories/wgnetlink/netlink.go`](repositories/wgnetlink/netlink.go) | *(default)* / `wireguard_netlink` | linux *(compiles elsewhere, no device)* | [`docs/wireguard-netlink.md`](docs/wireguard-netlink.md) |
+| `wireguard-netlink-netns` | Writer | [`repositories/wgnetlink/netns.go`](repositories/wgnetlink/netns.go) | `wireguard_netlink_netns` | linux | [`docs/wireguard-netlink-netns.md`](docs/wireguard-netlink-netns.md) |
+| `wireguard-mikrotik` | Writer | [`repositories/wgmikrotik/mikrotik.go`](repositories/wgmikrotik/mikrotik.go) | `wireguard_mikrotik` | any | [`docs/wireguard-mikrotik.md`](docs/wireguard-mikrotik.md) |
 
 ---
 
@@ -118,8 +119,8 @@ signal.
 
 | Concern | Port (service) | Adapter interface | Adapters (repositories) |
 | --- | --- | --- | --- |
-| Read keys | [`services/keyreader.go`](services/keyreader.go) `KeyReaderService` | `KeyReaderManaged`, `KeyReaderUnmanaged` | [`repositories/kms.go`](repositories/kms.go), [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) |
-| Write keys | [`services/keywriter.go`](services/keywriter.go) `KeyWriterService` | `keyWriterRepository` (`SetPSK`, `InvalidateTunnel`) | [`repositories/wireguard-netlink.go`](repositories/wireguard-netlink.go), [`repositories/wireguard-mikrotik.go`](repositories/wireguard-mikrotik.go) |
+| Read keys | [`services/keyreader.go`](services/keyreader.go) `KeyReaderService` | `KeyReader`, plus the optional `KeyResolver` | [`repositories/kms/kms.go`](repositories/kms/kms.go), [`repositories/pqchpke/pqchpke.go`](repositories/pqchpke/pqchpke.go) |
+| Write keys | [`services/keywriter.go`](services/keywriter.go) `KeyWriterService` | `keyWriterRepository` (`SetPSK`) | [`repositories/wgnetlink/netlink.go`](repositories/wgnetlink/netlink.go), [`repositories/wgmikrotik/mikrotik.go`](repositories/wgmikrotik/mikrotik.go) |
 
 ---
 
@@ -130,10 +131,20 @@ set of paths. Following them is what makes a module discoverable:
 
 | Path | Purpose | Backend-selection tag? |
 | --- | --- | --- |
-| `repositories/<module-name>.go` | The adapter, all backend logic | **No**, always compiled. May carry a *platform* constraint |
-| `repositories/<module-name>_test.go` | Adapter unit tests | **No**, always run. Same platform constraint as the adapter |
-| `<moduletag>.go` (repo root) | Wiring: the `getQKDService`, `getPQCService` or `getKeyWriterService` factory | **Yes** |
+| `repositories/<pkg>/` | The adapter's own package, all backend logic | **No**, always compiled. May carry a *platform* constraint |
+| `repositories/<pkg>/<name>_test.go` | Adapter unit tests | **No**, always run. Same platform constraint as the adapter |
+| `wire_<moduletag>.go` (repo root) | Wiring: the `getQKDService`, `getPQCService` or `getKeyWriterService` factory | **Yes** |
 | `docs/<module-name>.md` | The module's single document | (none) |
+
+The wiring file name is `wire_` plus the build tag verbatim, so
+`//go:build wireguard_netlink_netns` lives in `wire_wireguard_netlink_netns.go`.
+The prefix keeps every composition file together at the top of the root
+listing, and separates them from the protocol code that also lives there.
+
+One package per adapter, and not one shared `repositories` package, because the
+build tags then control **linkage** and not merely which wiring compiles: a
+`qkd_none` build imports no `repositories/kms`, so `net/http` and `crypto/tls`
+never enter its dependency graph.
 
 Three rules follow from that table and are worth stating explicitly:
 
@@ -153,7 +164,7 @@ Three rules follow from that table and are worth stating explicitly:
    // This is not a writer-selection tag; the adapter still compiles,
    // vets, lints and tests on every ordinary `go test ./...` run.
 
-   package repositories
+   package <pkg>
    ```
 
    This does not weaken rule 1. Linux is the reference platform (see
@@ -196,7 +207,7 @@ type KeyReaderManaged interface {
 ```
 
 Readers return **raw key bytes**, not base64. `KeyReaderService` wraps them
-into a [`models.Key`](models/) and tags it managed or unmanaged; the base64
+into a [`services.Key`](services/key.go) and tags it managed or unmanaged; the base64
 encoding happens once, in `setPSK`, immediately before handing the PSK to the
 writer.
 
@@ -207,17 +218,17 @@ file per build, and that file defines exactly one factory:
 
 | Port | Factory | Wiring file | Build constraint |
 | --- | --- | --- | --- |
-| QKD (managed) | `getQKDService` | [`qkdkms.go`](qkdkms.go) | `qkd_kms \|\| !qkd_none` |
-| | | [`qkdnone.go`](qkdnone.go) | `qkd_none` |
-| PQC (unmanaged) | `getPQCService` | [`pqchpke.go`](pqchpke.go) | *(none, sole backend)* |
+| QKD (managed) | `getQKDService` | [`wire_qkd_kms.go`](wire_qkd_kms.go) | `qkd_kms \|\| !qkd_none` |
+| | | [`wire_qkd_none.go`](wire_qkd_none.go) | `qkd_none` |
+| PQC (unmanaged) | `getPQCService` | [`wire_pqc_hpke.go`](wire_pqc_hpke.go) | *(none, sole backend)* |
 
-`pqchpke.go` carries **no tag**, because a family with one member has nothing to
+`wire_pqc_hpke.go` carries **no tag**, because a family with one member has nothing to
 select. The preparation for a second PQC backend is the file *name*: adding, say,
-`pqctls.go` with `//go:build pqc_tls` means adding `//go:build pqc_hpke ||
-!pqc_tls` to `pqchpke.go`, and nothing else moves. Whether the one compiled-in
+`wire_pqc_tls.go` with `//go:build pqc_tls` means adding `//go:build pqc_hpke ||
+!pqc_tls` to `wire_pqc_hpke.go`, and nothing else moves. Whether the one compiled-in
 PQC reader contributes to the PSK stays a runtime decision (`PQC_ENABLED`).
 
-The QKD family earns its tags, and `qkdnone.go` is where the size goes.
+The QKD family earns its tags, and `wire_qkd_none.go` is where the size goes.
 Measured on `linux/amd64` with `-w -s`:
 
 | Build | Size (bytes) | Saved |
@@ -253,11 +264,11 @@ at startup rather than at the first rotation.
 1. **Write the adapter** at `repositories/<module-name>.go` implementing either
    `KeyReaderManaged` or `KeyReaderUnmanaged`. Handle key material carefully:
    decode inside a `secret.Do(...)` block and `clear()` every intermediate
-   buffer, as [`repositories/pqc-hpke.go`](repositories/pqc-hpke.go) does.
+   buffer, as [`repositories/pqchpke/pqchpke.go`](repositories/pqchpke/pqchpke.go) does.
 2. **Add a constructor** `New<Backend>Repository(...)` that takes everything it
    needs as arguments — no global state, no direct `os.Getenv` in the adapter.
 3. **Add the wiring file** at the repo root, named after the tag, e.g.
-   `qkdfoo.go` with `//go:build qkd_foo`. It defines `get<Port>Service`, the
+   `wire_qkd_foo.go` with `//go:build qkd_foo`. It defines `get<Port>Service`, the
    `<port>Compiled` constant, and reads its own environment variables (see
    [rule 3](#naming-and-file-layout-conventions)). Assign the adapter to the
    matching interface variable and pass it to `services.NewKeyReaderService`.
@@ -316,9 +327,9 @@ The mechanism is a single factory function, `getKeyWriterService(cfg)`, that is
 
 | File | Build constraint |
 | --- | --- |
-| [`wireguardnetlink.go`](wireguardnetlink.go) | `//go:build wireguard_netlink \|\| (!wireguard_mikrotik && !wireguard_netlink_netns)` |
-| [`wireguardmikrotik.go`](wireguardmikrotik.go) | `//go:build wireguard_mikrotik` |
-| [`wireguardnetlinknetns.go`](wireguardnetlinknetns.go) | `//go:build wireguard_netlink_netns` |
+| [`wire_wireguard_netlink.go`](wire_wireguard_netlink.go) | `//go:build wireguard_netlink \|\| (!wireguard_mikrotik && !wireguard_netlink_netns)` |
+| [`wire_wireguard_mikrotik.go`](wire_wireguard_mikrotik.go) | `//go:build wireguard_mikrotik` |
+| [`wire_wireguard_netlink_netns.go`](wire_wireguard_netlink_netns.go) | `//go:build wireguard_netlink_netns` |
 
 `main.go` calls `getKeyWriterService(cfg)` without knowing which file provides
 it. The constraints are designed so that netlink is the **default** and so that
@@ -364,7 +375,7 @@ that must not survive a build.
    ```
 
 2. **Add the wiring file** at the repo root, named after the tag, e.g.
-   `wireguardfoo.go`:
+   `wire_wireguard_foo.go`:
 
    ```go
    //go:build wireguard_foo
@@ -383,7 +394,7 @@ that must not survive a build.
 
 3. **Update the default constraint.** So that exactly one writer compiles, add
    your tag to the *negated* clause of the netlink default in
-   [`wireguardnetlink.go`](wireguardnetlink.go), **keeping the leading
+   [`wire_wireguard_netlink.go`](wire_wireguard_netlink.go), **keeping the leading
    `wireguard_netlink ||` clause intact**:
 
    ```go
@@ -396,7 +407,7 @@ that must not survive a build.
 4. **Add tests** at `repositories/<module-name>_test.go`. For a network
    backend, stand up an `httptest.Server` that impersonates the remote API and
    assert on the requests the adapter makes — see
-   [`repositories/wireguard-mikrotik_test.go`](repositories/wireguard-mikrotik_test.go)
+   [`repositories/wgmikrotik/mikrotik_test.go`](repositories/wgmikrotik/mikrotik_test.go)
    for a worked example, including the check that `InvalidateTunnel` produces a
    fresh 32-byte key on each call.
 
@@ -504,8 +515,8 @@ Before considering a module done:
 - [ ] Key material cleared with `clear()` / handled inside `secret.Do(...)`
 - [ ] Writers: `SetPSK` re-resolves its target on every call
 - [ ] Writers: `InvalidateTunnel` installs a fresh random 32-byte PSK
-- [ ] Wiring file added, and its family's default constraint updated (`wireguardnetlink.go`
-      or `qkdkms.go`; `pqchpke.go` gets its first constraint with a second PQC backend),
+- [ ] Wiring file added, and its family's default constraint updated (`wire_wireguard_netlink.go`
+      or `wire_qkd_kms.go`; `wire_pqc_hpke.go` gets its first constraint with a second PQC backend),
       keeping the leading `<tag> ||` clause
 - [ ] Readers that can be absent from a build: a `<port>Compiled` constant in the wiring
       file, and a `ValidateKeySources` case for the modes it cannot serve

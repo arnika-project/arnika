@@ -45,13 +45,13 @@ sequenceDiagram
 
 ### 2. **PRIMARY Requests Key from KMS**
 
-- **Where:** `main.go`, via `services.KeyReaderService` (`repositories/kms.go`)
+- **Where:** `main.go`, via `services.KeyReaderService` (`repositories/kms/kms.go`)
 - **What:** PRIMARY node requests a new key from the Key Management Server (KMS).
 - **Why:** Only PRIMARY initiates key rotation.
 
 ### 3. **KMS Returns Key**
 
-- **Where:** `repositories/kms.go`
+- **Where:** `repositories/kms/kms.go`
 - **What:** KMS responds with the new key.
 - **Why:** PRIMARY needs the key to start the exchange.
 
@@ -93,13 +93,13 @@ sequenceDiagram
 
 ### 9. **Worker Requests Key from KMS**
 
-- **Where:** `udpserver.go` (`runQKDWorker`), `main.go`, `repositories/kms.go`
+- **Where:** `udpserver.go` (`runQKDWorker`), `main.go`, `repositories/kms/kms.go`
 - **What:** One worker drains the queue and requests the key from KMS using the key ID.
 - **Why:** Ensures both nodes have the same key. One worker and not a pool: the channel is FIFO, so a single consumer is what keeps the PSK writes in the order the peer sent the identifiers. It returns on the server's `done` channel, so it cannot outlive the listener.
 
 ### 10. **KMS Returns Key**
 
-- **Where:** `repositories/kms.go`
+- **Where:** `repositories/kms/kms.go`
 - **What:** KMS responds with the key.
 - **Why:** Synchronizes key material.
 
@@ -118,7 +118,7 @@ sequenceDiagram
 - **Rate Limiting:** Per-IP sliding window checked before any crypto — `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `ratebudget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, assuming the maximum inbound role allocation for one peer rather than an even split. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers; the limiter itself is unchanged, so unauthenticated traffic is still bounded per source IP.
 - **Timestamp Validation:** Replay protection over a ±`MAX_CLOCK_SKEW` window, default ±1m.
 - **Zeroization:** All sensitive key material is handled inside `runtime/secret.Do` blocks to minimize memory exposure. This requires `GOEXPERIMENT=runtimesecret` at build time. `secret.Do` erases registers, stack and unreachable heap allocations **only on `linux/amd64` and `linux/arm64`**; on every other platform it just calls its function. `main()` probes this at startup (`secret.Enabled()` from inside a `Do` block, since it reports the nesting depth) and logs a warning when the erasure is inert, so a build for an unsupported `GOARCH` cannot silently look hardened.
-- **Process hardening:** `hardenProcess()` (`hardening_linux.go`) runs before the configuration is read, so `ARNIKA_PSK` never exists in an exposed process. It sets `PR_SET_DUMPABLE=0` (no core dump; `/proc/<pid>/{mem,environ,maps}` become root-owned and `ptrace` attach needs `CAP_SYS_PTRACE`), `RLIMIT_CORE=0` (a piped `kernel.core_pattern` ignores the dumpable flag), and `mlockall(MCL_CURRENT|MCL_FUTURE)` to keep key material out of swap. Each step is best effort and failures are logged, not fatal: a container without `CAP_IPC_LOCK` must still rekey its tunnel. `mlockall` needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`, since the limit is charged against locked address space and Go reserves ~1.2 GB of arena; a refused lock is safe because `MCL_FUTURE` only takes effect once `mlockall` succeeds.
+- **Process hardening:** `hardening.Process()` (`hardening/hardening_linux.go`) runs before the configuration is read, so `ARNIKA_PSK` never exists in an exposed process. It sets `PR_SET_DUMPABLE=0` (no core dump; `/proc/<pid>/{mem,environ,maps}` become root-owned and `ptrace` attach needs `CAP_SYS_PTRACE`), `RLIMIT_CORE=0` (a piped `kernel.core_pattern` ignores the dumpable flag), and `mlockall(MCL_CURRENT|MCL_FUTURE)` to keep key material out of swap. Each step is best effort and failures are logged, not fatal: a container without `CAP_IPC_LOCK` must still rekey its tunnel. `mlockall` needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`, since the limit is charged against locked address space and Go reserves ~1.2 GB of arena; a refused lock is safe because `MCL_FUTURE` only takes effect once `mlockall` succeeds.
 - **Secret lifetime:** `ARNIKA_PSK` is held as `[]byte` on `config.Config`, not `string`: Go strings are immutable, so a secret held as one cannot be overwritten and every consumer needing bytes would leave a fresh unclearable heap copy behind on each interval and each PQC round. `main()` drops the variable from the environment with `os.Unsetenv` after parsing and wipes the field via `cfg.ZeroSecrets()` on shutdown. `os.Unsetenv` prevents inheritance by a child process but does **not** scrub `/proc/<pid>/environ`, which reflects the environment as of `execve`; `PR_SET_DUMPABLE=0` is what makes that unreadable.
 
 ---
