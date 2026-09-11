@@ -20,7 +20,7 @@
 //
 //  1. frame layer         - splitting and reassembling messages that exceed one datagram
 //  2. HPKE core           - the key agreement itself, plus mandatory key confirmation
-//  3. transport/scheduler - rounds, retries and the KeyReaderUnmanaged surface
+//  3. transport/scheduler - rounds, retries and the key reader surface
 package pqchpke
 
 import (
@@ -383,7 +383,7 @@ type pqcResponderState struct {
 	reply [][]byte
 }
 
-// Repository implements services.KeyReaderUnmanaged by running an HPKE
+// Repository agrees the PQC key by running an HPKE
 // key agreement with the Arnika peer once per round. It replaces reading the
 // PQC key via file from an external PQC provider; the key never touches disk.
 //
@@ -553,7 +553,7 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 	}
 }
 
-// GetNewKey implements services.KeyReaderUnmanaged.
+// GetNewKey returns the current agreed key.
 //
 // It reads a register rather than a channel: it is called synchronously from
 // setPSK(), may be called more than once per round, and needs the key's age.

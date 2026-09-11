@@ -18,7 +18,6 @@ func newTestRepo(baseURL string, maxRetries int) *Repository {
 		maxRetries:       maxRetries,
 		backoffBaseDelay: time.Millisecond,
 		conn:             &http.Client{Timeout: 5 * time.Second},
-		Managed:          true,
 	}
 }
 

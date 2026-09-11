@@ -116,6 +116,22 @@ func getPQCService(cfg *config.Config, dirOut, dirIn auth.Direction) (
 		return nil, nil, nil, err
 	}
 
-	var unmanaged services.KeyReaderUnmanaged = pqcRepo
-	return services.NewKeyReaderService(&unmanaged), pqcRepo.Run, pqcRepo.HandleFrame, nil
+	return services.NewKeyReaderService(pqcReader{pqcRepo}), pqcRepo.Run, pqcRepo.HandleFrame, nil
+}
+
+// pqcReader adapts the pqc-hpke reader to the services.KeyReader port.
+//
+// The port carries a key identifier because a KMS-backed source needs one to
+// put both peers on the same key. This source needs none: both peers derive
+// the key from the agreement itself, so the identifier is always empty, and
+// saying that here keeps the adapter's own signature honest rather than making
+// it return an identifier it never has.
+//
+// It implements no GetKeyByID, which is exactly how services.KeyReaderService
+// learns that this source has nothing to resolve.
+type pqcReader struct{ repo *pqchpke.Repository }
+
+func (r pqcReader) GetNewKey() (string, []byte, error) {
+	key, err := r.repo.GetNewKey()
+	return "", key, err
 }

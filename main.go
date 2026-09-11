@@ -268,7 +268,7 @@ func main() {
 			default:
 			}
 			log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPLOGPREFIX, r, cfg.KMSURL)
-			key, err := qkd.GetKeyByID(&r)
+			key, err := qkd.GetKeyByID(r)
 			if err != nil {
 				log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPLOGPREFIX, r, cfg.KMSURL, err)
 				if shouldSetPSKOnQKDFailure(cfg) {
@@ -309,17 +309,22 @@ func main() {
 						select {
 						case <-skip:
 						default:
-							if !key.IsManaged() && key.ID == nil {
+							// Checked against the empty string, not against a
+							// nil pointer: the previous form could never fire,
+							// because the service handed out a pointer to its
+							// own local variable even when the KMS returned no
+							// identifier at all.
+							if key.ID == "" {
 								log.Printf("[ERROR] %s received empty key_id from KMS, skipping this interval", PRIMARYLOGPREFIX)
 								if shouldSetPSKOnQKDFailure(cfg) {
 									setPSK(keyWriter, pqc, nil, cfg, PRIMARYLOGPREFIX)
 								}
 								break
 							}
-							log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress)
-							err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, *key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
+							log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, key.ID, cfg.ServerAddress)
+							err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
 							if err != nil {
-								log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress, err)
+								log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, key.ID, cfg.ServerAddress, err)
 							}
 							setPSK(keyWriter, pqc, key.Key, cfg, PRIMARYLOGPREFIX)
 						}

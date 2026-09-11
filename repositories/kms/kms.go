@@ -54,7 +54,6 @@ type Repository struct {
 	maxRetries       int
 	backoffBaseDelay time.Duration
 	conn             *http.Client
-	Managed          bool
 }
 
 func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, auth *Auth) *Repository {
@@ -87,7 +86,6 @@ func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBas
 			Timeout:   timeout,
 			Transport: tr,
 		},
-		Managed: true,
 	}
 }
 
@@ -95,11 +93,11 @@ func (r *Repository) GetNewKey() (keyID string, key []byte, err error) {
 	return r.kmsRequest("/enc_keys?number=1&size=256")
 }
 
-func (r *Repository) GetKeyByID(keyID *string) (key []byte, err error) {
-	if keyID == nil || *keyID == "" {
+func (r *Repository) GetKeyByID(keyID string) (key []byte, err error) {
+	if keyID == "" {
 		return nil, fmt.Errorf("keyID is empty")
 	}
-	_, key, err = r.kmsRequest("/dec_keys?key_ID=" + *keyID)
+	_, key, err = r.kmsRequest("/dec_keys?key_ID=" + keyID)
 	return key, err
 }
 
