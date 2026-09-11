@@ -27,15 +27,7 @@ func NewRepository(interfaceName, peerPublicKey string) (*Repository, error) {
 	}, nil
 }
 
-func (r *Repository) InvalidateTunnel() error {
-	psk, err := wgtypes.GenerateKey()
-	if err != nil {
-		return err
-	}
-	return r.SetPSK(psk.String())
-}
-
-func (r *Repository) SetPSK(psk string) error {
+func (r *Repository) SetPSK(psk []byte) error {
 	// Verify the specified interface exists
 	peers, err := r.conn.Device(r.InterfaceName)
 	if err != nil {
@@ -57,7 +49,10 @@ func (r *Repository) SetPSK(psk string) error {
 	if !found {
 		return fmt.Errorf("peer with public key %s not found on interface %s", r.PeerPublicKey, r.InterfaceName)
 	}
-	validPSK, err := wgtypes.ParseKey(psk)
+	// NewKey and not ParseKey: netlink wants the 32 bytes, so a base64 round
+	// trip here would exist only to undo an encoding the caller should not have
+	// applied. NewKey rejects any length other than 32.
+	validPSK, err := wgtypes.NewKey(psk)
 	if err != nil {
 		return err
 	}

@@ -9,7 +9,6 @@ import (
 	"fmt"
 
 	"github.com/containernetworking/plugins/pkg/ns"
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 type NetnsRepository struct {
@@ -29,15 +28,7 @@ func NewNetnsRepository(interfaceName, peerPublicKey, netnsPath string) (*NetnsR
 	}, nil
 }
 
-func (r *NetnsRepository) InvalidateTunnel() error {
-	psk, err := wgtypes.GenerateKey()
-	if err != nil {
-		return err
-	}
-	return r.SetPSK(psk.String())
-}
-
-func (r *NetnsRepository) SetPSK(psk string) (err error) {
+func (r *NetnsRepository) SetPSK(psk []byte) (err error) {
 	targetNS, err := ns.GetNS(r.netnsPath)
 	if err != nil {
 		return fmt.Errorf("failed to open network namespace %s: %w", r.netnsPath, err)

@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"github.com/arnika-project/arnika/auth"
@@ -115,9 +114,7 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 		msg = fmt.Sprintf("[ERROR] %s no PSK available", logPrefix)
 		return
 	}
-	// Encode to base64 for WireGuard interface (requires string)
-	pskStr := base64.StdEncoding.EncodeToString(psk)
-	if err := keyWriter.SetPSK(pskStr); err != nil {
+	if err := keyWriter.SetPSK(psk); err != nil {
 		msg = fmt.Sprintf("[ERROR] %s failed to configure PSK on WireGuard interface: %v", logPrefix, err)
 		return
 	}

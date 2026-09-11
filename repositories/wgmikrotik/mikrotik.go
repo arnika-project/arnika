@@ -4,7 +4,6 @@ package wgmikrotik
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -58,25 +57,20 @@ func NewRepository(baseURL, username, password, interfaceName, peerPublicKey str
 	}
 }
 
-// InvalidateTunnel sets a fresh random PSK on the peer, tearing down the current
-// WireGuard session. Used as a fail-safe when no valid key material is available.
-func (r *Repository) InvalidateTunnel() error {
-	var buf [32]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return fmt.Errorf("failed to generate random PSK: %w", err)
-	}
-	return r.SetPSK(base64.StdEncoding.EncodeToString(buf[:]))
-}
-
 // SetPSK resolves the configured peer on the router and updates its
 // preshared-key. The peer is re-resolved on every call so the writer stays
 // correct across RouterOS restarts that may reassign internal ids.
-func (r *Repository) SetPSK(psk string) error {
+func (r *Repository) SetPSK(psk []byte) error {
 	id, err := r.findPeerID()
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]string{"preshared-key": psk})
+	// The base64 encoding lives here and not at the caller: RouterOS takes the
+	// key as a JSON string, so this is the one adapter where the PSK has to
+	// become an immutable Go string at all. Doing it further up would put that
+	// unclearable copy on the heap for the netlink writers too, which never
+	// need one.
+	body, err := json.Marshal(map[string]string{"preshared-key": base64.StdEncoding.EncodeToString(psk)})
 	if err != nil {
 		return fmt.Errorf("failed to encode PSK request: %w", err)
 	}
