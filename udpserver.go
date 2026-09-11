@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -48,7 +48,15 @@ type pqcHandler func(frame []byte, reply func(frame []byte) error) error
 //
 // dirIn is the direction the peer signs with; dirOut is this node's own.
 // pqcHandle is nil when no PQC key reader is wired, and PQC packets are dropped.
-func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result chan string, done chan bool, pqcHandle pqcHandler, rateLimit int, rateWindow, maxClockSkew time.Duration) {
+//
+// logger is passed in rather than taken from a package variable: three of those
+// used to hold preformatted role prefixes, assigned inside main() after the
+// configuration was parsed, so anything logging before that point silently
+// emitted an empty prefix.
+func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result chan string, done chan bool, pqcHandle pqcHandler, rateLimit int, rateWindow, maxClockSkew time.Duration, logger *slog.Logger) {
+	// Receiving is the BACKUP side of an interval by definition: the peer only
+	// sends a key_id when it is PRIMARY.
+	backupLog := logger.With("role", "backup")
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit,
 		syscall.SIGTERM,
@@ -56,13 +64,13 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 	)
 	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
-		log.Panicf("[ERROR] failed to resolve UDP address %s: %v", address, err)
+		fatal("failed to resolve the UDP listen address", "address", address, "err", err)
 	}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		log.Panicf("[ERROR] failed to listen on UDP %s: %v", address, err)
+		fatal("failed to listen on UDP", "address", address, "err", err)
 	}
-	log.Printf("[INFO] %s UDP server started on %s\n", ARNIKALOGPREFIX, address)
+	logger.Info("UDP server started", "address", address)
 
 	// Rate limiter: configurable requests per IP per window
 	limiter := newRateLimiter(rateLimit, rateWindow)
@@ -71,7 +79,7 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 
 	go func() {
 		<-quit
-		log.Printf("[INFO] %s UDP server shutdown triggered on %s", ARNIKALOGPREFIX, address)
+		logger.Info("UDP server shutdown triggered", "address", address)
 		close(done)
 		_ = conn.Close()
 	}()
@@ -84,7 +92,7 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 			case <-done:
 				return
 			default:
-				log.Printf("[ERROR] %s UDP read error: %v", ARNIKALOGPREFIX, err)
+				logger.Error("UDP read error", "err", err)
 				continue
 			}
 		}
@@ -93,20 +101,20 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 
 		// 1. Rate limit check (cheapest, no crypto)
 		if !limiter.Allow(clientIP) {
-			log.Printf("[DEBUG] %s rate limited %s", BACKUPLOGPREFIX, remoteAddr)
+			backupLog.Debug("rate limited", "peer", remoteAddr)
 			continue
 		}
 
 		// 2. Unmarshal + HMAC verify (cheap, before any decryption)
 		pkt, err := auth.UnmarshalPacket(psk, buf[:n], dirIn)
 		if err != nil {
-			log.Printf("[WARNING] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+			backupLog.Warn("packet rejected", "peer", remoteAddr, "reason", "authentication")
 			continue
 		}
 
 		// 3. Timestamp check (replay protection)
 		if !auth.WithinSkew(pkt.Timestamp, maxClockSkew) {
-			log.Printf("[DEBUG] %s packet rejected from %s (timestamp)", BACKUPLOGPREFIX, remoteAddr)
+			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "timestamp")
 			continue
 		}
 
@@ -115,8 +123,8 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 		case auth.PacketData:
 			decrypted, err := auth.Decrypt(psk, pkt.Payload)
 			if err != nil {
-				log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
-				log.Printf("[ERROR] %s authentication failed, psk mismatch or message corrupted", BACKUPLOGPREFIX)
+				backupLog.Error("packet rejected, ARNIKA_PSK mismatch or the message is corrupted",
+					"peer", remoteAddr, "reason", "decryption")
 				continue
 			}
 
@@ -134,8 +142,8 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 			case result <- string(decrypted):
 			default:
 				if queueFullWarn.allow() {
-					log.Printf("[WARNING] %s QKD queue full (%d slots), key_id from %s not acknowledged; the sender will retry",
-						BACKUPLOGPREFIX, cap(result), remoteAddr)
+					backupLog.Warn("QKD queue full, key_id not acknowledged; the sender will retry",
+						"slots", cap(result), "peer", remoteAddr)
 				}
 				continue
 			}
@@ -147,16 +155,16 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 			}
 			_, _ = conn.WriteToUDP(ack.Marshal(psk, dirOut), remoteAddr)
 
-			log.Printf("[INFO] %s [RCV] received key_id %s from %s", BACKUPLOGPREFIX, string(decrypted), remoteAddr)
+			backupLog.Info("received a key_id from the peer", "key_id", string(decrypted), "peer", remoteAddr)
 
 		case auth.PacketPQC:
 			if pqcHandle == nil {
-				log.Printf("[DEBUG] %s pqc frame dropped, no PQC key reader wired", BACKUPLOGPREFIX)
+				backupLog.Debug("PQC frame dropped, no PQC key reader wired", "peer", remoteAddr)
 				continue
 			}
 			decrypted, err := auth.Decrypt(psk, pkt.Payload)
 			if err != nil {
-				log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+				backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "decryption")
 				continue
 			}
 			// The PQC responder answers on this socket, back to the sender,
@@ -177,11 +185,11 @@ func udpServer(address string, psk []byte, dirOut, dirIn auth.Direction, result 
 				return err
 			}
 			if err := pqcHandle(decrypted, reply); err != nil {
-				log.Printf("[WARNING] %s pqc frame from %s: %v", BACKUPLOGPREFIX, remoteAddr, err)
+				backupLog.Warn("PQC frame not accepted", "peer", remoteAddr, "err", err)
 			}
 
 		default:
-			log.Printf("[DEBUG] %s packet rejected from %s", BACKUPLOGPREFIX, remoteAddr)
+			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "unknown type")
 			continue
 		}
 	}
@@ -198,7 +206,7 @@ const udpClientMaxAttempts = 3
 //
 // Protocol flow:
 //  1. Send DATA (signed + encrypted keyID) -> Receive ACK
-func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID string, timeout time.Duration, maxClockSkew time.Duration) error {
+func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID string, timeout time.Duration, maxClockSkew time.Duration, logger *slog.Logger) error {
 	if address == "" {
 		return fmt.Errorf("address is empty")
 	}
@@ -240,7 +248,7 @@ func udpClient(address string, psk []byte, dirOut, dirIn auth.Direction, keyID s
 		n, err := conn.Read(ackBuf)
 		if err != nil {
 			if attempt < udpClientMaxAttempts {
-				log.Printf("[DEBUG] %s ACK timeout (attempt %d/%d), retrying...", PRIMARYLOGPREFIX, attempt, udpClientMaxAttempts)
+				logger.Debug("ACK timeout, retrying", "attempt", attempt, "of", udpClientMaxAttempts)
 				continue
 			}
 			return fmt.Errorf("no ACK after %d attempts: %w", udpClientMaxAttempts, err)

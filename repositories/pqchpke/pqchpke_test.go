@@ -6,6 +6,7 @@ import (
 	"crypto/hpke"
 	"crypto/rand"
 	"fmt"
+	"log/slog"
 	mrand "math/rand"
 	"os"
 	"sync"
@@ -438,7 +439,7 @@ func mustNotInitiate() (func([]byte) error, func(time.Time) ([]byte, error)) {
 func newPQCTestRepo(t *testing.T, interval, timeout, maxAge time.Duration) *Repository {
 	t.Helper()
 	send, recv := mustNotInitiate()
-	r, err := NewRepository("PQC-HPKE[test]", send, recv,
+	r, err := NewRepository(slog.New(slog.DiscardHandler), send, recv,
 		func(uint32) bool { return false }, interval, timeout, maxAge)
 	if err != nil {
 		t.Fatalf("NewRepository: %v", err)
@@ -535,7 +536,7 @@ func newPQCPipeWith(t *testing.T, drop func(fromInitiator bool, f pqcFrame) bool
 		}
 	}
 
-	initiator, err := NewRepository("PQC-HPKE[init]",
+	initiator, err := NewRepository(slog.New(slog.DiscardHandler),
 		deliver(toResponder, true), recv(toInitiator),
 		func(uint32) bool { return true }, interval, timeout, 2*interval)
 	if err != nil {
@@ -543,7 +544,7 @@ func newPQCPipeWith(t *testing.T, drop func(fromInitiator bool, f pqcFrame) bool
 	}
 	// The responder never initiates, so its own channel must stay unused.
 	send, recvUnused := mustNotInitiate()
-	responder, err := NewRepository("PQC-HPKE[resp]", send, recvUnused,
+	responder, err := NewRepository(slog.New(slog.DiscardHandler), send, recvUnused,
 		func(uint32) bool { return false }, interval, timeout, 2*interval)
 	if err != nil {
 		t.Fatalf("NewRepository: %v", err)
@@ -1002,7 +1003,7 @@ func TestPQCConstructorValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewRepository("", tc.send, tc.recv, tc.role,
+			if _, err := NewRepository(slog.New(slog.DiscardHandler), tc.send, tc.recv, tc.role,
 				tc.interval, tc.timeout, tc.maxAge); err == nil {
 				t.Fatal("expected a constructor error")
 			}

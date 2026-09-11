@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime/secret"
@@ -67,12 +67,14 @@ func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBas
 	if auth.IsClientCertAuth() {
 		clientCert, err := tls.LoadX509KeyPair(*auth.cert, *auth.key)
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("failed to load the KMS client certificate", "cert", *auth.cert, "key", *auth.key, "err", err)
+			os.Exit(1)
 		}
 		tr.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
 		caCert, err := os.ReadFile(*auth.cacert)
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("failed to read the KMS CA certificate", "cacert", *auth.cacert, "err", err)
+			os.Exit(1)
 		}
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(caCert)
@@ -140,10 +142,10 @@ func (r *Repository) kmsRequest(path string) (id string, key []byte, err error) 
 			// and neither is the path -- dec_keys carries key_ID in its query
 			// string.
 			if lastStatus != 0 {
-				log.Printf("Attempt %d: KMS returned %d, retrying in %s...",
-					attempt+1, lastStatus, delay)
+				slog.Warn("KMS request failed, retrying",
+					"attempt", attempt+1, "status", lastStatus, "retry_in", delay)
 			} else {
-				log.Printf("Attempt %d: Retrying in %s...", attempt+1, delay)
+				slog.Warn("KMS request failed, retrying", "attempt", attempt+1, "retry_in", delay)
 			}
 			time.Sleep(delay)
 		}

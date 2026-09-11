@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -55,7 +56,7 @@ func startTestServerQueue(t *testing.T, handle pqcHandler, queueDepth int) *test
 	result := make(chan string, queueDepth)
 	done := make(chan bool)
 	go udpServer(addr, psk, srvOut, srvIn, result, done, handle,
-		10000, time.Minute, time.Minute)
+		10000, time.Minute, time.Minute, slog.New(slog.DiscardHandler))
 
 	conn, err := net.Dial("udp", addr)
 	if err != nil {

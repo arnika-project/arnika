@@ -11,7 +11,7 @@ import (
 )
 
 // newTestRepo builds a Repository against a test server without going through
-// NewRepository, which calls log.Fatal on certificate problems.
+// NewRepository, which exits the process on certificate problems.
 func newTestRepo(baseURL string, maxRetries int) *Repository {
 	return &Repository{
 		baseURL:          baseURL,

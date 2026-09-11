@@ -317,14 +317,14 @@ Rate Limit:               30
 Rate Window:              1m0s
 Max Clock Skew:           1m0s
 ============================
-2026/01/22 18:04:40.628630 [INFO] PRIMARY[9999] [REQ] request QKD key from http://localhost:8080/api/v1/keys/CONSA
-2026/01/22 18:04:40.629081 [INFO] ARNIKA[9999] UDP server started on 127.0.0.1:9999
-2026/01/22 18:04:40.635236 [INFO] PRIMARY[9999] [SND] send key_id ffffffff-fe92-4fdc-bef3-c0cdc73ff774 to 127.0.0.1:9998
-2026/01/22 18:04:40.636669 [INFO] PRIMARY[9999] [OK] PSK configured on WireGuard interface: qcicat0 for peer: ****************=
-2026/01/22 18:04:43.399193 [INFO] BACKUP[9999] [RCV] received key_id ffffffff-bcec-4858-838e-623c79eabf61 from 127.0.0.1:58905
-2026/01/22 18:04:43.399195 [INFO] BACKUP[9999] [REQ] request QKD key for key_id ffffffff-bcec-4858-838e-623c79eabf61 from http://localhost:8080/api/v1/keys/CONSA
-2026/01/22 18:04:43.399760 [INFO] BACKUP[9999] [OK] PSK configured on WireGuard interface: qcicat0 for peer: ****************=
-2026/01/22 18:04:55.399323 [INFO] BACKUP[9999] [RCV] received key_id ffffffff-8a32-4540-9b78-7d4e1afebb5f from 127.0.0.1:58927
+time=2026-01-22T18:04:40.628+01:00 level=INFO msg="requesting a new QKD key" arnika_id=9999 role=primary kms=http://localhost:8080/api/v1/keys/CONSA
+time=2026-01-22T18:04:40.629+01:00 level=INFO msg="UDP server started" arnika_id=9999 address=127.0.0.1:9999
+time=2026-01-22T18:04:40.635+01:00 level=INFO msg="sending the key_id to the peer" arnika_id=9999 role=primary key_id=ffffffff-fe92-4fdc-bef3-c0cdc73ff774 peer=127.0.0.1:9998
+time=2026-01-22T18:04:40.636+01:00 level=INFO msg="PSK configured on WireGuard interface" arnika_id=9999 role=primary iface=qcicat0 peer=****************=
+time=2026-01-22T18:04:43.399+01:00 level=INFO msg="received a key_id from the peer" arnika_id=9999 role=backup key_id=ffffffff-bcec-4858-838e-623c79eabf61 peer=127.0.0.1:58905
+time=2026-01-22T18:04:43.399+01:00 level=INFO msg="requesting the QKD key for the peer's key_id" arnika_id=9999 role=backup key_id=ffffffff-bcec-4858-838e-623c79eabf61 kms=http://localhost:8080/api/v1/keys/CONSA
+time=2026-01-22T18:04:43.399+01:00 level=INFO msg="PSK configured on WireGuard interface" arnika_id=9999 role=backup iface=qcicat0 peer=****************=
+time=2026-01-22T18:04:55.399+01:00 level=INFO msg="received a key_id from the peer" arnika_id=9999 role=backup key_id=ffffffff-8a32-4540-9b78-7d4e1afebb5f peer=127.0.0.1:58927
 ```
 
 > [!NOTE]
@@ -431,6 +431,7 @@ start without them.
 | `RATE_LIMIT` | ➖ | calculated | Max accepted packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
 | `RATE_WINDOW` | ➖ | `1m` | Window for the per-IP rate limit |
 | `MAX_CLOCK_SKEW` | ➖ | `1m` | Accepted timestamp deviation (replay protection). Requires clocks in sync between peers |
+| `LOG_LEVEL` | ➖ | `info` | `debug`, `info`, `warn` or `error`. Read before the rest of the configuration, because process hardening logs first. `debug` includes one line per rejected datagram, which flood traffic can drive: raise it only while diagnosing |
 
 > [!WARNING]
 > `ARNIKA_PSK` is mandatory and has **no default**: Arnika refuses to start if it is unset or

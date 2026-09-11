@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/arnika-project/arnika/auth"
+	"log/slog"
+
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/repositories/pqchpke"
 	"github.com/arnika-project/arnika/services"
@@ -93,7 +95,7 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 // responder handler the UDP server calls for inbound PQC frames. The last two
 // are returned as functions, not as the concrete repository, so that a second
 // PQC backend can be wired behind its own build tag without touching main.go.
-func getPQCService(cfg *config.Config, dirOut, dirIn auth.Direction) (
+func getPQCService(cfg *config.Config, logger *slog.Logger, dirOut, dirIn auth.Direction) (
 	*services.KeyReaderService, func(context.Context), pqcHandler, error,
 ) {
 	send, recv, err := pqcDial(cfg, dirOut, dirIn)
@@ -109,7 +111,7 @@ func getPQCService(cfg *config.Config, dirOut, dirIn auth.Direction) (
 	}
 
 	pqcRepo, err := pqchpke.NewRepository(
-		PQCHPKELOGPREFIX, send, recv, isInitiator,
+		logger, send, recv, isInitiator,
 		cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge,
 	)
 	if err != nil {

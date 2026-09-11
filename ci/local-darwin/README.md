@@ -71,7 +71,7 @@ other three already cover.
 Each mode gets a numbered section of its own — 3, 4 and 5 — with the same 23
 tests in it. `x` below stands for that section number:
 
-- **x.1** both ends report `[OK] PSK configured on WireGuard interface`
+- **x.1** both ends report `msg="PSK configured on WireGuard interface"`
 - **x.2** **both interfaces hold the same preshared key** — the property that
   matters; different keys mean a dead handshake
 - **x.3** traffic really traverses the tunnel and **decrypts at the far end** —
@@ -115,9 +115,9 @@ of a result. A blank line goes in wherever the output changes kind:
   ─── cycle 1/3 ─────────────────────────────────
 
     │ kms| 2026/09/08 10:00:01 [DEBUG] [REQ] method=POST path=/api/v1/keys/CONSA/enc_keys
-    │ a1| 2026/09/08 10:00:01.001111 [INFO] PRIMARY[9998] [SND] send key_id ffffffff-…
-    │ a2| 2026/09/08 10:00:01.001161 [INFO] BACKUP[9999] [RCV] received key_id ffffffff-…
-    │ a1| 2026/09/08 10:00:02.002222 [INFO] PQC-HPKE[9998] [OK] round 357756369 agreed a fresh PQC key
+    │ a1| time=2026-09-08T10:00:01.001+02:00 level=INFO msg="sending the key_id to the peer" arnika_id=9998 role=primary key_id=ffffffff-…
+    │ a2| time=2026-09-08T10:00:01.001+02:00 level=INFO msg="received a key_id from the peer" arnika_id=9999 role=backup key_id=ffffffff-…
+    │ a1| time=2026-09-08T10:00:02.002+02:00 level=INFO msg="round agreed a fresh PQC key" arnika_id=9998 component=pqc-hpke round=357756369 as=initiator
 
     PASS  cycle 1/3: rotated, both ends match (key …fjz6mmI4=)
           wg dump utun23 (profile qcicat1, ARNIKA_ID 9998):
@@ -227,7 +227,7 @@ The exit status is the number of failed checks plus any harness errors, so
 Two conventions run through it:
 
 - **`utun23[9998]`** — a device with the `ARNIKA_ID` of the peer that owns it,
-  matching the `PRIMARY[9998]` / `BACKUP[9999]` prefix in that peer's own log,
+  matching the `arnika_id=9998` / `arnika_id=9999` attribute in that peer's own log,
   so a line from the harness can be lined up against the peer that produced it.
   `qcicat1` is `ARNIKA_ID` 9998, `qcicat2` is 9999; the IDs double as the peers'
   UDP ports, and have to differ in parity because only the lowest bit takes part

@@ -1056,8 +1056,8 @@ run_mode() {
         if [ "$name" = "a" ]; then id="$ID1"; log="$LOG_A"; else id="$ID2"; log="$LOG_B"; fi
         rounds="$(grep -c 'agreed a fresh PQC key' "$log" || true)"
         writes="$(grep -c 'PSK configured on WireGuard interface' "$log" || true)"
-        dbg="$(grep -c '\[DEBUG\]' "$log" || true)"
-        warn="$(grep -c '\[WARNING\]\|\[ERROR\]' "$log" || true)"
+        dbg="$(grep -c 'level=DEBUG' "$log" || true)"
+        warn="$(grep -c 'level=WARN\|level=ERROR' "$log" || true)"
         info "peer $name[$id]: $rounds PQC exchanges, $writes PSK writes, $dbg debug lines, $warn warnings/errors"
     done
 

@@ -31,7 +31,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
-	"log"
+	"log/slog"
 	"runtime/secret"
 	"sync"
 	"time"
@@ -408,10 +408,9 @@ type Repository struct {
 	roundTimeout  time.Duration
 	maxAge        time.Duration
 
-	// logPrefix identifies this reader in the log, in the same NAME[ARNIKA_ID]
-	// form the rest of Arnika uses. Supplied by the wiring, which is where the
-	// node's identity and its colour live.
-	logPrefix string
+	// log identifies this reader in the log. Supplied by the wiring, which is
+	// where the node's identity lives.
+	log *slog.Logger
 
 	// keyMu guards latest and the zeroing of the buffer it supersedes.
 	//
@@ -432,7 +431,7 @@ type Repository struct {
 // NewRepository builds the adapter. Every dependency is an argument: it
 // reads no environment and opens no socket.
 func NewRepository(
-	logPrefix string,
+	logger *slog.Logger,
 	send func(frame []byte) error,
 	recv func(deadline time.Time) ([]byte, error),
 	isInitiator func(round uint32) bool,
@@ -463,11 +462,11 @@ func NewRepository(
 		return nil, fmt.Errorf("pqc: max key age %s must be longer than the round interval %s",
 			maxAge, roundInterval)
 	}
-	if logPrefix == "" {
-		logPrefix = "PQC-HPKE"
+	if logger == nil {
+		logger = slog.Default()
 	}
 	return &Repository{
-		logPrefix:     logPrefix,
+		log:           logger.With("component", "pqc-hpke"),
 		send:          send,
 		recv:          recv,
 		isInitiator:   isInitiator,
@@ -626,12 +625,12 @@ func (r *Repository) publish(round uint32, key []byte) error {
 		age := time.Since(prev.at)
 		if age <= r.maxAge {
 			clear(k)
-			log.Printf("[INFO] %s [OK] round %d agreed, but round %d is already published and still fresh (age %s); keeping the newer one",
-				r.logPrefix, round, prev.round, age.Truncate(time.Second))
+			r.log.Info("round agreed, but a newer round is already published and still fresh; keeping the newer one",
+				"round", round, "published_round", prev.round, "age", age.Truncate(time.Second))
 			return nil
 		}
-		log.Printf("[WARNING] %s [OK] round %d is behind the published round %d, but that key is stale (age %s, max %s); taking the lower round as the new baseline, which is how a backward clock step recovers",
-			r.logPrefix, round, prev.round, age.Truncate(time.Second), r.maxAge)
+		r.log.Warn("round is behind the published one but that key is stale; taking the lower round as the new baseline, which is how a backward clock step recovers",
+			"round", round, "published_round", prev.round, "age", age.Truncate(time.Second), "max_age", r.maxAge)
 	}
 	r.latest = &pqcResult{key: k, round: round, at: time.Now()}
 	if prev != nil {
@@ -684,8 +683,8 @@ func (r *Repository) Run(ctx context.Context) {
 	// interval, so a failure here is expected and not worth alarming about.
 	if startup := pqcRoundIndex(time.Now(), r.roundInterval); r.isInitiator(startup) {
 		if err := r.runRound(ctx, startup); err != nil {
-			log.Printf("[INFO] %s [FAIL] startup round %d did not complete (%v); the first scheduled round follows",
-				r.logPrefix, startup, err)
+			r.log.Info("startup round did not complete; the first scheduled round follows",
+				"round", startup, "err", err)
 		}
 	}
 	if ctx.Err() != nil {
@@ -702,7 +701,7 @@ func (r *Repository) Run(ctx context.Context) {
 
 		if r.isInitiator(round) {
 			if err := r.runRound(ctx, round); err != nil {
-				log.Printf("[WARNING] %s [FAIL] round %d failed: %v", r.logPrefix, round, err)
+				r.log.Warn("round failed", "round", round, "err", err)
 			}
 		}
 		served = round
@@ -765,7 +764,9 @@ func (r *Repository) runRound(ctx context.Context, round uint32) error {
 	if err := r.publish(round, key); err != nil {
 		return err
 	}
-	log.Printf("[INFO] %s [OK] round %d agreed a fresh PQC key (initiator)", r.logPrefix, round)
+	// Wording is load-bearing: ci/local-darwin/run.sh and the e2e lab count this
+	// line to assert that the rounds are progressing.
+	r.log.Info("round agreed a fresh PQC key", "round", round, "as", "initiator")
 	return nil
 }
 
@@ -896,8 +897,8 @@ func (r *Repository) HandleFrame(raw []byte, reply func(frame []byte) error) err
 	// the responder could not take part in the recovery publish() allows.
 	if r.resp.live {
 		if d := int64(r.resp.round) - cur; d < -1 || d > 1 {
-			log.Printf("[WARNING] %s round %d abandoned: it is outside the round window [%d,%d], so its confirmation can no longer arrive",
-				r.logPrefix, r.resp.round, cur-1, cur+1)
+			r.log.Warn("round abandoned: it is outside the round window, so its confirmation can no longer arrive",
+				"round", r.resp.round, "window_low", cur-1, "window_high", cur+1)
 			r.clearResponder()
 		}
 	}
@@ -976,7 +977,7 @@ func (r *Repository) respondTag(round uint32, peerTag []byte) error {
 	if err := r.publish(round, r.resp.key); err != nil {
 		return err
 	}
-	log.Printf("[INFO] %s [OK] round %d agreed a fresh PQC key (responder)", r.logPrefix, round)
+	r.log.Info("round agreed a fresh PQC key", "round", round, "as", "responder")
 	return nil
 }
 

@@ -718,13 +718,13 @@ tmux attach -t <session>   # kms, arnika, wg or ping
 - Verify that key rotation and role election work:
 
   ```bash
-  journalctl -u arnika -f | grep -E 'PRIMARY|BACKUP'
+  journalctl -u arnika -f | grep -E 'role=(primary|backup)'
   ```
 
-  Across consecutive intervals exactly **one** of the two hosts must log `PRIMARY` at a time, and
-  both must log `[OK] PSK configured on WireGuard interface`. If both hosts log `PRIMARY` for the
-  same interval, or neither does, check that `ARNIKA_PSK` is identical, `INTERVAL` is identical,
-  and the two `ARNIKA_ID` values differ in parity.
+  Across consecutive intervals exactly **one** of the two hosts must log `role=primary` at a time,
+  and both must log `msg="PSK configured on WireGuard interface"`. If both hosts log `role=primary`
+  for the same interval, or neither does, check that `ARNIKA_PSK` is identical, `INTERVAL` is
+  identical, and the two `ARNIKA_ID` values differ in parity.
 
 - Confirm WireGuard is actually receiving a PSK:
 

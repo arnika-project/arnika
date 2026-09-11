@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pqcDial: %v", err)
 		}
-		repo, err := pqchpke.NewRepository("PQC-HPKE[e2e]", send, recv,
+		repo, err := pqchpke.NewRepository(slog.New(slog.DiscardHandler), send, recv,
 			func(uint32) bool { return initiator },
 			cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge)
 		if err != nil {
@@ -56,7 +57,7 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 		result := make(chan string, 1)
 		done := make(chan bool)
 		go udpServer(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
-			repo.HandleFrame, 10000, time.Minute, time.Minute)
+			repo.HandleFrame, 10000, time.Minute, time.Minute, slog.New(slog.DiscardHandler))
 		return repo
 	}
 
@@ -138,7 +139,7 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 		}
 		// The production role derivation, so the two peers alternate initiator
 		// and responder across rounds instead of one side always answering.
-		repo, err := pqchpke.NewRepository("PQC-HPKE[cadence]", send, recv,
+		repo, err := pqchpke.NewRepository(slog.New(slog.DiscardHandler), send, recv,
 			func(round uint32) bool { return cfg.IsPrimary(uint64(round)) },
 			cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge)
 		if err != nil {
@@ -147,7 +148,7 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 		result := make(chan string, qkdQueueDepth)
 		done := make(chan bool)
 		go udpServer(cfg.ListenAddress, psk, dirOut, dirIn, result, done,
-			repo.HandleFrame, limit, cfg.RateWindow, cfg.MaxClockSkew)
+			repo.HandleFrame, limit, cfg.RateWindow, cfg.MaxClockSkew, slog.New(slog.DiscardHandler))
 		return repo
 	}
 
