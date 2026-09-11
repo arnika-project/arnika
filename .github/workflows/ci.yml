@@ -53,6 +53,14 @@ jobs:
           GOEXPERIMENT: runtimesecret
         run: go test -v ./...
 
+      # The container lab in ci/e2e: two Arnika peers over real WireGuard and
+      # the KMS simulator. Its own module, so it needs no GOEXPERIMENT and does
+      # not pull testcontainers into Arnika's go.mod, and `go test ./...` above
+      # does not see it. Same command as locally, which is the point of it.
+      - name: End-to-end container lab
+        run: go test -v -timeout 15m ./...
+        working-directory: ci/e2e
+
   build:
     name: Build
     runs-on: ubuntu-latest
