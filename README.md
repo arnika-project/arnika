@@ -9,7 +9,7 @@
 </div>
 
 > [!NOTE]
-> Meet us at the [QCI Days 2026 28.09.- 30.9.2026](https://qci-days.eu/) in Pardua , Italy
+> Meet us at the [QCI Days 2026 28.09.- 30.9.2026](https://qci-days.eu/) in Padua , Italy
 >
 
 > [!IMPORTANT]
