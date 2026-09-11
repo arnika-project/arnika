@@ -335,12 +335,19 @@ func main() {
 				}
 				intervalCounter++
 				<-ticker.C
-				// A signal here means the key_id arrived and the worker
-				// goroutine rotated. Without one, MODE has to decide, exactly as
-				// it does for a failed KMS request on the PRIMARY side: without
-				// this the BACKUP kept the superseded PSK installed for an
-				// interval.
-				if backup && !peerSentKeyID.Swap(false) {
+				// Every interval takes the signal at its end, PRIMARY included,
+				// even though only a BACKUP acts on it. Taking it inside the
+				// condition let `backup &&` short-circuit past the Swap, so a
+				// key_id that reached a PRIMARY interval after its own check -
+				// a late udpClient retry, or two peers whose interval counters
+				// drifted apart across a restart - stayed set into the next
+				// interval. A BACKUP there then read it as proof that a key_id
+				// had arrived when none had, and skipped failing closed.
+				sawKeyID := peerSentKeyID.Swap(false)
+				// Without a signal, MODE has to decide, exactly as it does for a
+				// failed KMS request on the PRIMARY side: without this the
+				// BACKUP kept the superseded PSK installed for an interval.
+				if backup && !sawKeyID {
 					if shouldSetPSKOnQKDFailure(cfg) {
 						log.Printf("[ERROR] %s no key_id from the peer for interval %d", BACKUPLOGPREFIX, intervalCounter-1)
 						setPSK(keyWriter, pqc, nil, cfg, BACKUPLOGPREFIX)
