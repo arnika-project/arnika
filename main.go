@@ -223,7 +223,13 @@ func main() {
 	PQCHPKELOGPREFIX = fmt.Sprintf("%sPQC-HPKE[%s]%s", colorStart, cfg.ArnikaID, colorEnd)
 	interval := cfg.Interval
 	done := make(chan bool)
-	skip := make(chan bool, 1)
+	// peerSentKeyID reports that a key_id arrived from the peer, which means the
+	// worker goroutine has taken over the rotation for this interval. It was a
+	// buffered channel used as a flag, with four send-or-drain selects whose
+	// correctness rested on every reader consuming at most one signal. Swap(false)
+	// says "take the signal if there is one" in a single expression, so a reader
+	// cannot consume twice or forget to consume.
+	var peerSentKeyID atomic.Bool
 	result := make(chan string, qkdQueueDepth)
 	keyWriter, err := getKeyWriterService(cfg)
 	if err != nil {
@@ -264,10 +270,7 @@ func main() {
 		}
 		qkd := getQKDService(cfg)
 		go runQKDWorker(done, result, func(r string) {
-			select {
-			case skip <- true:
-			default:
-			}
+			peerSentKeyID.Store(true)
 			log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPLOGPREFIX, r, cfg.KMSURL)
 			key, err := qkd.GetKeyByID(r)
 			if err != nil {
@@ -289,10 +292,7 @@ func main() {
 				if backup {
 					log.Printf("[INFO] %s [REQ] BACKUP for interval %d, waiting for key_id from peer\n", BACKUPLOGPREFIX, intervalCounter)
 				} else {
-					select {
-					case <-skip:
-					default:
-					}
+					peerSentKeyID.Store(false)
 					log.Printf("[INFO] %s [REQ] request QKD key from %s\n", PRIMARYLOGPREFIX, cfg.KMSURL)
 					key, err := qkd.GetNewKey()
 					if err != nil {
@@ -307,9 +307,11 @@ func main() {
 						nextTick := now.Truncate(time.Second).Add(time.Second)
 						log.Printf("[INFO] %s [REQ] PRIMARY for interval %d\n", PRIMARYLOGPREFIX, intervalCounter)
 						time.Sleep(nextTick.Sub(now))
-						select {
-						case <-skip:
-						default:
+						// A key_id from the peer in the meantime means it is
+						// acting as PRIMARY for this interval too, so its
+						// rotation already won and sending ours as well would
+						// put the two on different keys.
+						if !peerSentKeyID.Swap(false) {
 							// Checked against the empty string, not against a
 							// nil pointer: the previous form could never fire,
 							// because the service handed out a pointer to its
@@ -320,31 +322,28 @@ func main() {
 								if shouldSetPSKOnQKDFailure(cfg) {
 									setPSK(keyWriter, pqc, nil, cfg, PRIMARYLOGPREFIX)
 								}
-								break
+							} else {
+								log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, key.ID, cfg.ServerAddress)
+								err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
+								if err != nil {
+									log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, key.ID, cfg.ServerAddress, err)
+								}
+								setPSK(keyWriter, pqc, key.Key, cfg, PRIMARYLOGPREFIX)
 							}
-							log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, key.ID, cfg.ServerAddress)
-							err = udpClient(cfg.ServerAddress, cfg.ArnikaPSK, dirOut, dirIn, key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
-							if err != nil {
-								log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, key.ID, cfg.ServerAddress, err)
-							}
-							setPSK(keyWriter, pqc, key.Key, cfg, PRIMARYLOGPREFIX)
 						}
 					}
 				}
 				intervalCounter++
 				<-ticker.C
-				if backup {
-					select {
-					case <-skip:
-						// the key_id arrived and the reader goroutine rotated
-					default:
-						// MODE has to decide, exactly as it does for a failed
-						// KMS request on the PRIMARY side: without this the
-						// BACKUP kept the superseded PSK installed for an interval
-						if shouldSetPSKOnQKDFailure(cfg) {
-							log.Printf("[ERROR] %s no key_id from the peer for interval %d", BACKUPLOGPREFIX, intervalCounter-1)
-							setPSK(keyWriter, pqc, nil, cfg, BACKUPLOGPREFIX)
-						}
+				// A signal here means the key_id arrived and the worker
+				// goroutine rotated. Without one, MODE has to decide, exactly as
+				// it does for a failed KMS request on the PRIMARY side: without
+				// this the BACKUP kept the superseded PSK installed for an
+				// interval.
+				if backup && !peerSentKeyID.Swap(false) {
+					if shouldSetPSKOnQKDFailure(cfg) {
+						log.Printf("[ERROR] %s no key_id from the peer for interval %d", BACKUPLOGPREFIX, intervalCounter-1)
+						setPSK(keyWriter, pqc, nil, cfg, BACKUPLOGPREFIX)
 					}
 				}
 			}
