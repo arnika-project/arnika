@@ -294,11 +294,21 @@ func (n *node) exec(t *testing.T, format string, args ...any) string {
 // that never happened.
 func (n *node) psk(t *testing.T) string {
 	t.Helper()
-	fields := strings.Fields(n.exec(t, "wg show wg0 preshared-keys"))
-	if len(fields) < 2 || fields[1] == "(none)" {
+	return n.pskOf(t, n.peer.pub)
+}
+
+// pskOf reads the preshared key held for one named peer. By public key and not
+// by the first row `wg show` prints: an interface can carry more than one peer,
+// which is the whole point of the second-peer phase, and the order of the rows
+// is the kernel's to choose.
+func (n *node) pskOf(t *testing.T, pub string) string {
+	t.Helper()
+	out := strings.TrimSpace(n.exec(t,
+		"wg show wg0 preshared-keys | awk -v k=%q '$1 == k {print $2}'", pub))
+	if out == "(none)" {
 		return ""
 	}
-	return fields[1]
+	return out
 }
 
 func startLab(t *testing.T, m mode) *lab {
@@ -414,6 +424,19 @@ func (l *lab) startKMS(t *testing.T, freeze string) {
 	l.step("KMS up, frozen SAE=%s", summary)
 }
 
+// kmsLogged counts what the simulator itself recorded. Its log is the only
+// witness to what reached it, which is the point of the frozen phase.
+func (l *lab) kmsLogged(t *testing.T, pattern string) int {
+	t.Helper()
+	r, err := l.kms.Logs(context.Background())
+	if err != nil {
+		t.Fatalf("read the KMS log: %v", err)
+	}
+	defer r.Close()
+	out, _ := io.ReadAll(r)
+	return strings.Count(string(out), pattern)
+}
+
 // replaceKMS swaps the simulator for one with a different FREEZE setting.
 func (l *lab) replaceKMS(t *testing.T, freeze string) {
 	t.Helper()
@@ -430,23 +453,30 @@ func (l *lab) replaceKMS(t *testing.T, freeze string) {
 func (l *lab) startPeers(t *testing.T, extra string) {
 	t.Helper()
 	for _, n := range l.nodes() {
-		// nohup, because the exec that starts it returns immediately and a bare
-		// background job would go with it.
-		n.exec(t, `nohup env \
-			LISTEN_ADDRESS=0.0.0.0:%s SERVER_ADDRESS=%s:%s ARNIKA_ID=%s \
-			INTERVAL=%s MODE=%s LOG_LEVEL=debug ARNIKA_PSK=%q \
-			KMS_URL=http://qkd-simulator:8080/api/v1/keys/%s \
-			WIREGUARD_INTERFACE=wg0 WIREGUARD_PEER_PUBLIC_KEY=%q \
-			%s \
-			arnika >> /tmp/arnika.log 2>&1 &`,
-			n.id, n.peer.name, n.peer.id, n.id,
-			interval, l.mode.name, l.psk, n.sae, n.peer.pub, extra)
+		l.startPeer(t, n, l.psk, extra)
 	}
 	started := "peers started, INTERVAL=" + interval.String()
 	if extra != "" {
 		started += " " + extra
 	}
 	l.step("%s", started)
+}
+
+// startPeer starts one peer with a transport PSK of its own, which is what lets
+// a phase give the two ends different ones.
+func (l *lab) startPeer(t *testing.T, n *node, psk, extra string) {
+	t.Helper()
+	// nohup, because the exec that starts it returns immediately and a bare
+	// background job would go with it.
+	n.exec(t, `nohup env \
+		LISTEN_ADDRESS=0.0.0.0:%s SERVER_ADDRESS=%s:%s ARNIKA_ID=%s \
+		INTERVAL=%s MODE=%s LOG_LEVEL=debug ARNIKA_PSK=%q \
+		KMS_URL=http://qkd-simulator:8080/api/v1/keys/%s \
+		WIREGUARD_INTERFACE=wg0 WIREGUARD_PEER_PUBLIC_KEY=%q \
+		%s \
+		arnika >> /tmp/arnika.log 2>&1 &`,
+		n.id, n.peer.name, n.peer.id, n.id,
+		interval, l.mode.name, psk, n.sae, n.peer.pub, extra)
 }
 
 // running reports whether a live arnika is in the node. It reads ps rather than
@@ -561,8 +591,9 @@ func (n *node) resetSession(t *testing.T, psk string) {
 // is what makes it a verdict on the preshared key in play.
 func (n *node) handshaked(t *testing.T) bool {
 	t.Helper()
-	fields := strings.Fields(n.exec(t, "wg show wg0 latest-handshakes"))
-	return len(fields) >= 2 && fields[1] != "0"
+	out := strings.TrimSpace(n.exec(t,
+		"wg show wg0 latest-handshakes | awk -v k=%q '$1 == k {print $2}'", n.peer.pub))
+	return out != "" && out != "0"
 }
 
 // waitHandshake pings the peer to provoke a handshake and reports whether one
@@ -820,6 +851,19 @@ func (l *lab) sourceCheck(t *testing.T, source, how string) {
 		l.ok("node-a logged the decision after %s: %q", took, pattern)
 	}
 
+	if how == "freeze" {
+		// The reason QKD gets two faults rather than one: a frozen KMS is the
+		// one that keeps a record of the requests Arnika made into the failure.
+		// Without reading it back, this phase cannot tell "the peers asked and
+		// got nothing" from "the peers never asked", and those are different
+		// failures with the same PSK state.
+		if requests := l.kmsLogged(t, "[FREEZE]"); requests == 0 {
+			t.Error("the frozen KMS logged no request, so nothing says the peers ever reached it")
+		} else {
+			l.ok("the frozen KMS accepted %d request(s) and answered none", requests)
+		}
+	}
+
 	// Checked at the end of the window rather than the start, so it covers the
 	// whole phase, and not the tautology it looks like: a stale simulator from
 	// an earlier run holding the alias would leave the pair quietly talking to a
@@ -891,6 +935,107 @@ func (l *lab) desyncCheck(t *testing.T) {
 	l.ok("both ends back on one key after %s (%s)", took, tail(l.a.psk(t)))
 	if !l.a.waitHandshake(t, 25*time.Second) {
 		t.Error("the keys match again but there was no handshake in 25s")
+	}
+}
+
+// secondPeerCheck puts a second peer on node-a's interface, which is the shape
+// that broke the netlink key writer in #42: the lookup returned an error on the
+// first peer that did not match the configured one, so it passed only on an
+// interface carrying exactly one peer. A node with two neighbours could not have
+// its PSK written at all, and every rotation ended in an invalidated tunnel.
+//
+// Nothing else in this suite can see that, because a lab node has one peer and
+// the broken form was right by coincidence there. The decoy has no endpoint and
+// an address of its own, so it changes nothing but the length of the peer list.
+func (l *lab) secondPeerCheck(t *testing.T) {
+	decoy := strings.TrimSpace(l.a.exec(t, "wg genkey | wg pubkey"))
+	before := l.a.psk(t)
+	mark := l.a.logLines(t)
+	l.a.exec(t, "wg set wg0 peer %q allowed-ips 172.16.0.99/32", decoy)
+	defer l.a.exec(t, "wg set wg0 peer %q remove", decoy)
+	l.step("node-a's wg0 carries a second peer, %s", tail(decoy))
+
+	if took, ok := waitFor(4*interval, func() bool { return l.agreeNew(t, before) }); !ok {
+		t.Errorf("the PSK stopped rotating with a second peer on the interface: node-a %s, node-b %s",
+			tail(l.a.psk(t)), tail(l.b.psk(t)))
+	} else {
+		l.ok("the PSK still rotates with two peers on the interface, %s after %s",
+			tail(l.a.psk(t)), took)
+	}
+
+	// The specific failure of #42, in Arnika's own words, rather than only its
+	// consequence above: SetPSK returning "peer not found" surfaces here.
+	if l.a.loggedSince(t, mark, "failed to configure the PSK on the WireGuard interface") {
+		t.Error("node-a could not write the PSK while a second peer was on the interface")
+	}
+
+	// And it has to land on the peer it names, not on whichever comes first.
+	if psk := l.a.pskOf(t, decoy); psk != "" {
+		t.Errorf("the second peer was given the preshared key %s, so the write went to the wrong peer", tail(psk))
+	} else {
+		l.ok("the second peer was left without a key of its own")
+	}
+}
+
+// wrongPSKCheck starts one peer with a transport PSK the other does not share.
+//
+// ARNIKA_PSK authenticates the peer protocol: every packet carries an HMAC over
+// it, and transport.Serve drops what does not verify before decrypting anything
+// (auth.UnmarshalPacket in server.go). So a peer that does not hold it can carry
+// neither a key_id nor a PQC frame, and the two ends can never arrive at one
+// key. That is the security property of the transport, and this is the only
+// check in the suite that puts it to the test rather than assuming it.
+//
+// The assertion is that the ends never agree, not that the victim's key stands
+// still: node-b keeps rotating on its own throughout, either on its own QKD key
+// or onto a random one where the mode invalidates. What must not happen is the
+// two of them meeting on one key.
+func (l *lab) wrongPSKCheck(t *testing.T) {
+	// Both ends still hold the key they recovered onto in the phase before, so
+	// the question is not whether they agree now but whether they ever arrive
+	// at a fresh agreement while one of them cannot authenticate.
+	before := l.a.psk(t)
+	l.stopPeers(t)
+	mark := l.b.logLines(t)
+	l.startPeer(t, l.a, randomPSK(t), "")
+	l.startPeer(t, l.b, l.psk, "")
+	l.step("node-a restarted with a transport PSK node-b does not share")
+
+	window := 3 * interval
+	switch took, agreed := waitFor(window, func() bool { return l.agreeNew(t, before) }); {
+	case agreed:
+		t.Errorf("the ends met on the fresh key %s after %s although node-a cannot authenticate to node-b",
+			tail(l.a.psk(t)), took)
+	case !l.diverged(t):
+		// Both ends keep rotating on their own throughout, on their own QKD key
+		// or onto a random one where the mode invalidates, so they have to come
+		// apart. Both still holding the key from the phase before would mean
+		// neither wrote anything, and then nothing above was put to the test.
+		t.Errorf("neither end moved in %s, so nothing here says they could not sync: both hold %s",
+			window, tail(before))
+	default:
+		l.ok("the ends came apart and never met on a fresh key in %s, node-a %s, node-b %s",
+			window, tail(l.a.psk(t)), tail(l.b.psk(t)))
+	}
+
+	// Not the same statement: above says they did not agree, this says node-b
+	// refused on purpose. Without it a pair that simply never talked, a crashed
+	// peer or a wrong port, would pass the check above.
+	if _, ok := waitFor(10*time.Second, func() bool {
+		return l.b.loggedSince(t, mark, "reason=authentication")
+	}); !ok {
+		t.Error("node-b never rejected a packet for authentication, so nothing says it was asked")
+	} else {
+		l.ok("node-b rejected what node-a sent: packet rejected, reason=authentication")
+	}
+
+	l.stopPeers(t)
+	l.startPeers(t, "")
+	if took, ok := waitFor(45*time.Second, func() bool { return l.agreeNew(t, before) }); !ok {
+		t.Errorf("the pair did not come back together on the shared transport PSK: node-a %s, node-b %s",
+			tail(l.a.psk(t)), tail(l.b.psk(t)))
+	} else {
+		l.ok("both ends back on one key after %s with the shared PSK restored", took)
 	}
 }
 
@@ -986,6 +1131,29 @@ func testMode(t *testing.T, m mode) {
 		}
 	})
 
+	// ci/verify-keys.sh's transport health check. At this INTERVAL the derived
+	// rate limit is far above what two peers exchange, so a rejection here is
+	// legitimate traffic being dropped; a full QKD queue means the read loop
+	// refused a key_id its peer then had to retry; a stale PQC key means a
+	// tunnel invalidated over key age. None of the three may happen to a
+	// healthy pair.
+	//
+	// Asserted here and not at the end, because the log is still only the happy
+	// path at this point: the fault phases below can produce all three, and
+	// legitimately so.
+	l.phase(t, "the transport stays healthy through the rotations", func(t *testing.T) {
+		for _, n := range l.nodes() {
+			for _, pattern := range []string{"rate limited", "QKD queue full", "key stale"} {
+				if hits := n.count(t, pattern); hits != "0" {
+					t.Errorf("%s logged %q %s time(s) with nothing broken", n.name, pattern, hits)
+				}
+			}
+		}
+		l.ok("no rate limiting, no full queue, no stale key on either peer")
+	})
+
+	l.phase(t, "a second peer on the interface", l.secondPeerCheck)
+
 	// The contract under test, and the only place the modes differ: in the happy
 	// path they all behave identically, so a mode only shows its hand when a key
 	// source disappears.
@@ -994,6 +1162,7 @@ func testMode(t *testing.T, m mode) {
 	l.faultPhase(t, "PQC cannot agree a key", func(t *testing.T) { l.sourceCheck(t, "pqc", "") })
 
 	l.faultPhase(t, "a PSK written behind their backs", l.desyncCheck)
+	l.faultPhase(t, "a peer with the wrong ARNIKA_PSK", l.wrongPSKCheck)
 
 	l.phase(t, "the tunnel carries traffic at the end", func(t *testing.T) {
 		if ok, out := l.a.pings(t); !ok {
@@ -1022,18 +1191,21 @@ func testMode(t *testing.T, m mode) {
 // It is the reason the summary reports messages rather than a count: a number
 // cannot say whether the warnings under it were the ones this run asked for.
 var expectedTrouble = map[string]string{
-	"KMS request failed, retrying":                                 "the KMS was frozen, then stopped",
-	"failed to retrieve a QKD key":                                 "the PRIMARY's fetch, with the KMS gone",
-	"failed to retrieve the QKD key for the peer's key_id":         "the BACKUP's fetch, with the KMS gone",
-	"no QKD key received":                                          "the mode requires QKD and it was gone",
-	"no QKD key, falling back to the PQC key":                      "QKD gone, and optional to the mode",
-	"no QKD key, installing a PQC-only PSK":                        "QKD gone for two intervals, PQC carries on",
-	"failed to retrieve the PQC key":                               "PQC_ROUND_TIMEOUT=1ns, and PQC required",
-	"no PQC key, falling back to the QKD key":                      "PQC_ROUND_TIMEOUT=1ns, PQC optional",
-	"round failed":                                                 "a PQC round hit its deadline or lost its peer",
-	"configuring a random PSK to invalidate the WireGuard session": "the invalidation the line above asked for",
-	"no key_id from the peer":                                      "a peer stopped mid-interval by a fault phase",
-	"failed to send the key_id to the peer":                        "the same, seen from the peer that was still up",
+	"KMS request failed, retrying":                                     "the KMS was frozen, then stopped",
+	"failed to retrieve a QKD key":                                     "the PRIMARY's fetch, with the KMS gone",
+	"failed to retrieve the QKD key for the peer's key_id":             "the BACKUP's fetch, with the KMS gone",
+	"no QKD key received":                                              "the mode requires QKD and it was gone",
+	"no QKD key, falling back to the PQC key":                          "QKD gone, and optional to the mode",
+	"no QKD key, installing a PQC-only PSK":                            "QKD gone for two intervals, PQC carries on",
+	"failed to retrieve the PQC key":                                   "PQC_ROUND_TIMEOUT=1ns, and PQC required",
+	"no PQC key, falling back to the QKD key":                          "PQC_ROUND_TIMEOUT=1ns, PQC optional",
+	"round failed":                                                     "a PQC round hit its deadline or lost its peer",
+	"configuring a random PSK to invalidate the WireGuard session":     "the invalidation the line above asked for",
+	"no key_id from the peer":                                          "a peer stopped mid-interval by a fault phase",
+	"packet rejected":                                                  "a peer with the wrong ARNIKA_PSK, as that phase asked for",
+	"packet rejected, ARNIKA_PSK mismatch or the message is corrupted": "the same, one step further in",
+	"PQC frame not accepted":                                           "a PQC frame from a peer that cannot authenticate",
+	"failed to send the key_id to the peer":                            "the same, seen from the peer that was still up",
 }
 
 // trouble prints the node's warnings and errors by message, each against the
