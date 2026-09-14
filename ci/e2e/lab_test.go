@@ -798,8 +798,10 @@ func (l *lab) pretest(t *testing.T) {
 // deterministic. Swap the IDs' parity and this has to follow.
 func (l *lab) sourceCheck(t *testing.T, source, how string) {
 	ctx := context.Background()
-	before := l.a.psk(t)
 	l.stopPeers(t)
+	// With the peers down, so a rotation cannot slip between this read and the
+	// stop: see wrongPSKCheck, where the same race turns into a false failure.
+	before := l.a.psk(t)
 	mark := l.a.logLines(t)
 
 	extra := ""
@@ -908,10 +910,10 @@ func (l *lab) sourceCheck(t *testing.T, source, how string) {
 // back is the other half of the test: it also covers a peer starting up against
 // an interface whose key is wrong.
 func (l *lab) desyncCheck(t *testing.T) {
-	before := l.a.psk(t)
 	bad := randomPSK(t)
 
 	l.stopPeers(t)
+	before := l.a.psk(t)
 	l.b.setPSK(t, bad)
 	l.a.resetSession(t, before)
 	l.step("node-a keeps %s, node-b now holds %s", tail(before), tail(bad))
@@ -949,10 +951,13 @@ func (l *lab) desyncCheck(t *testing.T) {
 // an address of its own, so it changes nothing but the length of the peer list.
 func (l *lab) secondPeerCheck(t *testing.T) {
 	decoy := strings.TrimSpace(l.a.exec(t, "wg genkey | wg pubkey"))
-	before := l.a.psk(t)
 	mark := l.a.logLines(t)
 	l.a.exec(t, "wg set wg0 peer %q allowed-ips 172.16.0.99/32", decoy)
 	defer l.a.exec(t, "wg set wg0 peer %q remove", decoy)
+	// Read with the decoy already in place: the peers keep rotating here, and a
+	// baseline from before it would let a write that never saw the second peer
+	// satisfy the check.
+	before := l.a.psk(t)
 	l.step("node-a's wg0 carries a second peer, %s", tail(decoy))
 
 	if took, ok := waitFor(4*interval, func() bool { return l.agreeNew(t, before) }); !ok {
@@ -991,11 +996,18 @@ func (l *lab) secondPeerCheck(t *testing.T) {
 // or onto a random one where the mode invalidates. What must not happen is the
 // two of them meeting on one key.
 func (l *lab) wrongPSKCheck(t *testing.T) {
+	l.stopPeers(t)
+	// The baseline is read with the peers down, never while they still run. A
+	// rotation landing between the read and the stop would leave the pair
+	// agreeing on a key this phase then counts as fresh, and the check below
+	// would fail on an agreement reached before the impostor even started. It
+	// is a narrow window on an idle machine and a wide one under load, which is
+	// exactly how it showed up in CI and not here.
+	//
 	// Both ends still hold the key they recovered onto in the phase before, so
 	// the question is not whether they agree now but whether they ever arrive
 	// at a fresh agreement while one of them cannot authenticate.
 	before := l.a.psk(t)
-	l.stopPeers(t)
 	mark := l.b.logLines(t)
 	l.startPeer(t, l.a, randomPSK(t), "")
 	l.startPeer(t, l.b, l.psk, "")
