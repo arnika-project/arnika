@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"runtime/secret"
+	"time"
 )
 
 // PacketType identifies the message type in the security-hardened UDP protocol.
@@ -21,7 +22,35 @@ type PacketType byte
 const (
 	PacketData PacketType = 'D' // Client sends encrypted data (signed + AES-GCM encrypted payload)
 	PacketAck  PacketType = 'A' // Server acknowledges receipt
+	PacketPQC  PacketType = 'Q' // PQC key agreement traffic; the frame kind lives inside the payload
 )
+
+// Direction identifies which of the two peers produced a packet.
+//
+// signedPayload covers type, timestamp and payload only, so with a single HMAC
+// key a packet sent A->B verifies unchanged if it is reflected back to A.
+// Deriving a separate key per direction makes a reflected packet fail at its
+// own sender.
+type Direction string
+
+const (
+	DirEven Direction = "even" // sender's ARNIKA_ID is even
+	DirOdd  Direction = "odd"  // sender's ARNIKA_ID is odd
+)
+
+// DirectionFor returns the label a node signs with and the label it must verify
+// its peer's packets against.
+//
+// The two peers' ARNIKA_ID values are required to differ in parity - only the
+// lowest bit takes part in PRIMARY/BACKUP election, so same-parity IDs already
+// break role alternation - which makes parity a locally computable, stable
+// direction label needing no extra configuration and no extra round trip.
+func DirectionFor(arnikaID int) (out, in Direction) {
+	if arnikaID%2 == 0 {
+		return DirEven, DirOdd
+	}
+	return DirOdd, DirEven
+}
 
 // Packet represents a security-hardened UDP message with HMAC authentication
 // and timestamp for replay protection.
@@ -40,18 +69,20 @@ func deriveKey(psk []byte) []byte {
 }
 
 // deriveHMACKey derives a separate key for HMAC operations.
-// Uses domain separation ("hmac-key:" prefix) to prevent key reuse with AES.
-func deriveHMACKey(psk []byte) []byte {
-	hash := sha256.Sum256(append([]byte("hmac-key:"), psk...))
+// Uses domain separation ("hmac-key:" prefix) to prevent key reuse with AES,
+// and a direction label so the two directions never share a key.
+func deriveHMACKey(psk []byte, dir Direction) []byte {
+	hash := sha256.Sum256(append([]byte("hmac-key:"+string(dir)+":"), psk...))
 	return hash[:]
 }
 
-// Sign computes HMAC-SHA256 over the given data using the PSK.
+// Sign computes HMAC-SHA256 over the given data using the PSK and the given
+// direction label. Callers sign with their outbound direction.
 // Uses runtime/secret.Do to ensure sensitive key material is zeroed after use.
-func Sign(psk, data []byte) []byte {
+func Sign(psk, data []byte, dir Direction) []byte {
 	result := make([]byte, sha256.Size)
 	secret.Do(func() {
-		key := deriveHMACKey(psk)
+		key := deriveHMACKey(psk, dir)
 		mac := hmac.New(sha256.New, key)
 		mac.Write(data)
 		copy(result, mac.Sum(nil))
@@ -61,9 +92,10 @@ func Sign(psk, data []byte) []byte {
 
 // Verify checks an HMAC-SHA256 signature using constant-time comparison.
 // Returns true if the signature is valid, false otherwise.
+// Callers verify with the direction they expect their peer to have signed with.
 // Timing is identical regardless of where the mismatch occurs.
-func Verify(psk, data, signature []byte) bool {
-	expected := Sign(psk, data)
+func Verify(psk, data, signature []byte, dir Direction) bool {
+	expected := Sign(psk, data, dir)
 	return subtle.ConstantTimeCompare(expected, signature) == 1
 }
 
@@ -132,6 +164,17 @@ func Decrypt(psk, ciphertext []byte) ([]byte, error) {
 	return result, decErr
 }
 
+// WithinSkew reports whether a packet timestamp is close enough to now to be
+// accepted. Replay protection, applied identically to every packet type and
+// both directions, so it lives next to the packet rather than at each caller.
+func WithinSkew(ts int64, max time.Duration) bool {
+	diff := time.Now().Unix() - ts
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= int64(max.Seconds())
+}
+
 // signedPayload returns the bytes covered by the HMAC signature.
 func (p *Packet) signedPayload() []byte {
 	buf := make([]byte, 0, 1+8+len(p.Payload))
@@ -145,8 +188,8 @@ func (p *Packet) signedPayload() []byte {
 
 // Marshal encodes a Packet to bytes and signs it with the PSK.
 // Wire format: [type(1)][timestamp(8)][payload_len(2)][payload(N)][signature(32)]
-func (p *Packet) Marshal(psk []byte) []byte {
-	p.Signature = Sign(psk, p.signedPayload())
+func (p *Packet) Marshal(psk []byte, dir Direction) []byte {
+	p.Signature = Sign(psk, p.signedPayload(), dir)
 
 	payloadLen := len(p.Payload)
 	totalLen := 1 + 8 + 2 + payloadLen + 32
@@ -163,7 +206,7 @@ func (p *Packet) Marshal(psk []byte) []byte {
 
 // UnmarshalPacket decodes bytes into a Packet and verifies the HMAC signature.
 // Returns a uniform error message regardless of failure reason (side-channel resistant).
-func UnmarshalPacket(psk, data []byte) (*Packet, error) {
+func UnmarshalPacket(psk, data []byte, dir Direction) (*Packet, error) {
 	// Minimum: type(1) + timestamp(8) + payload_len(2) + signature(32) = 43
 	if len(data) < 43 {
 		return nil, fmt.Errorf("authentication failed")
@@ -186,7 +229,7 @@ func UnmarshalPacket(psk, data []byte) (*Packet, error) {
 	copy(p.Signature, data[11+payloadLen:11+payloadLen+32])
 
 	// Verify signature using constant-time comparison
-	if !Verify(psk, p.signedPayload(), p.Signature) {
+	if !Verify(psk, p.signedPayload(), p.Signature, dir) {
 		return nil, fmt.Errorf("authentication failed")
 	}
 

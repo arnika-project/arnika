@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func resetKeyStore() {
@@ -199,5 +201,61 @@ func TestStatusResponseHasExpectedFieldsAndBounds(t *testing.T) {
 	}
 	if _, exists := raw["status_extension"]; exists {
 		t.Fatalf("status_extension must not be present in status response")
+	}
+}
+
+func TestFreezableNeverRepliesForFrozenSAE(t *testing.T) {
+	frozenSAEs = map[string]bool{"CONSA": true}
+	defer func() { frozenSAEs = map[string]bool{} }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys/CONSA/enc_keys", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		freezable("CONSA", handleEncKeys)(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatalf("frozen SAE replied with status %d body=%s", w.Code, w.Body.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	<-done
+	if w.Body.Len() != 0 {
+		t.Fatalf("expected empty body, got %s", w.Body.String())
+	}
+
+	// The other side must still work.
+	w2 := httptest.NewRecorder()
+	freezable("CONSB", handleEncKeys)(w2, httptest.NewRequest(http.MethodGet, "/api/v1/keys/CONSB/enc_keys", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected CONSB to answer 200, got %d", w2.Code)
+	}
+}
+
+func TestGetFrozenSAEs(t *testing.T) {
+	for value, want := range map[string][]string{
+		"":            {},
+		"CONSA":       {"CONSA"},
+		" consb ":     {"CONSB"},
+		"both":        {"CONSA", "CONSB"},
+		"CONSA,CONSB": {"CONSA", "CONSB"},
+		"bogus":       {},
+	} {
+		t.Setenv("FREEZE", value)
+		got := getFrozenSAEs()
+		if len(got) != len(want) {
+			t.Fatalf("FREEZE=%q: expected %v, got %v", value, want, got)
+		}
+		for _, sae := range want {
+			if !got[sae] {
+				t.Fatalf("FREEZE=%q: expected %s frozen, got %v", value, sae, got)
+			}
+		}
 	}
 }

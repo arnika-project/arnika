@@ -12,12 +12,17 @@ import (
 	"time"
 )
 
+// minArnikaPSKLen is the minimum accepted length of ARNIKA_PSK. The
+// ~128-bit post-Grover authentication claim assumes 256 bits of real
+// entropy, which a human-chosen passphrase does not provide.
+const minArnikaPSKLen = 32
+
 // Config contains the configuration values for the arnika service.
 type Config struct {
 	ListenAddress          string        // LISTEN_ADDRESS, Address to listen on for incoming connections
 	ServerAddress          string        // SERVER_ADDRESS, Address of the arnika server
 	ArnikaID               string        // ARNIKA_ID, up to 5-digit identifier (defaults to port number from ListenAddress)
-	ArnikaPSK              string        // ARNIKA_PSK, PSK to authenticate with the other peer
+	ArnikaPSK              []byte        // ARNIKA_PSK, PSK to authenticate with the other peer
 	Certificate            string        // CERTIFICATE, Path to the client certificate file
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
@@ -30,23 +35,59 @@ type Config struct {
 	Interval               time.Duration // INTERVAL, Interval between key updates
 	WireGuardInterface     string        // WIREGUARD_INTERFACE, Name of the WireGuard interface to configure
 	WireguardPeerPublicKey string        // WIREGUARD_PEER_PUBLIC_KEY, Public key of the WireGuard peer
-	PQCPSKFile             string        // PQC_PSK_FILE, Path to the PQC PSK file
+	PQCEnabled             bool          // PQC_ENABLED, Enables the pqc-hpke key agreement with the peer
+	PQCRoundInterval       time.Duration // PQC_ROUND_INTERVAL, Period of the PQC key agreement
+	PQCRoundTimeout        time.Duration // PQC_ROUND_TIMEOUT, Per-round deadline, must be shorter than PQC_ROUND_INTERVAL
+	PQCMaxKeyAge           time.Duration // PQC_MAX_KEY_AGE, Staleness threshold for the agreed PQC key
 	Mode                   string        // MODE, Operation mode ("QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired")
-	RateLimit              int           // RATE_LIMIT, Max requests per IP per window
+	RateLimit              int           // RATE_LIMIT, Max requests per IP per window; zero means derive it from protocol traffic
 	RateWindow             time.Duration // RATE_WINDOW, Window duration for rate limiting
 	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
 }
 
-// UsePQC returns a boolean indicating whether the PQC PSK file is set in the Config struct.
-//
-// No parameters.
-// Returns a boolean value indicating whether the PQC PSK file is set.
+// UsePQC reports whether the PQC key agreement is enabled.
 func (c *Config) UsePQC() bool {
-	return c.PQCPSKFile != ""
+	return c.PQCEnabled
 }
 
 func (c *Config) IsPQCRequired() bool {
 	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastPqcRequired"
+}
+
+// ValidateKeySources rejects a configuration the compiled-in key readers
+// cannot serve. Readers are selected by build tag (see KEYCONTROL.md), so a
+// binary can lack the reader a MODE demands; catching that here keeps the
+// failure at startup instead of at the first rotation, where it would only
+// invalidate the tunnel.
+//
+// Parameters:
+//   - qkdCompiled: the wiring constant of the QKD family, true unless the
+//     binary was built with qkd_none. Callers pass the constant, never a
+//     configuration value.
+//
+// Returns nil if this binary can serve cfg. Returns an error if KMS_URL is
+// missing while a QKD reader is compiled in, if KMS_URL is set while it is
+// not, or if MODE or PQC_ENABLED name key material this binary cannot produce.
+// Call it directly after Parse, before any key is due.
+func (c *Config) ValidateKeySources(qkdCompiled bool) error {
+	if qkdCompiled && c.KMSURL == "" {
+		return fmt.Errorf("[ERROR] KMS_URL is not set")
+	}
+	if !qkdCompiled {
+		if c.KMSURL != "" {
+			return fmt.Errorf("[ERROR] KMS_URL is set but this binary was built without a QKD key reader (build tag qkd_none)")
+		}
+		// Only AtLeastPqcRequired is servable: a QKD-requiring mode fails every
+		// interval, and EitherQkdOrPqcRequired would permit running with no key
+		// material at all. Both only ever invalidate the tunnel.
+		if c.IsQKDRequired() || !c.IsPQCRequired() {
+			return fmt.Errorf("[ERROR] this binary was built without a QKD key reader (build tag qkd_none), which requires MODE=AtLeastPqcRequired, got %s", c.Mode)
+		}
+		if !c.UsePQC() {
+			return fmt.Errorf("[ERROR] this binary was built without a QKD key reader (build tag qkd_none), so PQC_ENABLED must not be false")
+		}
+	}
+	return nil
 }
 
 func (c *Config) IsQKDRequired() bool {
@@ -59,7 +100,7 @@ func (c *Config) IsQKDRequired() bool {
 // has the lowest bit == 0 is PRIMARY for that interval. Because two peers
 // with different ArnikaIDs XOR different values, they get opposite results.
 func (c *Config) IsPrimary(intervalNum uint64) bool {
-	mac := hmac.New(sha256.New, []byte(c.ArnikaPSK))
+	mac := hmac.New(sha256.New, c.ArnikaPSK)
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], intervalNum)
 	mac.Write(buf[:])
@@ -75,15 +116,19 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Arnika Mode:              %s\n", c.Mode)
 	fmt.Printf("Arnika Interval:          %s\n", c.Interval)
 	fmt.Printf("Arnika ID:                %s\n", c.ArnikaID)
-	fmt.Printf("Arnika PSK:               %s\n", c.ArnikaPSK)
+	fmt.Printf("Arnika PSK:               %s\n", redactSecret(c.ArnikaPSK))
 	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
 	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
 	fmt.Printf("Arnika Peer Timeout:			%s\n", c.ArnikaPeerTimeout)
-	fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
-	fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
-	fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
-	fmt.Printf("KMS Backoff Base Delay:   %s\n", c.KMSBackoffBaseDelay)
-	fmt.Printf("KMS Retry Interval:       %s\n", c.KMSRetryInterval)
+	if c.KMSURL != "" {
+		fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
+		fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
+		fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
+		fmt.Printf("KMS Backoff Base Delay:   %s\n", c.KMSBackoffBaseDelay)
+		fmt.Printf("KMS Retry Interval:       %s\n", c.KMSRetryInterval)
+	} else {
+		fmt.Println("QKD key reader:           NOT COMPILED IN (build tag qkd_none)")
+	}
 
 	if c.Certificate != "" {
 		fmt.Printf("Client Certificate:       %s\n", c.Certificate)
@@ -101,10 +146,13 @@ func (c *Config) PrintStartupConfig() {
 		fmt.Println("CA Certificate:           (not configured)")
 	}
 	if c.UsePQC() {
-		fmt.Printf("PQC key provider:         ENABLED\n")
-		fmt.Printf("PQC key:                  %s\n", c.PQCPSKFile)
+		fmt.Printf("PQC key agreement:        ENABLED (pqc-hpke)\n")
+		fmt.Printf("PQC round interval:       %s\n", c.PQCRoundInterval)
+		fmt.Printf("PQC round timeout:        %s\n", c.PQCRoundTimeout)
+		fmt.Printf("PQC max key age:          %s (%.1f x round interval)\n",
+			c.PQCMaxKeyAge, float64(c.PQCMaxKeyAge)/float64(c.PQCRoundInterval))
 	} else {
-		fmt.Println("PQC key provider:        DISABLED")
+		fmt.Println("PQC key agreement:        DISABLED")
 	}
 
 	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
@@ -113,6 +161,24 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Rate Window:              %s\n", c.RateWindow)
 	fmt.Printf("Max Clock Skew:           %s\n", c.MaxClockSkew)
 	fmt.Println("============================")
+}
+
+// redactSecret keeps secret material out of the startup config dump, which is
+// written to stdout and from there into journals and log aggregation.
+func redactSecret(b []byte) string {
+	if len(b) == 0 {
+		return "(unset)"
+	}
+	return fmt.Sprintf("(set, %d bytes)", len(b))
+}
+
+// ZeroSecrets wipes the secret material held on the Config.
+//
+// ArnikaPSK is a []byte and not a string precisely so that this is possible:
+// Go strings are immutable, so a secret held as one stays in the heap for the
+// process lifetime with no way to overwrite it.
+func (c *Config) ZeroSecrets() {
+	clear(c.ArnikaPSK)
 }
 
 // Parse parses the configuration values from environment variables and returns a Config pointer.
@@ -152,10 +218,7 @@ func Parse() (*Config, error) {
 	config.Certificate = getEnvOrDefault("CERTIFICATE", "")
 	config.PrivateKey = getEnvOrDefault("PRIVATE_KEY", "")
 	config.CACertificate = getEnvOrDefault("CA_CERTIFICATE", "")
-	config.KMSURL, err = getEnv("KMS_URL")
-	if err != nil {
-		return nil, err
-	}
+	config.KMSURL = getEnvOrDefault("KMS_URL", "")
 	kmsHTTPTimeout, err := time.ParseDuration(getEnvOrDefault("KMS_HTTP_TIMEOUT", "10s"))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_HTTP_TIMEOUT: %w", err)
@@ -174,21 +237,47 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	config.PQCPSKFile = getEnvOrDefault("PQC_PSK_FILE", "")
-	if config.PQCPSKFile != "" {
-		fileInfo, err := os.Stat(config.PQCPSKFile)
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("[ERROR] failed to open PQC PSK file: %w", err)
+	// PQC key material is now agreed with the peer over HPKE and never touches
+	// disk, so there is no file path and no permission check.
+	config.PQCEnabled = getEnvOrDefault("PQC_ENABLED", "true") == "true"
+	config.PQCRoundInterval, err = time.ParseDuration(getEnvOrDefault("PQC_ROUND_INTERVAL", config.Interval.String()))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse PQC_ROUND_INTERVAL: %w", err)
+	}
+	// Derived from PQC_ROUND_INTERVAL, not INTERVAL: the key ages against the
+	// PQC round cadence, so deriving it from the QKD interval made a key stale
+	// for most of every healthy round whenever an operator overrode only
+	// PQC_ROUND_INTERVAL. Two rounds is one round of loss tolerance.
+	config.PQCMaxKeyAge, err = time.ParseDuration(getEnvOrDefault("PQC_MAX_KEY_AGE", (2 * config.PQCRoundInterval).String()))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse PQC_MAX_KEY_AGE: %w", err)
+	}
+	config.PQCRoundTimeout, err = time.ParseDuration(getEnvOrDefault("PQC_ROUND_TIMEOUT", (config.Interval / 4).String()))
+	if err != nil {
+		return nil, fmt.Errorf("[ERROR] failed to parse PQC_ROUND_TIMEOUT: %w", err)
+	}
+	if config.PQCEnabled {
+		if config.PQCRoundInterval <= 0 {
+			return nil, fmt.Errorf("[ERROR] PQC_ROUND_INTERVAL must be positive, got %s", config.PQCRoundInterval)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("[ERROR] failed to stat PQC PSK file: %w", err)
+		// A round that outlives its interval would overlap the next one.
+		if config.PQCRoundTimeout <= 0 || config.PQCRoundTimeout >= config.PQCRoundInterval {
+			return nil, fmt.Errorf("[ERROR] PQC_ROUND_TIMEOUT (%s) must be positive and shorter than PQC_ROUND_INTERVAL (%s)",
+				config.PQCRoundTimeout, config.PQCRoundInterval)
 		}
-		perms := fileInfo.Mode().Perm()
-		if perms&0077 != 0 {
-			return nil, fmt.Errorf("[ERROR] PQC PSK file has insecure permissions %o: must be 0600 or stricter", perms)
+		if config.PQCMaxKeyAge <= 0 {
+			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE must be positive, got %s", config.PQCMaxKeyAge)
+		}
+		// A key that goes stale within its own round interval is stale for part
+		// of every healthy round, and in a PQC-requiring mode each rotation in
+		// that window invalidates the tunnel. Reject it rather than let it
+		// surface as intermittent handshake failures.
+		if config.PQCMaxKeyAge <= config.PQCRoundInterval {
+			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE (%s) must be longer than PQC_ROUND_INTERVAL (%s)",
+				config.PQCMaxKeyAge, config.PQCRoundInterval)
 		}
 	}
-	config.Mode = getEnvOrDefault("MODE", "AtLeastQkdRequired")
+	config.Mode = getEnvOrDefault("MODE", "QkdAndPqcRequired")
 	if config.Mode != "QkdAndPqcRequired" && config.Mode != "AtLeastQkdRequired" && config.Mode != "AtLeastPqcRequired" && config.Mode != "EitherQkdOrPqcRequired" {
 		return nil, fmt.Errorf("[ERROR] invalid MODE value: %s", config.Mode)
 	}
@@ -206,17 +295,42 @@ func Parse() (*Config, error) {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_RETRY_INTERVAL: %w", err)
 	}
 	if !config.UsePQC() && config.IsPQCRequired() {
-		return nil, fmt.Errorf("[ERROR] PQC PSK file missing as MODE is %s", config.Mode)
+		return nil, fmt.Errorf("[ERROR] PQC_ENABLED is false but MODE is %s, which requires a PQC key", config.Mode)
 	}
-	config.ArnikaPSK = getEnvOrDefault("ARNIKA_PSK", "")
+	// ARNIKA_PSK is the sole authentication root for the peer protocol: an
+	// unset value makes the HMAC key SHA-256(""), a publicly computable
+	// constant, and anyone can then inject valid packets.
+	//
+	// Held as []byte, not string: every consumer needs bytes, so a string field
+	// would mean a fresh, unclearable heap copy of the authentication root on
+	// every interval and every PQC round. One conversion here, cleared by
+	// ZeroSecrets, replaces all of them.
+	config.ArnikaPSK = []byte(getEnvOrDefault("ARNIKA_PSK", ""))
+	if len(config.ArnikaPSK) == 0 {
+		return nil, fmt.Errorf("[ERROR] ARNIKA_PSK is not set; refusing to start")
+	}
+	if len(config.ArnikaPSK) < minArnikaPSKLen {
+		return nil, fmt.Errorf(
+			"[ERROR] ARNIKA_PSK is %d bytes, minimum %d; generate with: openssl rand -base64 32",
+			len(config.ArnikaPSK), minArnikaPSKLen)
+	}
 	config.ArnikaPeerTimeout, err = time.ParseDuration(getEnvOrDefault("ARNIKA_PEER_TIMEOUT", "500ms"))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse ARNIKA_PEER_TIMEOUT: %w", err)
 	}
-	rateLimitStr := getEnvOrDefault("RATE_LIMIT", "30")
-	config.RateLimit, err = strconv.Atoi(rateLimitStr)
-	if err != nil {
-		return nil, fmt.Errorf("[ERROR] failed to parse RATE_LIMIT: %w", err)
+	// Left at zero when unset, meaning "size it from the protocol". Only the
+	// caller can do that: the frame and retry counts that decide how much
+	// traffic one healthy round produces live in the transport, not here. A
+	// static default was below what a five-second interval legitimately
+	// generates, so the limiter rejected valid frames.
+	if v := os.Getenv("RATE_LIMIT"); v != "" {
+		config.RateLimit, err = strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("[ERROR] failed to parse RATE_LIMIT: %w", err)
+		}
+		if config.RateLimit <= 0 {
+			return nil, fmt.Errorf("[ERROR] RATE_LIMIT must be positive, got %d", config.RateLimit)
+		}
 	}
 	rateWindowStr := getEnvOrDefault("RATE_WINDOW", "1m")
 	config.RateWindow, err = time.ParseDuration(rateWindowStr)

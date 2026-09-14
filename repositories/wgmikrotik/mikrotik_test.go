@@ -1,4 +1,4 @@
-package repositories
+package wgmikrotik
 
 import (
 	"encoding/base64"
@@ -84,10 +84,10 @@ func (f *fakeRouterOS) handler(t *testing.T) http.HandlerFunc {
 	}
 }
 
-func newTestRepo(t *testing.T, fake *fakeRouterOS) (*WireguardMikrotikRepository, *httptest.Server) {
+func newTestRepo(t *testing.T, fake *fakeRouterOS) (*Repository, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(fake.handler(t))
-	repo := NewWireguardMikrotikRepository(srv.URL, testMikrotikUser, testMikrotikPass, testMikrotikIface, testMikrotikPeerKey, srv.Client())
+	repo := NewRepository(srv.URL, testMikrotikUser, testMikrotikPass, testMikrotikIface, testMikrotikPeerKey, srv.Client())
 	return repo, srv
 }
 
@@ -99,7 +99,10 @@ func TestWireguardMikrotikRepository_SetPSK(t *testing.T) {
 	repo, srv := newTestRepo(t, fake)
 	defer srv.Close()
 
-	const psk = "TESTpresharedKeyBase64Value00000000000000000="
+	psk := make([]byte, 32)
+	for i := range psk {
+		psk[i] = byte(i)
+	}
 	if err := repo.SetPSK(psk); err != nil {
 		t.Fatalf("SetPSK returned error: %v", err)
 	}
@@ -125,8 +128,11 @@ func TestWireguardMikrotikRepository_SetPSK(t *testing.T) {
 	if fake.lastPatchID != testMikrotikPeerID {
 		t.Errorf("PATCH targeted peer id %q, want %q", fake.lastPatchID, testMikrotikPeerID)
 	}
-	if fake.lastPatchPSK != psk {
-		t.Errorf("PATCH set preshared-key %q, want %q", fake.lastPatchPSK, psk)
+	// The adapter owns the base64 encoding, because RouterOS takes the key as a
+	// JSON string. Asserting the encoded form is what pins that down.
+	want := base64.StdEncoding.EncodeToString(psk)
+	if fake.lastPatchPSK != want {
+		t.Errorf("PATCH set preshared-key %q, want %q", fake.lastPatchPSK, want)
 	}
 }
 
@@ -137,36 +143,10 @@ func TestWireguardMikrotikRepository_SetPSK_PeerNotFound(t *testing.T) {
 	repo, srv := newTestRepo(t, fake)
 	defer srv.Close()
 
-	if err := repo.SetPSK("whatever="); err == nil {
+	if err := repo.SetPSK(make([]byte, 32)); err == nil {
 		t.Fatal("expected error when configured peer is absent, got nil")
 	}
 	if fake.patchCalls != 0 {
 		t.Errorf("expected no PATCH when peer is missing, got %d", fake.patchCalls)
-	}
-}
-
-func TestWireguardMikrotikRepository_InvalidateTunnel(t *testing.T) {
-	fake := &fakeRouterOS{peers: []map[string]string{
-		{".id": testMikrotikPeerID, "interface": testMikrotikIface, "public-key": testMikrotikPeerKey},
-	}}
-	repo, srv := newTestRepo(t, fake)
-	defer srv.Close()
-
-	if err := repo.InvalidateTunnel(); err != nil {
-		t.Fatalf("InvalidateTunnel returned error: %v", err)
-	}
-	first := fake.lastPatchPSK
-	raw, err := base64.StdEncoding.DecodeString(first)
-	if err != nil {
-		t.Fatalf("InvalidateTunnel set a non-base64 preshared-key %q: %v", first, err)
-	}
-	if len(raw) != 32 {
-		t.Errorf("InvalidateTunnel set a %d-byte key, want 32 bytes", len(raw))
-	}
-	if err := repo.InvalidateTunnel(); err != nil {
-		t.Fatalf("second InvalidateTunnel returned error: %v", err)
-	}
-	if fake.lastPatchPSK == first {
-		t.Error("InvalidateTunnel produced identical keys on two calls; expected random keys")
 	}
 }

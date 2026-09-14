@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/arnika-project/arnika/config"
-	"github.com/arnika-project/arnika/repositories"
+	"github.com/arnika-project/arnika/repositories/wgmikrotik"
 	"github.com/arnika-project/arnika/services"
 )
 
@@ -68,7 +68,7 @@ func getKeyWriterService(cfg *config.Config) (*services.KeyWriterService, error)
 		},
 	}
 
-	repo := repositories.NewWireguardMikrotikRepository(
+	repo := wgmikrotik.NewRepository(
 		baseURL,
 		username,
 		password,

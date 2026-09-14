@@ -53,6 +53,14 @@ jobs:
           GOEXPERIMENT: runtimesecret
         run: go test -v ./...
 
+      # The container lab in ci/e2e: two Arnika peers over real WireGuard and
+      # the KMS simulator. Its own module, so it needs no GOEXPERIMENT and does
+      # not pull testcontainers into Arnika's go.mod, and `go test ./...` above
+      # does not see it. Same command as locally, which is the point of it.
+      - name: End-to-end container lab
+        run: go test -v -timeout 15m ./...
+        working-directory: ci/e2e
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -166,85 +174,47 @@ jobs:
           done
           echo "::endgroup::"
 
-  integration-test:
-    name: Integration Test with Containerlab
+  readers:
+    name: Key reader builds
     runs-on: ubuntu-latest
-    needs: [build, test]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Built before the keys are generated, for two reasons: ci/setup-keys.sh
-      # borrows the `wg` binary from this image instead of installing
-      # wireguard-tools on the runner, and keeping the freshly generated keys
-      # out of the build context stops them invalidating the COPY layer.
-      - name: Build Arnika node image
-        uses: docker/build-push-action@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          context: .
-          file: ci/Dockerfile.node
-          tags: arnika-node:ci
-          load: true
-          cache-from: type=gha,scope=arnika-node
-          cache-to: type=gha,mode=max,scope=arnika-node
+          go-version-file: go.mod
 
-      - name: Build QKD simulator image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ci/Dockerfile.simulator
-          tags: qkd-simulator:ci
-          load: true
-          cache-from: type=gha,scope=qkd-simulator
-          cache-to: type=gha,mode=max,scope=qkd-simulator
+      - name: Download dependencies
+        run: go mod download
 
-      - name: Generate WireGuard keys
+      - name: Build, vet and conflict-check every reader
+        env:
+          GOEXPERIMENT: runtimesecret
+          CGO_ENABLED: 0
         run: |
-          chmod +x ci/setup-keys.sh
-          ./ci/setup-keys.sh
+          set -euo pipefail
 
-      - name: Install Containerlab
-        run: |
-          bash -c "$(curl -sL https://get.containerlab.dev)"
+          # One family per reader port. Adding a reader means adding its tag to
+          # the family it belongs to. See KEYCONTROL.md.
+          QKD=(qkd_kms qkd_none)
 
-      - name: Deploy containerlab topology
-        run: |
-          sudo containerlab deploy -t ci/clab-ci.yaml
+          echo "::group::Build and vet every reader"
+          for qkd in "${QKD[@]}" ; do
+            echo "-> $qkd"
+            go build -tags "$qkd" -o /dev/null .
+            go vet -tags "$qkd" ./...
+          done
+          echo "::endgroup::"
 
-      - name: Start QKD simulator
-        run: |
-          docker exec clab-arnika-ci-test-qkd-simulator /usr/local/bin/qkd-simulator &
-          sleep 5
+          echo "::group::Two tags from the same family must never compile together"
+          for pair in "${QKD[*]}" ; do
+            if go build -tags "$pair" -o /dev/null . 2>/dev/null ; then
+              echo "::error::tags '$pair' built; expected a redeclared factory"
+              exit 1
+            fi
+            echo "-> '$pair' correctly fails"
+          done
+          echo "::endgroup::"
 
-      - name: Start node-a
-        run: |
-          docker exec clab-arnika-ci-test-node-a /bin/bash /etc/arnika/start.sh
-
-      - name: Start node-b
-        run: |
-          docker exec clab-arnika-ci-test-node-b /bin/bash /etc/arnika/start.sh
-
-      # ci/verify-keys.sh polls for convergence itself, so there is no separate
-      # fixed wait here any more.
-      - name: Verify key injection
-        run: |
-          chmod +x ci/verify-keys.sh
-          ./ci/verify-keys.sh
-
-      - name: Collect logs on failure
-        if: failure()
-        run: |
-          echo "====== QKD Simulator Logs ======"
-          docker logs clab-arnika-ci-test-qkd-simulator || true
-          echo "====== Node-A Logs ======"
-          docker exec clab-arnika-ci-test-node-a cat /tmp/arnika.log || true
-          echo "====== Node-B Logs ======"
-          docker exec clab-arnika-ci-test-node-b cat /tmp/arnika.log || true
-
-      - name: Cleanup containerlab
-        if: always()
-        run: |
-          sudo containerlab destroy -t ci/clab-ci.yaml --cleanup

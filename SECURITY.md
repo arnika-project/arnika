@@ -11,7 +11,7 @@ Arnika installs the derived PSK through a **key writer** adapter. Two are shippe
 (see [`KEYCONTROL.md`](KEYCONTROL.md)), and they have different security boundaries:
 
 | Key writer | Build tag | How the PSK reaches WireGuard | Security boundary |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | netlink (default) | _(none)_ / `wireguard_netlink` | Local kernel WireGuard interface via Generic Netlink (`NETLINK_GENERIC`) using `wgctrl` | Kernel Netlink socket, `CAP_NET_ADMIN` |
 | MikroTik | `wireguard_mikrotik` | REST API call to a remote RouterOS router over HTTPS | Authenticated TLS session to the router |
 
@@ -32,8 +32,8 @@ We take security very seriously and encourage responsible disclosure from the co
 Only the latest stable release receives security fixes. Please ensure you are running the latest
 release before reporting a vulnerability.
 
-| Version       | Supported          |
-|---------------|--------------------|
+| Version       | Supported           |
+|---------------|---------------------|
 | latest (main) | ✅ Yes              |
 | v1.x          | ✅ Yes              |
 | < v1.x        | ❌ No               |
@@ -133,7 +133,6 @@ AES-256-GCM payload, see [`CODEFLOW.md`](CODEFLOW.md)):
   rate limiting (`RATE_LIMIT`, `RATE_WINDOW`)
 - Any leakage of `ARNIKA_PSK`, or a code path that accepts packets that fail verification
 
-
 ### Dependencies
 
 - Vulnerabilities in Go modules: `golang.zx2c4.com/wireguard/wgctrl`,
@@ -159,7 +158,10 @@ The following are **out of scope**:
 - Theoretical attacks requiring physical access to the QKD optical channel
 - The KMS mock (`tools/kms`) is **not** intended for production; misconfigurations in
   development/test environments are out of scope
-- `PQC_PSK_FILE`: insecure file permissions, symlink attacks, or file descriptor leakage from PQK key provider integration
+- Vulnerabilities in an external PQC key provider. Arnika no longer reads PQC key material from a
+  file, so the `PQC_PSK_FILE` attack surface described by
+  [GHSA-rc6v-5rmx-w5mv](https://github.com/arnika-project/arnika/security/advisories/GHSA-rc6v-5rmx-w5mv)
+  no longer exists (see [PQC Key Agreement](#pqc-key-agreement-pqc-hpke))
 
 ---
 
@@ -193,6 +195,26 @@ Key implications for security:
 - **No PSK is persisted to disk.** Key material is held in memory only during the active rekeying
   window and passed directly to the kernel via Netlink. Any path that causes the PSK to be logged
   or written to disk is a high-severity finding.
+- **Two implicit paths to disk are closed at startup, not by policy.** Memory-only is not the same
+  as disk-free: a core dump and the swap file both write the heap out. `hardening.Process()`
+  (`hardening/hardening_linux.go`) therefore sets `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0` and
+  `mlockall(MCL_CURRENT|MCL_FUTURE)` before the configuration is read, so `ARNIKA_PSK` never exists
+  in a process that can be dumped, swapped, or `ptrace`d by its own user. Each step is best effort:
+  a container without `CAP_IPC_LOCK` logs a warning and keeps running, so **check the startup log**
+  if these guarantees matter to your deployment.
+- **Swap protection needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`.** A finite `RLIMIT_MEMLOCK`
+  does not work and cannot be tuned around: the limit is charged against locked _address space_,
+  and the Go runtime reserves roughly 1.2 GB of heap arena, so `mlockall` returns `ENOMEM` for
+  anything short of unlimited. Verified in a container on `golang:1.27`: `VmLck` 1261164 kB with
+  `CAP_IPC_LOCK`, `ENOMEM` without it even at a 1 GiB limit. A refused lock is safe, not merely
+  tolerated, because `MCL_FUTURE` only takes effect once `mlockall` succeeds and so cannot turn a
+  later mapping into a fatal out-of-memory. The other two steps still apply.
+- **`ARNIKA_PSK` remains visible in `/proc/<pid>/environ` to root.** It is dropped from the Go
+  runtime's environment after parsing, so it is not inherited by a child process, but the kernel's
+  copy reflects the environment as of `execve` and cannot be rewritten from inside the process.
+  `PR_SET_DUMPABLE=0` is what restricts that file to root. Passing the secret via a systemd
+  credential or a `LoadCredential=` file rather than the environment removes the exposure entirely;
+  a same-uid process cannot read it either way once the process is non-dumpable.
 
 ### Inter-Peer Channel Authentication (`ARNIKA_PSK`)
 
@@ -203,14 +225,14 @@ AES-256-GCM, using two keys derived from that secret with domain separation (`au
 - **`ARNIKA_PSK` MUST be set, identical on both peers, and secret.** It is not read from a file
   and not negotiated — there is no fallback and no alternative authentication mechanism for this
   channel.
-- **An unset `ARNIKA_PSK` is a critical misconfiguration.** The variable defaults to the empty
-  string and is not rejected at startup. Both derived keys then depend only on the empty string
-  and are trivially computable by anyone, so any host that can reach `LISTEN_ADDRESS` can inject
-  or decrypt key IDs. Arnika still starts and appears to work.
+- **Arnika refuses to start without it.** The variable is mandatory and must be at least 32 bytes;
+  a shorter or absent value is a startup error, not a warning. This is deliberate: an empty value
+  would make both derived keys depend only on the empty string and be trivially computable by
+  anyone, so any host able to reach `LISTEN_ADDRESS` could inject or decrypt key IDs.
 - **Generate it with a CSPRNG**, at least 32 bytes of entropy, e.g. `openssl rand -base64 32`.
-  Distribute it out of band and rotate it on both peers together.
-- **The startup banner prints `ARNIKA_PSK` in cleartext** (`Arnika PSK: …`). Treat Arnika's stdout
-  and journal as secret material, or redact it before sharing logs.
+  A human-chosen passphrase does not carry the entropy the security claim assumes. Distribute it
+  out of band and rotate it on both peers together.
+- **The startup banner redacts it**, printing `(set, N bytes)` rather than the value.
 - **Supporting controls on the same channel**: per-IP rate limiting (`RATE_LIMIT`, `RATE_WINDOW`,
   default 30/min) and timestamp replay protection (`MAX_CLOCK_SKEW`, default `1m`). Lowering
   `MAX_CLOCK_SKEW` reduces the replay window but requires closer clock synchronisation between
@@ -226,7 +248,7 @@ Which peer requests a new key in a given interval is decided locally by
 
 - **The two peers' `ARNIKA_ID` values MUST have different parity** — one odd, one even. Only the
   lowest bit of `ARNIKA_ID` enters the decision, so two peers with different but same-parity IDs
-  (e.g. `100` and `102`) elect the *same* role in every interval, and both or neither will rotate.
+  (e.g. `100` and `102`) elect the _same_ role in every interval, and both or neither will rotate.
 - **`ARNIKA_ID` defaults to the port from `LISTEN_ADDRESS`.** If both peers listen on the same
   port, they inherit the same ID and role election never separates them. Set it explicitly.
 - **Both peers MUST use the same `INTERVAL`.** The election is only guaranteed to produce opposite
@@ -236,13 +258,13 @@ Which peer requests a new key in a given interval is decided locally by
 ### KMS Client Certificates (`CERTIFICATE`, `PRIVATE_KEY`, `CA_CERTIFICATE`)
 
 These three variables configure **client-certificate authentication towards the KMS only**
-(`repositories/kms.go`, wired in `keyreader.go`). They are used for the ETSI GS QKD 014 HTTPS
+(`repositories/kms/kms.go`, wired in `wire_qkd_kms.go`). They are used for the ETSI GS QKD 014 HTTPS
 connection and for nothing else — in particular they do not protect the inter-peer channel.
 
 They are **all-or-nothing**: if any one of them is empty, client-certificate authentication is
 silently disabled and the KMS connection falls back to server-only validation against the system
 root store (TLS 1.2 minimum). Where the KMS requires mutual TLS, configure all three, keep the
-private key `0600` and owned by the Arnika user, and note that `CA_CERTIFICATE` then *replaces*
+private key `0600` and owned by the Arnika user, and note that `CA_CERTIFICATE` then _replaces_
 the system roots for that connection.
 
 A deployment that believes it is using mutual TLS towards the KMS while one of the three variables
@@ -264,30 +286,58 @@ Operation modes (`QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired`
 `EitherQkdOrPqcRequired`) define the minimum security level. Downgrade attacks that force a weaker
 mode are in scope.
 
-### PQC Key File & Directory Hardening
+### PQC Key Agreement (`pqc-hpke`)
 
-The `PQC_PSK_FILE` mechanism reads PSK material from a file provided an external
-key provider. While setting the file to `0600` restricts access, this alone is insufficient if the
-parent directory remains writable by the Arnika process user.
+Arnika agrees the PQC key with its peer using HPKE (RFC 9180) with the MLKEM1024-P384 hybrid KEM,
+over the socket it already binds. See [`docs/pqc-hpke.md`](docs/pqc-hpke.md).
 
-**Attack vector**: As demonstrated via [GHSA-rc6v-5rmx-w5m](https://github.com/arnika-project/arnika/security/advisories/GHSA-rc6v-5rmx-w5mv) , if an attacker has write access to the directory containing `PQC_PSK_FILE`, they
-can:
+**This removes an entire attack surface.** Earlier releases read PQC key material from a file named
+by `PQC_PSK_FILE`, whose directory permissions were the subject of
+[GHSA-rc6v-5rmx-w5mv](https://github.com/arnika-project/arnika/security/advisories/GHSA-rc6v-5rmx-w5mv):
+an attacker able to write to that directory could replace the file or plant a symlink, bypassing
+application-level validation. There is now no file, no directory to harden, and no key at rest.
 
-- Delete the original file and replace it with attacker-controlled content
-- Create a symlink to a different file they control
-- Bypass application-level validation entirely
+What replaces it, and what to watch:
 
-**Mitigation**: The directory containing `PQC_PSK_FILE` must have permissions that prevent the
-Arnika process user from modifying its contents. Recommended: `0700` or `0750` owned by root, with
-the Arnika user having read access only.
+- **`ARNIKA_PSK` is the sole authentication root of the agreement.** There is no second,
+  independent factor: an attacker holding it can MITM the exchange. This is the same trust root
+  the QKD key-id exchange already depends on, so the PQC path is no weaker than the path beside
+  it — but it is not stronger either.
+- **Key confirmation is load-bearing and must not be removed.** FIPS 203 ML-KEM decapsulation
+  never fails: a malformed encapsulation yields a _pseudorandom_ shared secret rather than an
+  error. Without the mandatory confirmation exchange the two peers would hold different keys
+  silently, poisoning the WireGuard PSK an interval later. Any change that weakens or skips it is
+  a high-severity finding.
+- **Quantum confidentiality rests on ML-KEM-1024 alone.** The P-384 half falls to Shor; it is
+  there to cover an ML-KEM _implementation_ flaw exploited classically (the KyberSlash/Clangover
+  scenario), and to satisfy the hybrid requirement in the German and EU positions. QKD, when
+  present, is the only non-computational hedge.
+- **No new listener.** PQC frames ride the existing port as one additional packet type; outbound
+  frames go from a dialled socket to the pinned peer address, never to an observed source, so
+  there is no reflection primitive.
+- **`draft-ietf-hpke-pq` is not yet an RFC.** Pin the Go version and re-verify interoperability on
+  upgrade.
 
-**Directory permissions**: The parent directory containing `PQC_PSK_FILE` must not be writable
-  by the Arnika process user. Even with `0600` on the file, if the directory is writable, an
-  attacker with access to that directory can delete/replace the file or symlink, bypassing file
-  permission protections entirely.
+### `ARNIKA_PSK` Rotation
 
-This is a defense-in-depth measure complementary to the application-level validation that checks
-for empty or whitespace-only keys.
+`auth.Encrypt` uses a random 96-bit nonce under the static key `SHA-256(ARNIKA_PSK)`. NIST
+SP 800-38D bounds random-IV AES-GCM near 2^32 invocations per key. Arnika sends a handful of
+packets per interval per direction, so a 120-second interval stays many orders of magnitude below
+that bound — but the limit is real, and long-lived deployments should rotate `ARNIKA_PSK`
+periodically. Rotation is a coordinated restart of both peers with the new value; there is no
+in-band rotation protocol.
+
+### Unscannable Is Not Unfingerprintable
+
+Every authentication failure in the read loop is a bare drop: no reply, no ICMP, no error. A
+scanner receives nothing, and the port is dark.
+
+Passive classification is a different matter. The envelope's type byte and 8-byte Unix timestamp
+are authenticated but **not encrypted**, so deep packet inspection can
+still recognise Arnika traffic and distinguish its packet types. WireGuard has the same property
+with its cleartext message-type byte. The PQC agreement adds one new type value and a short burst
+of larger datagrams once per interval. Claims about this port should say _unscannable_, not
+_unfingerprintable_.
 
 ---
 
@@ -314,8 +364,10 @@ for empty or whitespace-only keys.
   client-certificate authentication (these do not apply to the inter-peer channel)
 - [ ] For the MikroTik key writer: `MIKROTIK_CA_CERTIFICATE` is set, `MIKROTIK_TLS_INSECURE` is
   **not** enabled, and the router account is restricted to writing the peer PSK
-- [ ] `PQC_PSK_FILE` has permissions `0600` and is owned by the Arnika process user
-- [ ] The parent directory containing `PQC_PSK_FILE` is **not writable** by the Arnika process user
+- [ ] The PQC key agreement is on by default: `PQC_ENABLED`, `PQC_ROUND_INTERVAL` and `MODE` are
+  identical on both peers, and `PQC_ROUND_TIMEOUT` is shorter than `PQC_ROUND_INTERVAL`. Disabling
+  it with `PQC_ENABLED=false` leaves the PSK dependent on QKD alone
+- [ ] `ARNIKA_PSK` rotation is scheduled for long-lived deployments
 - [ ] The KMS mock (`tools/kms`) is **not** deployed or reachable in production
 - [ ] WireGuard `INTERVAL` and Arnika `INTERVAL` are aligned (recommended: `120s`)
 - [ ] Go version `>= 1.26` is used, with `GOEXPERIMENT=runtimesecret` set for every `go` command
@@ -323,7 +375,7 @@ for empty or whitespace-only keys.
 - [ ] Dependency integrity is verified via `go.sum` before building from source
 - [ ] Arnika logs are monitored for PSK injection failures or fallback-to-zero-PSK events —
   these indicate loss of quantum protection
-- [ ] Arnika logs are treated as sensitive: the startup banner prints `ARNIKA_PSK` in cleartext
+- [ ] `ARNIKA_PSK` is at least 32 bytes of CSPRNG output (Arnika refuses to start otherwise)
 - [ ] Process is isolated with `ProtectSystem=strict`, `PrivateTmp=true`, and
   `NoNewPrivileges=true` in the systemd unit
 
