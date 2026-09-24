@@ -15,21 +15,38 @@ The exchange runs over **UDP** between `LISTEN_ADDRESS` and the peer's `SERVER_A
 
 ```mermaid
 sequenceDiagram
-    participant PRIMARY
-    participant BACKUP
-    participant KMS
+    participant KA as KMS (PRIMARY site)
+    participant P as Arnika PRIMARY
+    participant B as Arnika BACKUP
+    participant KB as KMS (BACKUP site)
 
-    Note over PRIMARY,BACKUP: 1. Role Calculation (IsPrimary)
-    PRIMARY->>KMS: 2. Request new key
-    KMS-->>PRIMARY: 3. Return key
-    PRIMARY->>BACKUP: 4. Send DATA packet (signed + encrypted key ID)
-    BACKUP->>BACKUP: 5. Verify signature, timestamp, decrypt
-    BACKUP->>BACKUP: 6. Enqueue key ID on the bounded QKD queue
-    BACKUP->>KMS: 7. Worker requests key by ID
-    KMS-->>BACKUP: 8. Return key
-    BACKUP->>BACKUP: 9. Set new key in WireGuard
-    BACKUP->>PRIMARY: 10. Send ACK packet (signed + encrypted key ID)
-    PRIMARY->>PRIMARY: 11. Verify ACK, set new key in WireGuard
+    Note over P,B: 1. Role calculation — both peers compute IsPrimary for this INTERVAL<br/>HMAC-SHA256(ARNIKA_PSK, intervalNumber) XOR ARNIKA_ID, lowest bit
+    P->>KA: 2. GetNewKey
+    KA-->>P: 3. key_id + key
+    Note over P: the PSK is built here, before the send, and held uninstalled<br/>a failure on this side takes the 5a decision at once — buildPSK, step 11
+    P->>B: 4. DATA(key_id), signed + AES-256-GCM encrypted
+    B->>B: 5. rate limit → HMAC → timestamp → decrypt
+    Note over P,B: 5a. every path on which the QKD key does not arrive is handed to MODE:<br/>invalidate where QKD is required, else leave the PSK to the PQC timer
+    B->>B: 6. enqueue on the bounded QKD queue (8 slots), no ACK yet<br/>a full queue drops the key_id unanswered and the PRIMARY resends
+    B->>KB: 7. GetKeyByID(key_id)
+    alt key available
+        KB-->>B: 8. key
+        B->>B: 9. setPSK = buildPSK + writePSK<br/>the new PSK is now live on the BACKUP
+        B-->>P: 10. ACK(key_id), signed + encrypted — means "installed"
+        P->>P: 11. accept only an ACK that verifies and names this key_id, then writePSK
+        Note over P,B: both ends switch within one packet of each other,<br/>not a whole KMS request apart
+    else KMS error or unknown key_id
+        KB-->>B: 8. error
+        B->>B: 9. no PSK is installed
+        B--xP: 10. no ACK is sent
+        P->>P: 11. no ACK by the end of INTERVAL → clear the built PSK, then 5a
+        Note over P,B: neither end moved to the new key
+    end
+    opt ACK lost, PRIMARY resends
+        P->>B: 4. DATA(same key_id) after ARNIKA_PEER_TIMEOUT, then after twice that<br/>at most udpClientMaxAttempts = 3 sends per interval
+        B-->>P: 10. ACK again from the stored outcome<br/>no second KMS request, deduplicated by key_id
+    end
+    Note over P,B: a BACKUP interval that ends with no key_id at all takes the 5a path too
 ```
 
 ---
@@ -57,13 +74,13 @@ sequenceDiagram
 
 ### 4. **PRIMARY Sends DATA Packet**
 
-- **Where:** `auth/auth.go` (`PacketData`, `Encrypt`, `Packet.Marshal`)
+- **Where:** `transport/server.go` (`transport.SendKeyID`), `auth/auth.go` (`PacketData`, `Encrypt`, `Packet.Marshal`)
 - **What:** PRIMARY encrypts the key ID with AES-256-GCM, signs the packet with HMAC-SHA256, and sends it to BACKUP.
-- **Why:** Single roundtrip — securely transmits key material in one step.
+- **Why:** Single roundtrip. Only the key *identifier* crosses the peer link — the key itself never does, each side fetches it from its own KMS.
 
 ### 5. **BACKUP Verifies DATA, Decrypts Key**
 
-- **Where:** `auth/auth.go` (`UnmarshalPacket`, `Verify`, `Decrypt`)
+- **Where:** `transport/server.go` (`Serve`'s read loop), `auth/auth.go` (`UnmarshalPacket`, `Verify`, `Decrypt`)
 - **What:** BACKUP checks rate limit, verifies HMAC signature, checks timestamp, then decrypts the payload.
 - **Why:** Layered security — cheapest checks first, expensive decryption only after authentication passes.
 
@@ -71,7 +88,7 @@ sequenceDiagram
 
 - **Where:** `main.go` (`shouldSetPSKOnQKDFailure`, `setPSK`)
 - **What:** Every path on which the QKD key does not arrive is handed to `setPSK` with a nil QKD key so `MODE` decides: invalidate the tunnel where QKD is mandatory, carry on from the PQC key where it is optional. That covers the PRIMARY's KMS request failing, an empty `key_id`, a PRIMARY that gets no ACK for its `key_id` (step 11), a failing lookup by `key_id`, and a **BACKUP interval that ends without a `key_id` from the peer** - checked once at the end of the interval, which is why the `peerSentKeyID` flag is taken with an atomic `Swap(false)`: reading and consuming in one step is what keeps a single signal from being counted twice.
-- **Why:** These paths used to return to the interval ticker instead, which left the whole fallback and fail-closed logic in `setPSK` unreachable and the superseded PSK installed. In a QKD-optional mode the local tick deliberately does *not* set a new PSK: a separate backup timer owns the PSK there, on the instant both peers derive from the wall clock (`nextPQCSetPSKAt`), because setting one on a local tick as well put the two peers on different keys. This relies on both peers' clocks being synchronized closely enough (see "PQC Key Agreement Round" below).
+- **Why:** These paths used to return to the interval ticker instead, which left the whole fallback and fail-closed logic in `setPSK` unreachable and the superseded PSK installed. In a QKD-optional mode the local tick deliberately does *not* set a new PSK: a separate backup timer owns the PSK there, on the instant both peers derive from the wall clock (`nextPQCSetPSKAt`), because setting one on a local tick as well put the two peers on different keys. That timer arms itself only after `2 x INTERVAL` without a QKD key and then renews every `PQC_ROUND_INTERVAL` until the KMS returns — two intervals and not one, because a single late or lost key usually reaches only one of the two peers, and switching on it would leave them on different PSKs. This relies on both peers' clocks being synchronized closely enough (see "PQC Key Agreement Round" below).
 
 ### 6. **BACKUP Enqueues the Key ID**
 
@@ -97,7 +114,6 @@ sequenceDiagram
 - **What:** The worker updates the WireGuard PSK; the PRIMARY does the same in step 11 once the ACK arrives. In hybrid mode the QKD key is first combined with the PQC key via `kdf.DeriveKey` (HKDF-SHA3-256). The adapter port is a **single** method, `SetPSK(psk []byte)`. Everything that holds for every writer lives in the service: it serialises the writes, and `InvalidateTunnel` generates the fresh random 32-byte key that tears the session down.
 - **Why:** Secure VPN communication. Three details are deliberate. The port takes bytes and not a base64 string, so the PSK never becomes an immutable Go string that could not be cleared afterwards; the one adapter whose transport needs a string encodes at its own boundary, where RouterOS' JSON body makes it unavoidable. `InvalidateTunnel` is in the service and not in each adapter because "a fresh random 32-byte key" is the same rule for all of them, and three copies of it had already drifted onto two different random sources. The write lock is in the service for the same reason: the QKD rotation and the wall-clock fallback timer both reach it from their own goroutines, and an adapter that needs two requests to get there - the RouterOS one resolves the peer, then patches it - could otherwise resolve for one call and write for the other.
 
-
 ### 10. **BACKUP Sends ACK Packet**
 
 - **Where:** `transport/server.go` (`transport.RunKeyIDWorker`, `KeyIDRequest.Ack`)
@@ -114,10 +130,11 @@ sequenceDiagram
 
 ## Security Mechanisms in Code
 
-- **HMAC-SHA256:** Used for all packet signatures (`Sign`, `Verify`), keyed by `ARNIKA_PSK` with domain separation (`deriveHMACKey`).
+- **HMAC-SHA256:** Used for all packet signatures (`Sign`, `Verify`), keyed by `ARNIKA_PSK` with domain separation (`deriveHMACKey`). The domain is the sender's direction: `auth.DirectionFor` gives the even-`ARNIKA_ID` peer `DirEven` to sign with and `DirOdd` to verify against, and the odd peer the reverse. The two directions are therefore keyed differently, so a peer cannot be made to accept its own packet reflected back at it, and swapping the two surfaces as an authentication failure rather than as silent acceptance.
 - **AES-256-GCM:** Used for encrypting key material (`Encrypt`, `Decrypt`), keyed by `ARNIKA_PSK` (`deriveKey`).
 - **Rate Limiting:** Per-IP sliding window checked before any crypto — `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `transport/budget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, assuming the maximum inbound role allocation for one peer rather than an even split. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers; the limiter itself is unchanged, so unauthenticated traffic is still bounded per source IP.
 - **Timestamp Validation:** Replay protection over a ±`MAX_CLOCK_SKEW` window, default ±1m.
+- **Startup validation:** `cfg.ValidateKeySources(qkdCompiled)` runs directly after `Parse`, before any key is due, and rejects a configuration the compiled-in readers cannot serve: `KMS_URL` missing while a QKD reader is present, `KMS_URL` set in a `qkd_none` build, or a `MODE`/`PQC_ENABLED` pair naming key material this binary cannot produce. Readers are chosen by build tag ([`KEYCONTROL.md`](KEYCONTROL.md)), so without this a mismatch would surface as an invalidated tunnel every single interval instead of one error at startup.
 - **Zeroization:** All sensitive key material is handled inside `runtime/secret.Do` blocks to minimize memory exposure. This requires `GOEXPERIMENT=runtimesecret` at build time. `secret.Do` erases registers, stack and unreachable heap allocations **only on `linux/amd64` and `linux/arm64`**; on every other platform it just calls its function. `main()` probes this at startup (`secret.Enabled()` from inside a `Do` block, since it reports the nesting depth) and logs a warning when the erasure is inert, so a build for an unsupported `GOARCH` cannot silently look hardened. The WireGuard PSK additionally never becomes a Go string on the netlink path: the key writer port takes `[]byte` precisely so that the buffer stays clearable, for the same reason `ARNIKA_PSK` is held as `[]byte` on `config.Config`.
 - **Process hardening:** `hardening.Process()` (`hardening/hardening_linux.go`) runs before the configuration is read, so `ARNIKA_PSK` never exists in an exposed process. It sets `PR_SET_DUMPABLE=0` (no core dump; `/proc/<pid>/{mem,environ,maps}` become root-owned and `ptrace` attach needs `CAP_SYS_PTRACE`), `RLIMIT_CORE=0` (a piped `kernel.core_pattern` ignores the dumpable flag), and `mlockall(MCL_CURRENT|MCL_FUTURE)` to keep key material out of swap. Each step is best effort and failures are logged, not fatal: a container without `CAP_IPC_LOCK` must still rekey its tunnel. `mlockall` needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`, since the limit is charged against locked address space and Go reserves ~1.2 GB of arena; a refused lock is safe because `MCL_FUTURE` only takes effect once `mlockall` succeeds.
 - **Secret lifetime:** `ARNIKA_PSK` is held as `[]byte` on `config.Config`, not `string`: Go strings are immutable, so a secret held as one cannot be overwritten and every consumer needing bytes would leave a fresh unclearable heap copy behind on each interval and each PQC round. `main()` drops the variable from the environment with `os.Unsetenv` after parsing and wipes the field via `cfg.ZeroSecrets()` on shutdown. `os.Unsetenv` prevents inheritance by a child process but does **not** scrub `/proc/<pid>/environ`, which reflects the environment as of `execve`; `PR_SET_DUMPABLE=0` is what makes that unreadable.
@@ -132,7 +149,7 @@ independent of the QKD flow above: `setPSK()` simply consumes whichever key is
 current.
 
 In a binary built with `qkd_none` this exchange is the *only* key source: there
-is no `key_id` message and no PRIMARY/BACKUP alternation. `main()` sets the
+is no `key_id` to send and no PRIMARY/BACKUP alternation; a `key_id` that arrives anyway, from a peer built with a QKD reader or running a different `MODE`, is drained and logged as a warning rather than left to fill the shared queue. `main()` sets the
 PSK once per round, at the midpoint of the window in which `Run` never
 publishes, which is `nextPQCSetPSKAt`. Both peers derive that instant from the
 wall clock alone, with no message between them to confirm it, so unlike the
@@ -168,7 +185,7 @@ stateDiagram-v2
   }
 ```
 
-Six properties are worth stating explicitly:
+Following properties are worth stating explicitly:
 
 - **Nothing is published before confirmation succeeds.** ML-KEM decapsulation
   never fails - a malformed encapsulation returns a pseudorandom key rather than
