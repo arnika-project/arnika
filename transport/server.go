@@ -1,0 +1,377 @@
+// Package transport carries Arnika's peer protocol: the authenticated UDP
+// listener that both the QKD key identifier and the PQC key-agreement frames
+// travel over, the client that sends one identifier and waits until the peer
+// has installed it, and the per-IP rate limit that bounds all of it.
+package transport
+
+import (
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/arnika-project/arnika/auth"
+)
+
+// QKDQueueDepth bounds the hand-off between the UDP read loop and the QKD
+// worker. It is deliberately small: the worker performs one KMS request and one
+// key-writer operation per identifier, so a deeper queue would only accumulate
+// identifiers whose keys are superseded by the time they are served. Eight
+// absorbs a burst of sender retries; past that the sender's own retry policy is
+// the right backpressure, not more memory here.
+//
+// Not externally configurable: an operator has no information with which to
+// size this better than the protocol does.
+const QKDQueueDepth = 8
+
+// qkdQueueWarnEvery throttles the queue-full warning. It is emitted from a
+// packet path, so an unthrottled one would let flood traffic turn logging into
+// a denial of service.
+const qkdQueueWarnEvery = 10 * time.Second
+
+// PQCHandler consumes one verified, decrypted PQC frame and may answer the
+// sender through reply, which sends one plaintext frame back. Implemented by
+// pqchpke.Repository.HandleFrame. Neither the handler nor reply may
+// block: both run on the UDP read loop, which also carries the QKD path.
+type PQCHandler func(frame []byte, reply func(frame []byte) error) error
+
+// KeyIDRequest is one key id from the peer; Ack is called only once its PSK is installed.
+type KeyIDRequest struct {
+	KeyID string
+	Ack   func()
+}
+
+// ServerConfig is everything Serve needs.
+//
+// A struct and not a parameter list: the list had dirOut and dirIn adjacent,
+// and rateWindow and maxClockSkew adjacent, each pair being two values of one
+// type that the compiler cannot tell apart. Swapping the directions signs every
+// packet with the peer's key and surfaces as "authentication failed", which
+// reads exactly like a mismatched ARNIKA_PSK; swapping the durations is
+// invisible at the defaults, where both are one minute.
+type ServerConfig struct {
+	Address string
+	PSK     []byte
+
+	// DirOut is the direction label this node signs with, DirIn the one it
+	// verifies the peer's packets against.
+	DirOut auth.Direction
+	DirIn  auth.Direction
+
+	// KeyIDs is the bounded hand-off to the worker. Send-only: Serve never
+	// reads it back.
+	KeyIDs chan<- KeyIDRequest
+
+	// Done is closed by Serve on SIGTERM or SIGINT, so it is an output and not
+	// an input: it is how the transport tells the rest of the process to stop.
+	// Bidirectional for that reason, because a receive-only channel cannot be
+	// closed.
+	Done chan bool
+
+	// PQC handles inbound key-agreement frames. Nil when no PQC key reader is
+	// wired, and those packets are then dropped.
+	PQC PQCHandler
+
+	RateLimit    int
+	RateWindow   time.Duration
+	MaxClockSkew time.Duration
+
+	Log *slog.Logger
+}
+
+// ClientConfig is everything SendKeyID needs. A struct for the same reason as
+// ServerConfig: it too had dirOut and dirIn adjacent, and its Timeout and
+// MaxClockSkew are both durations two orders of magnitude apart, so a swap buys
+// a minute-long wait for an acknowledgement and a 500ms replay window.
+type ClientConfig struct {
+	Address string
+	PSK     []byte
+	DirOut  auth.Direction
+	DirIn   auth.Direction
+	KeyID   string
+
+	// Timeout is the wait before the first resend; each further one doubles it.
+	Timeout time.Duration
+	// Deadline ends the wait, which includes the peer's KMS request and PSK install.
+	Deadline     time.Time
+	MaxClockSkew time.Duration
+
+	Log *slog.Logger
+}
+
+// Serve listens for incoming UDP packets using the security-hardened protocol:
+//   - HMAC-SHA256 signature verification (authentication)
+//   - Timestamp validation (replay protection)
+//   - Per-IP rate limiting (flood protection)
+//   - Constant-time checks, uniform error messages (side-channel resistance)
+//
+// Protocol flow:
+//  1. Client sends DATA packet (signed + encrypted payload) -> Server enqueues
+//     the key id on the bounded QKD queue; the worker replies with ACK once the
+//     PSK built from it is installed
+//  2. Peer sends PQC packets (key agreement frames) -> handed to c.PQC, which
+//     answers on this socket when the exchange calls for a reply
+//
+// The logger comes from the configuration rather than a package variable: three
+// of those used to hold preformatted role prefixes, assigned inside main()
+// after the configuration was parsed, so anything logging before that point
+// silently emitted an empty prefix.
+func Serve(c ServerConfig) error {
+	// Receiving is the BACKUP side of an interval by definition: the peer only
+	// sends a key_id when it is PRIMARY.
+	backupLog := c.Log.With("role", "backup")
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit,
+		syscall.SIGTERM,
+		syscall.SIGINT,
+	)
+	addr, err := net.ResolveUDPAddr("udp", c.Address)
+	if err != nil {
+		return fmt.Errorf("failed to resolve the UDP listen c.Address %s: %w", c.Address, err)
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on UDP %s: %w", c.Address, err)
+	}
+	c.Log.Info("UDP server started", "c.Address", c.Address)
+
+	// Rate limiter: configurable requests per IP per window
+	limiter := newRateLimiter(c.RateLimit, c.RateWindow)
+	// Local to this loop, which is a single goroutine, so it needs no lock.
+	queueFullWarn := logThrottle{interval: qkdQueueWarnEvery}
+
+	go func() {
+		<-quit
+		c.Log.Info("UDP server shutdown triggered", "c.Address", c.Address)
+		close(c.Done)
+		_ = conn.Close()
+	}()
+
+	// Safe from the worker too: a UDPConn allows concurrent writes.
+	send := func(typ auth.PacketType, payload []byte, to *net.UDPAddr) error {
+		encrypted, err := auth.Encrypt(c.PSK, payload)
+		if err != nil {
+			return err
+		}
+		out := &auth.Packet{
+			Type:      typ,
+			Timestamp: time.Now().Unix(),
+			Payload:   encrypted,
+		}
+		_, err = conn.WriteToUDP(out.Marshal(c.PSK, c.DirOut), to)
+		return err
+	}
+
+	buf := make([]byte, 4096)
+	for {
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-c.Done:
+				return nil
+			default:
+				c.Log.Error("UDP read error", "err", err)
+				continue
+			}
+		}
+
+		clientIP := remoteAddr.IP.String()
+
+		// 1. Rate limit check (cheapest, no crypto)
+		if !limiter.Allow(clientIP) {
+			backupLog.Debug("rate limited", "peer", remoteAddr)
+			continue
+		}
+
+		// 2. Unmarshal + HMAC verify (cheap, before any decryption)
+		pkt, err := auth.UnmarshalPacket(c.PSK, buf[:n], c.DirIn)
+		if err != nil {
+			backupLog.Warn("packet rejected", "peer", remoteAddr, "reason", "authentication")
+			continue
+		}
+
+		// 3. Timestamp check (replay protection)
+		if !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) {
+			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "timestamp")
+			continue
+		}
+
+		// 4. Dispatch by type, decrypting only after all cheap checks pass
+		switch pkt.Type {
+		case auth.PacketData:
+			decrypted, err := auth.Decrypt(c.PSK, pkt.Payload)
+			if err != nil {
+				backupLog.Error("packet rejected, ARNIKA_PSK mismatch or the message is corrupted",
+					"peer", remoteAddr, "reason", "decryption")
+				continue
+			}
+
+			// 5. Hand the identifier to the bounded QKD queue, without
+			// blocking. Its worker performs the KMS request and the key-writer
+			// operation synchronously, so a blocking send stalled this read
+			// loop - and with it every PQC frame arriving on the same socket -
+			// for the length of a KMS outage.
+			//
+			// No ACK here: the worker sends it once the PSK is installed, carrying the key id.
+			keyID := string(decrypted)
+			select {
+			case c.KeyIDs <- KeyIDRequest{KeyID: keyID, Ack: func() {
+				_ = send(auth.PacketAck, []byte(keyID), remoteAddr)
+			}}:
+			default:
+				if queueFullWarn.allow() {
+					backupLog.Warn("QKD queue full, key_id dropped; the sender will retry",
+						"slots", cap(c.KeyIDs), "peer", remoteAddr)
+				}
+				continue
+			}
+
+			backupLog.Info("received a key_id from the peer", "key_id", keyID, "peer", remoteAddr)
+
+		case auth.PacketPQC:
+			if c.PQC == nil {
+				backupLog.Debug("PQC frame dropped, no PQC key reader wired", "peer", remoteAddr)
+				continue
+			}
+			decrypted, err := auth.Decrypt(c.PSK, pkt.Payload)
+			if err != nil {
+				backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "decryption")
+				continue
+			}
+			// The PQC responder answers on this socket, back to the sender,
+			// exactly as the ACK above does. A reply goes out only after the
+			// rate limit, the HMAC and the timestamp have passed, so eliciting
+			// one requires the PSK: this is not a reflection primitive.
+			reply := func(frame []byte) error {
+				return send(auth.PacketPQC, frame, remoteAddr)
+			}
+			if err := c.PQC(decrypted, reply); err != nil {
+				backupLog.Warn("PQC frame not accepted", "peer", remoteAddr, "err", err)
+			}
+
+		default:
+			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "unknown type")
+			continue
+		}
+	}
+}
+
+// udpClientMaxAttempts is how many times SendKeyID sends one key id while
+// waiting for an ACK, so it is also how many DATA packets one QKD interval can
+// legitimately deliver to the peer's listening socket. Shared with the
+// rate-limit budget so the two cannot drift.
+const udpClientMaxAttempts = 3
+
+// SendKeyID sends an encrypted, HMAC-signed key ID to the peer via the security-hardened
+// UDP protocol and returns once the peer has installed a PSK built from it.
+// Resends follow after Timeout, 2*Timeout, ...; the wait after the last one runs until Deadline.
+//
+// Protocol flow:
+//  1. Send DATA (signed + encrypted keyID) -> Receive ACK (signed + encrypted keyID)
+func SendKeyID(c ClientConfig) error {
+	if c.Address == "" {
+		return fmt.Errorf("c.Address is empty")
+	}
+	if c.KeyID == "" {
+		return fmt.Errorf("c.KeyID is empty")
+	}
+	// A zero read deadline blocks forever.
+	if c.Deadline.IsZero() {
+		return fmt.Errorf("c.Deadline is unset")
+	}
+
+	raddr, err := net.ResolveUDPAddr("udp", c.Address)
+	if err != nil {
+		return fmt.Errorf("failed to resolve c.Address: %w", err)
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return fmt.Errorf("failed to dial UDP: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	wait := c.Timeout
+	for attempt := 1; attempt <= udpClientMaxAttempts; attempt++ {
+		encrypted, err := auth.Encrypt(c.PSK, []byte(c.KeyID))
+		if err != nil {
+			return fmt.Errorf("failed to encrypt key_id: %w", err)
+		}
+		dataPkt := &auth.Packet{
+			Type:      auth.PacketData,
+			Timestamp: time.Now().Unix(),
+			Payload:   encrypted,
+		}
+		_, err = conn.Write(dataPkt.Marshal(c.PSK, c.DirOut))
+		if err != nil {
+			return fmt.Errorf("failed to write DATA packet: %w", err)
+		}
+
+		until := time.Now().Add(wait)
+		if attempt == udpClientMaxAttempts || until.After(c.Deadline) {
+			until = c.Deadline
+		}
+		if awaitAck(conn, c, until) {
+			return nil
+		}
+		if !time.Now().Before(c.Deadline) {
+			break
+		}
+		c.Log.Debug("no ACK yet, resending the key_id", "attempt", attempt, "of", udpClientMaxAttempts)
+		wait *= 2
+	}
+	return fmt.Errorf("no ACK by %s", c.Deadline.Format(time.TimeOnly))
+}
+
+// awaitAck skips anything but an ACK for c.KeyID, so a stale or replayed one cannot end the wait.
+func awaitAck(conn *net.UDPConn, c ClientConfig, until time.Time) bool {
+	if err := conn.SetReadDeadline(until); err != nil {
+		return false
+	}
+	buf := make([]byte, 1024)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return false
+		}
+		pkt, err := auth.UnmarshalPacket(c.PSK, buf[:n], c.DirIn)
+		if err != nil || pkt.Type != auth.PacketAck || !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) {
+			continue
+		}
+		keyID, err := auth.Decrypt(c.PSK, pkt.Payload)
+		if err == nil && string(keyID) == c.KeyID {
+			return true
+		}
+	}
+}
+
+// RunKeyIDWorker services the bounded QKD queue until done is closed and acks each installed key id.
+//
+// One worker, not a pool: install performs the KMS request and the key-writer
+// operation, so two of them running concurrently could install PSKs in the
+// reverse of the order the peer sent the identifiers. A channel is FIFO, so a
+// single consumer is what preserves that order.
+//
+// A repeat of the last key id (a resend) reuses its outcome instead of a second KMS request.
+//
+// It returns on done rather than looping forever, so the worker cannot outlive
+// the UDP server that feeds it.
+func RunKeyIDWorker(done <-chan bool, queue <-chan KeyIDRequest, install func(keyID string) bool) {
+	var last string
+	var installed bool
+	for {
+		select {
+		case <-done:
+			return
+		case req := <-queue:
+			if req.KeyID != last {
+				last, installed = req.KeyID, install(req.KeyID)
+			}
+			if installed {
+				req.Ack()
+			}
+		}
+	}
+}

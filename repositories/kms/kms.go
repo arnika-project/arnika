@@ -1,5 +1,5 @@
-// Package repositories provides data access implementations for keys and external services.
-package repositories
+// Package kms reads QKD keys from an ETSI GS QKD 014 key management system.
+package kms
 
 import (
 	"crypto/tls"
@@ -9,31 +9,31 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime/secret"
 	"time"
 )
 
-type KMSAuth struct {
+type Auth struct {
 	cert   *string
 	key    *string
 	cacert *string
 }
 
-func NewKMSClientCertificateAuth(cert, key, cacert string) *KMSAuth {
+func NewClientCertificateAuth(cert, key, cacert string) *Auth {
 	if cert == "" || key == "" || cacert == "" {
 		return nil
 	}
-	return &KMSAuth{
+	return &Auth{
 		cert:   &cert,
 		key:    &key,
 		cacert: &cacert,
 	}
 }
 
-func (a *KMSAuth) IsClientCertAuth() bool {
+func (a *Auth) IsClientCertAuth() bool {
 	if a == nil {
 		return false
 	}
@@ -49,18 +49,17 @@ type kmsResponse struct {
 	Keys []kmsKey `json:"keys"`
 }
 
-type HTTPKMSRepository struct {
+type Repository struct {
 	baseURL          string
 	maxRetries       int
 	backoffBaseDelay time.Duration
 	conn             *http.Client
-	Managed          bool
 }
 
-func NewHTTPKMSRepository(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, auth *KMSAuth) *HTTPKMSRepository {
+func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, auth *Auth) *Repository {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			// InsecureSkipVerify: true, // removed as fix for GHSA-rc6v-5rmx-w5mv 
+			// InsecureSkipVerify: true, // removed as fix for GHSA-rc6v-5rmx-w5mv
 			MinVersion: tls.VersionTLS12,
 		},
 		Proxy: http.ProxyFromEnvironment,
@@ -68,18 +67,20 @@ func NewHTTPKMSRepository(url string, timeout time.Duration, maxRetries int, bac
 	if auth.IsClientCertAuth() {
 		clientCert, err := tls.LoadX509KeyPair(*auth.cert, *auth.key)
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("failed to load the KMS client certificate", "cert", *auth.cert, "key", *auth.key, "err", err)
+			os.Exit(1)
 		}
 		tr.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
 		caCert, err := os.ReadFile(*auth.cacert)
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("failed to read the KMS CA certificate", "cacert", *auth.cacert, "err", err)
+			os.Exit(1)
 		}
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(caCert)
 		tr.TLSClientConfig.RootCAs = caCertPool
 	}
-	return &HTTPKMSRepository{
+	return &Repository{
 		baseURL:          url,
 		maxRetries:       maxRetries,
 		backoffBaseDelay: backoffBaseDelay,
@@ -87,25 +88,24 @@ func NewHTTPKMSRepository(url string, timeout time.Duration, maxRetries int, bac
 			Timeout:   timeout,
 			Transport: tr,
 		},
-		Managed: true,
 	}
 }
 
-func (r *HTTPKMSRepository) GetNewKey() (keyID string, key []byte, err error) {
+func (r *Repository) GetNewKey() (keyID string, key []byte, err error) {
 	return r.kmsRequest("/enc_keys?number=1&size=256")
 }
 
-func (r *HTTPKMSRepository) GetKeyByID(keyID *string) (key []byte, err error) {
-	if keyID == nil || *keyID == "" {
+func (r *Repository) GetKeyByID(keyID string) (key []byte, err error) {
+	if keyID == "" {
 		return nil, fmt.Errorf("keyID is empty")
 	}
-	_, key, err = r.kmsRequest("/dec_keys?key_ID=" + *keyID)
+	_, key, err = r.kmsRequest("/dec_keys?key_ID=" + keyID)
 	return key, err
 }
 
-var ErrKMSUnavailable = errors.New("KMS did not deliver a key")
+var ErrUnavailable = errors.New("KMS did not deliver a key")
 
-func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key []byte, err error) {
+func (r *Repository) kmsRequest(path string) (id string, key []byte, err error) {
 	var kmsResp kmsResponse
 	var res *http.Response
 	// The last HTTP status actually observed. Clearing res below is what makes
@@ -142,10 +142,10 @@ func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key []byte, err 
 			// and neither is the path -- dec_keys carries key_ID in its query
 			// string.
 			if lastStatus != 0 {
-				log.Printf("Attempt %d: KMS returned %d, retrying in %s...",
-					attempt+1, lastStatus, delay)
+				slog.Warn("KMS request failed, retrying",
+					"attempt", attempt+1, "status", lastStatus, "retry_in", delay)
 			} else {
-				log.Printf("Attempt %d: Retrying in %s...", attempt+1, delay)
+				slog.Warn("KMS request failed, retrying", "attempt", attempt+1, "retry_in", delay)
 			}
 			time.Sleep(delay)
 		}
@@ -162,7 +162,7 @@ func (r *HTTPKMSRepository) kmsRequest(path string) (id string, key []byte, err 
 	// an HTTP response -- there is no path that reports "status 0".
 	if res == nil {
 		return "", nil, fmt.Errorf("%w: status %d after %d attempt(s)",
-			ErrKMSUnavailable, lastStatus, r.maxRetries+1)
+			ErrUnavailable, lastStatus, r.maxRetries+1)
 	}
 	defer func() { _ = res.Body.Close() }()
 
