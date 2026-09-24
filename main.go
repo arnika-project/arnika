@@ -58,8 +58,14 @@ var lastQKDPSKAt atomic.Int64
 // tunnel instead of leaving the old key active, so a failed rotation never
 // silently extends the previous key's life. Errors are logged, not
 // returned, since the caller is a rotation loop that must keep running.
-func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) {
-	var psk []byte
+// It reports whether the PSK was configured.
+func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) bool {
+	psk := buildPSK(keyWriter, pqc, qkd, cfg, logger)
+	return psk != nil && writePSK(keyWriter, psk, qkd != nil, cfg, logger)
+}
+
+// buildPSK is setPSK without the write; on failure it invalidates the tunnel and returns nil.
+func buildPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) (psk []byte) {
 	if qkd != nil {
 		psk = make([]byte, len(qkd))
 		copy(psk, qkd)
@@ -70,15 +76,12 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 	var failure string
 	var failureAttrs []any
 	defer func() {
-		clear(psk)
 		if failure == "" {
 			return
 		}
-		logger.Error(failure, failureAttrs...)
-		logger.Error("configuring a random PSK to invalidate the WireGuard session")
-		if err := keyWriter.InvalidateTunnel(); err != nil {
-			logger.Error("failed to configure the random PSK", "err", err)
-		}
+		clear(psk)
+		psk = nil
+		invalidate(keyWriter, logger, failure, failureAttrs...)
 	}()
 	if len(qkd) == 0 {
 		if cfg.IsQKDRequired() {
@@ -116,11 +119,17 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 		failure = "no key material available for a PSK"
 		return
 	}
+	return psk
+}
+
+// writePSK configures and clears psk; fromQKD marks a QKD rotation for the PQC-only fallback timer.
+func writePSK(keyWriter *services.KeyWriterService, psk []byte, fromQKD bool, cfg *config.Config, logger *slog.Logger) bool {
+	defer clear(psk)
 	if err := keyWriter.SetPSK(psk); err != nil {
-		failure, failureAttrs = "failed to configure the PSK on the WireGuard interface", []any{"err", err}
-		return
+		invalidate(keyWriter, logger, "failed to configure the PSK on the WireGuard interface", "err", err)
+		return false
 	}
-	if qkd != nil {
+	if fromQKD {
 		lastQKDPSKAt.Store(time.Now().UnixNano())
 	}
 	// Wording is load-bearing: ci/local-darwin/run.sh and the e2e lab count this
@@ -128,6 +137,15 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 	// message only together with them.
 	logger.Info("PSK configured on WireGuard interface",
 		"iface", cfg.WireGuardInterface, "peer", cfg.WireguardPeerPublicKey)
+	return true
+}
+
+func invalidate(keyWriter *services.KeyWriterService, logger *slog.Logger, reason string, attrs ...any) {
+	logger.Error(reason, attrs...)
+	logger.Error("configuring a random PSK to invalidate the WireGuard session")
+	if err := keyWriter.InvalidateTunnel(); err != nil {
+		logger.Error("failed to configure the random PSK", "err", err)
+	}
 }
 
 // nextPQCSetPSKAt returns the next moment to set a PQC-derived PSK. Both
@@ -235,7 +253,7 @@ func main() {
 	// says "take the signal if there is one" in a single expression, so a reader
 	// cannot consume twice or forget to consume.
 	var peerSentKeyID atomic.Bool
-	result := make(chan string, transport.QKDQueueDepth)
+	result := make(chan transport.KeyIDRequest, transport.QKDQueueDepth)
 	keyWriter, err := getKeyWriterService(cfg)
 	if err != nil {
 		fatal("failed to create the WireGuard key writer", "err", err)
@@ -292,7 +310,7 @@ func main() {
 			})
 		}
 		qkd := getQKDService(cfg)
-		go transport.RunKeyIDWorker(done, result, func(r string) {
+		go transport.RunKeyIDWorker(done, result, func(r string) bool {
 			peerSentKeyID.Store(true)
 			backupLog.Info("requesting the QKD key for the peer's key_id", "key_id", r, "kms", cfg.KMSURL)
 			key, err := qkd.GetKeyByID(r)
@@ -301,9 +319,9 @@ func main() {
 				if shouldSetPSKOnQKDFailure(cfg) {
 					setPSK(keyWriter, pqc, nil, cfg, backupLog)
 				}
-				return
+				return false
 			}
-			setPSK(keyWriter, pqc, key.Key, cfg, backupLog)
+			return setPSK(keyWriter, pqc, key.Key, cfg, backupLog)
 		})
 		go func() {
 			ticker := time.NewTicker(interval)
@@ -311,6 +329,7 @@ func main() {
 			var intervalCounter uint64
 			for {
 				ticker.Reset(interval)
+				intervalEnd := time.Now().Add(interval)
 				backup := !cfg.IsPrimary(intervalCounter)
 				if backup {
 					backupLog.Info("waiting for a key_id from the peer", "interval", intervalCounter)
@@ -346,6 +365,8 @@ func main() {
 									setPSK(keyWriter, pqc, nil, cfg, primaryLog)
 								}
 							} else {
+								// Built before sending, so a failure on this side takes its own MODE decision at once.
+								psk := buildPSK(keyWriter, pqc, key.Key, cfg, primaryLog)
 								primaryLog.Info("sending the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress)
 								err = transport.SendKeyID(transport.ClientConfig{
 									Address:      cfg.ServerAddress,
@@ -354,13 +375,23 @@ func main() {
 									DirIn:        dirIn,
 									KeyID:        key.ID,
 									Timeout:      cfg.ArnikaPeerTimeout,
+									Deadline:     intervalEnd,
 									MaxClockSkew: cfg.MaxClockSkew,
 									Log:          primaryLog,
 								})
-								if err != nil {
-									primaryLog.Error("failed to send the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress, "err", err)
+								// Without the ACK the peer has not installed this key, so it is treated like a failed KMS request.
+								switch {
+								case err != nil:
+									primaryLog.Error("the peer did not confirm the key_id", "key_id", key.ID, "peer", cfg.ServerAddress, "err", err)
+									if psk != nil {
+										clear(psk)
+										if shouldSetPSKOnQKDFailure(cfg) {
+											setPSK(keyWriter, pqc, nil, cfg, primaryLog)
+										}
+									}
+								case psk != nil:
+									writePSK(keyWriter, psk, true, cfg, primaryLog)
 								}
-								setPSK(keyWriter, pqc, key.Key, cfg, primaryLog)
 							}
 						}
 					}
@@ -391,8 +422,9 @@ func main() {
 		// PQC-only build: so any key_id from the peer means a misconfigured
 		// build or MODE mismatch. Drain and log it here, or it would just fill
 		// the shared queue and get silently dropped.
-		go transport.RunKeyIDWorker(done, result, func(r string) {
+		go transport.RunKeyIDWorker(done, result, func(r string) bool {
 			arnikaLog.Warn("received a key_id from the peer, but this binary has no QKD key reader", "key_id", r)
+			return false
 		})
 		// The PQC key agreement is the only key source here, so every instant
 		// is due and there is nothing to gate on.

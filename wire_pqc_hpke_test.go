@@ -57,7 +57,7 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRepository: %v", err)
 		}
-		result := make(chan string, 1)
+		result := make(chan transport.KeyIDRequest, 1)
 		done := make(chan bool)
 		go func() {
 			_ = transport.Serve(transport.ServerConfig{
@@ -154,7 +154,7 @@ func TestPQCRequiredModeSurvivesIndependentCadences(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRepository: %v", err)
 		}
-		result := make(chan string, transport.QKDQueueDepth)
+		result := make(chan transport.KeyIDRequest, transport.QKDQueueDepth)
 		done := make(chan bool)
 		go func() {
 			_ = transport.Serve(transport.ServerConfig{

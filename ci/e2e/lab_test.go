@@ -1217,7 +1217,7 @@ var expectedTrouble = map[string]string{
 	"packet rejected":                                                  "a peer with the wrong ARNIKA_PSK, as that phase asked for",
 	"packet rejected, ARNIKA_PSK mismatch or the message is corrupted": "the same, one step further in",
 	"PQC frame not accepted":                                           "a PQC frame from a peer that cannot authenticate",
-	"failed to send the key_id to the peer":                            "the same, seen from the peer that was still up",
+	"the peer did not confirm the key_id":                              "the same, seen from the peer that was still up, or a BACKUP whose KMS was gone",
 }
 
 // trouble prints the node's warnings and errors by message, each against the

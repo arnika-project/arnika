@@ -21,7 +21,7 @@ type PacketType byte
 
 const (
 	PacketData PacketType = 'D' // Client sends encrypted data (signed + AES-GCM encrypted payload)
-	PacketAck  PacketType = 'A' // Server acknowledges receipt
+	PacketAck  PacketType = 'A' // Server confirms it installed the key ID it carries
 	PacketPQC  PacketType = 'Q' // PQC key agreement traffic; the frame kind lives inside the payload
 )
 

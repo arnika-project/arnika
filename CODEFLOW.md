@@ -25,11 +25,11 @@ sequenceDiagram
     PRIMARY->>BACKUP: 4. Send DATA packet (signed + encrypted key ID)
     BACKUP->>BACKUP: 5. Verify signature, timestamp, decrypt
     BACKUP->>BACKUP: 6. Enqueue key ID on the bounded QKD queue
-    BACKUP->>PRIMARY: 7. Send ACK packet
-    PRIMARY->>PRIMARY: 8. Verify ACK
-    BACKUP->>KMS: 9. Worker requests key by ID
-    KMS-->>BACKUP: 10. Return key
-    Note over PRIMARY,BACKUP: 11. Both set new key in WireGuard
+    BACKUP->>KMS: 7. Worker requests key by ID
+    KMS-->>BACKUP: 8. Return key
+    BACKUP->>BACKUP: 9. Set new key in WireGuard
+    BACKUP->>PRIMARY: 10. Send ACK packet (signed + encrypted key ID)
+    PRIMARY->>PRIMARY: 11. Verify ACK, set new key in WireGuard
 ```
 
 ---
@@ -70,44 +70,45 @@ sequenceDiagram
 ### 5a. **A Failing Key Source Reaches `MODE`**
 
 - **Where:** `main.go` (`shouldSetPSKOnQKDFailure`, `setPSK`)
-- **What:** Every path on which the QKD key does not arrive is handed to `setPSK` with a nil QKD key so `MODE` decides: invalidate the tunnel where QKD is mandatory, carry on from the PQC key where it is optional. That covers the PRIMARY's KMS request failing, an empty `key_id`, a failing lookup by `key_id`, and a **BACKUP interval that ends without a `key_id` from the peer** - checked once at the end of the interval, which is why the `peerSentKeyID` flag is taken with an atomic `Swap(false)`: reading and consuming in one step is what keeps a single signal from being counted twice.
+- **What:** Every path on which the QKD key does not arrive is handed to `setPSK` with a nil QKD key so `MODE` decides: invalidate the tunnel where QKD is mandatory, carry on from the PQC key where it is optional. That covers the PRIMARY's KMS request failing, an empty `key_id`, a PRIMARY that gets no ACK for its `key_id` (step 11), a failing lookup by `key_id`, and a **BACKUP interval that ends without a `key_id` from the peer** - checked once at the end of the interval, which is why the `peerSentKeyID` flag is taken with an atomic `Swap(false)`: reading and consuming in one step is what keeps a single signal from being counted twice.
 - **Why:** These paths used to return to the interval ticker instead, which left the whole fallback and fail-closed logic in `setPSK` unreachable and the superseded PSK installed. In a QKD-optional mode the local tick deliberately does *not* set a new PSK: a separate backup timer owns the PSK there, on the instant both peers derive from the wall clock (`nextPQCSetPSKAt`), because setting one on a local tick as well put the two peers on different keys. This relies on both peers' clocks being synchronized closely enough (see "PQC Key Agreement Round" below).
 
 ### 6. **BACKUP Enqueues the Key ID**
 
 - **Where:** `transport/server.go` (`transport.QKDQueueDepth`), `main.go` (`result` channel)
-- **What:** The read loop hands the decrypted key ID to a bounded queue with a non-blocking send. A full queue leaves the identifier unacknowledged, logs a throttled warning without key material, and lets the sender retry.
+- **What:** The read loop hands the decrypted key ID to a bounded queue with a non-blocking send, together with the reply that later carries the ACK. A full queue drops the identifier unanswered, logs a throttled warning without key material, and lets the sender resend it.
 - **Why:** The worker below performs the KMS request and the key-writer operation synchronously. A blocking hand-off stalled the read loop for the length of a KMS outage, and with it every PQC frame arriving on the same socket - far longer than `PQC_ROUND_TIMEOUT`. The queue is bounded because unbounded buffering would only accumulate identifiers whose keys are superseded by the time they are served.
 
-### 7. **BACKUP Sends ACK Packet**
-
-- **Where:** `auth/auth.go` (`PacketAck`, `Packet.Marshal`)
-- **What:** BACKUP sends an ACK to PRIMARY, **only after** the enqueue in step 6 succeeded.
-- **Why:** The ACK is the sender's only signal that it need not retry, so it has to reflect in-process acceptance rather than a successful decryption. Acknowledging first would discard an identifier the peer believes was taken.
-
-### 8. **PRIMARY Verifies ACK**
-
-- **Where:** `auth/auth.go` (`UnmarshalPacket`, `Verify`)
-- **What:** PRIMARY checks the ACK packet.
-- **Why:** Ensures BACKUP accepted the key ID.
-
-### 9. **Worker Requests Key from KMS**
+### 7. **Worker Requests Key from KMS**
 
 - **Where:** `transport/server.go` (`transport.RunKeyIDWorker`), `main.go`, `repositories/kms/kms.go`
 - **What:** One worker drains the queue and requests the key from KMS using the key ID.
 - **Why:** Ensures both nodes have the same key. One worker and not a pool: the channel is FIFO, so a single consumer is what keeps the PSK writes in the order the peer sent the identifiers. It returns on the server's `done` channel, so it cannot outlive the listener.
 
-### 10. **KMS Returns Key**
+### 8. **KMS Returns Key**
 
 - **Where:** `repositories/kms/kms.go`
 - **What:** KMS responds with the key.
 - **Why:** Synchronizes key material.
 
-### 11. **Both Set New Key in WireGuard**
+### 9. **BACKUP Sets New Key in WireGuard**
 
 - **Where:** `main.go` (`setPSK`), via `services.KeyWriterService` and the selected key writer adapter ([`repositories/wgnetlink/`](repositories/wgnetlink/), [`repositories/wgmikrotik/`](repositories/wgmikrotik/))
-- **What:** Both nodes update their WireGuard PSK. In hybrid mode the QKD key is first combined with the PQC key via `kdf.DeriveKey` (HKDF-SHA3-256). The adapter port is a **single** method, `SetPSK(psk []byte)`. Everything that holds for every writer lives in the service: it serialises the writes, and `InvalidateTunnel` generates the fresh random 32-byte key that tears the session down.
+- **What:** The worker updates the WireGuard PSK; the PRIMARY does the same in step 11 once the ACK arrives. In hybrid mode the QKD key is first combined with the PQC key via `kdf.DeriveKey` (HKDF-SHA3-256). The adapter port is a **single** method, `SetPSK(psk []byte)`. Everything that holds for every writer lives in the service: it serialises the writes, and `InvalidateTunnel` generates the fresh random 32-byte key that tears the session down.
 - **Why:** Secure VPN communication. Three details are deliberate. The port takes bytes and not a base64 string, so the PSK never becomes an immutable Go string that could not be cleared afterwards; the one adapter whose transport needs a string encodes at its own boundary, where RouterOS' JSON body makes it unavoidable. `InvalidateTunnel` is in the service and not in each adapter because "a fresh random 32-byte key" is the same rule for all of them, and three copies of it had already drifted onto two different random sources. The write lock is in the service for the same reason: the QKD rotation and the wall-clock fallback timer both reach it from their own goroutines, and an adapter that needs two requests to get there - the RouterOS one resolves the peer, then patches it - could otherwise resolve for one call and write for the other.
+
+
+### 10. **BACKUP Sends ACK Packet**
+
+- **Where:** `transport/server.go` (`transport.RunKeyIDWorker`, `KeyIDRequest.Ack`)
+- **What:** The worker sends the ACK **only after** the PSK from step 9 is configured. The ACK carries the key ID, encrypted like the DATA packet. A failed KMS request or PSK write sends no ACK. A resent key ID that the worker served last is answered from that outcome: acknowledged again if it was installed, ignored if it failed, never a second KMS request.
+- **Why:** The PRIMARY installs its own PSK only on the ACK, so the two ends switch within one packet of each other instead of the BACKUP's whole KMS request apart. That matters for key writers without their own session handshake, and it keeps a failed lookup on the BACKUP from leaving the PRIMARY on a key the BACKUP does not have. The key ID in the ACK keeps a stale or replayed ACK from confirming a different key.
+
+### 11. **PRIMARY Verifies ACK and Sets New Key**
+
+- **Where:** `transport/server.go` (`transport.SendKeyID`), `main.go` (`setPSK`)
+- **What:** PRIMARY builds its PSK before sending the DATA packet (`buildPSK`), so a failure on its own side, such as a missing PQC key, invalidates at once as in step 5a. It accepts only an ACK that verifies and names its key ID, and only then writes that PSK (`writePSK`). It resends the DATA packet after `ARNIKA_PEER_TIMEOUT`, then after twice that, and after the last of `udpClientMaxAttempts` sends waits until the end of the current `INTERVAL`. Without an ACK by then it takes the failure path of step 5a.
+- **Why:** A lost DATA packet is resent quickly, while a BACKUP still waiting for its KMS gets the rest of the interval, without the DATA packet count outgrowing the rate-limit budget.
 
 ---
 

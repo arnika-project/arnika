@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/arnika-project/arnika/config"
+	"github.com/arnika-project/arnika/services"
 )
 
 // TestNextPQCInstall pins the property the PQC-only build depends on: two peers
@@ -86,5 +90,44 @@ func TestInstallOnQKDFailure(t *testing.T) {
 				t.Fatalf("shouldSetPSKOnQKDFailure = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+type countingWriter struct{ writes int }
+
+func (w *countingWriter) SetPSK([]byte) error {
+	w.writes++
+	return nil
+}
+
+type fakePQCReader struct{ err error }
+
+func (r fakePQCReader) GetNewKey() (string, []byte, error) {
+	return "", bytes.Repeat([]byte{7}, 32), r.err
+}
+
+func TestBuildPSKLeavesTheWriteToTheCaller(t *testing.T) {
+	w := &countingWriter{}
+	cfg := &config.Config{Mode: "QkdAndPqcRequired", PQCEnabled: true}
+	psk := buildPSK(services.NewKeyWriterService(w), services.NewKeyReaderService(fakePQCReader{}),
+		bytes.Repeat([]byte{1}, 32), cfg, slog.New(slog.DiscardHandler))
+	if len(psk) == 0 {
+		t.Fatal("no PSK built from a QKD and a PQC key")
+	}
+	if w.writes != 0 {
+		t.Fatalf("buildPSK wrote %d PSK(s)", w.writes)
+	}
+}
+
+func TestBuildPSKInvalidatesAtOnceWhenARequiredPQCKeyIsMissing(t *testing.T) {
+	w := &countingWriter{}
+	cfg := &config.Config{Mode: "AtLeastPqcRequired", PQCEnabled: true}
+	psk := buildPSK(services.NewKeyWriterService(w), services.NewKeyReaderService(fakePQCReader{err: errors.New("no round agreed")}),
+		bytes.Repeat([]byte{1}, 32), cfg, slog.New(slog.DiscardHandler))
+	if psk != nil {
+		t.Fatal("a PSK was built without the required PQC key")
+	}
+	if w.writes != 1 {
+		t.Fatalf("writes = %d, want the one random key that invalidates the tunnel", w.writes)
 	}
 }

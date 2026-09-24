@@ -26,7 +26,7 @@ type Config struct {
 	Certificate            string        // CERTIFICATE, Path to the client certificate file
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
 	CACertificate          string        // CA_CERTIFICATE, Path to the CA certificate file
-	ArnikaPeerTimeout      time.Duration // ARNIKA_PEER_TIMEOUT, TCP connection timeout for peer connections
+	ArnikaPeerTimeout      time.Duration // ARNIKA_PEER_TIMEOUT, wait before the first key ID resend, doubled per resend
 	KMSURL                 string        // KMS_URL, URL of the KMS server
 	KMSHTTPTimeout         time.Duration // KMS_HTTP_TIMEOUT, HTTP connection timeout
 	KMSBackoffMaxRetries   int           // KMS_BACKOFF_MAX_RETRIES, Maximum number of retries for KMS requests

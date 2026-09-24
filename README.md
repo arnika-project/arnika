@@ -121,6 +121,7 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 
 * Hexagonal Architecture (Ports & Adapters) provides capability to develop own key-reader and key-writer adapters - see [`KEYCONTROL.md`](KEYCONTROL.md) for details.
 * In-band PQC key agreement (**pqc-hpke**) - Arnika negotiates the PQC key directly with its peer using HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)) with the MLKEM1024-P384 hybrid KEM, carried inside the existing authenticated UDP envelope. No external PQC provider, no PQC key on disk, no additional port, and no third-party dependency - the whole cryptographic path is the Go standard library. A fresh key pair every round gives forward secrecy, and a mandatory key-confirmation step catches ML-KEM implicit rejection before anything is published - see [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for details.
+* The PRIMARY installs a QKD key only after the peer confirms it installed the same key, so both ends switch within one packet of each other and a failed lookup on one side never leaves the other on a key it does not share
 * symmetric-PSK based (_quantum secure_) mutual authentication of Arnika peers - (HMAC-SHA256 + AES-256-GCM authenticated UDP protocol), with per-direction key separation so a reflected packet fails at its own sender
 * Arnika listening port is undetectable and unscannable, like wireguard
 * Per-IP UDP rate limiting against flood/DoS attempts
@@ -426,7 +427,7 @@ start without them.
 | `SERVER_ADDRESS` | ✅ | — | `host:port` of the remote Arnika peer — its `LISTEN_ADDRESS` |
 | `ARNIKA_PSK` | ✅ | — | Shared secret authenticating and encrypting the peer channel, minimum 32 bytes. **Must be identical on both peers** — see the warning below |
 | `ARNIKA_ID` | ➖ | port from `LISTEN_ADDRESS` | Identifier (max 5 digits) used in logs and in PRIMARY/BACKUP election. The two peers' values **must differ in parity** — one odd, one even |
-| `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | Timeout waiting for the peer's ACK |
+| `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | Wait before the first resend of the key ID, doubled for each further resend. The PRIMARY waits for the peer's ACK, which confirms the peer installed the key, until the end of the current `INTERVAL` |
 | `INTERVAL` | ➖ | `10s` | Interval between key rotations. **Must be the same on both peers**; align with the WireGuard rekey interval (`120s`) |
 | `RATE_LIMIT` | ➖ | calculated | Max accepted packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
 | `RATE_WINDOW` | ➖ | `1m` | Window for the per-IP rate limit |
