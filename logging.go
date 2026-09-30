@@ -8,23 +8,9 @@ import (
 	"strings"
 )
 
-// logLevel is the process-wide log level. It is a LevelVar and not a plain
-// Level so that the handler reads it through a pointer, which leaves room for
-// changing the level at runtime later without rebuilding the handler.
 var logLevel slog.LevelVar
 
-// setUpLogging installs the process logger and returns a message for any
-// LOG_LEVEL value it could not parse, for the caller to log once the logger
-// exists.
-//
-// LOG_LEVEL is read straight from the environment rather than from
-// config.Config, because process hardening and the runtime/secret probe both
-// log before config.Parse runs. Everything else stays in config.
-//
-// The level matters beyond convenience: the packet path logs one line per
-// rejected datagram, and the per-IP rate limiter bounds the work that path
-// does but not the logging. At LevelInfo those lines are dropped before they
-// are formatted, so flood traffic cannot turn the log into the amplifier.
+// setUpLogging reads LOG_LEVEL from the environment, not config.Config, because hardening logs before config.Parse runs.
 func setUpLogging() (warning string) {
 	switch v := strings.ToLower(os.Getenv("LOG_LEVEL")); v {
 	case "", "info":
@@ -43,14 +29,6 @@ func setUpLogging() (warning string) {
 	return warning
 }
 
-// setLogIdentity puts arnika_id on every record from here on, which is what the
-// NAME[ARNIKA_ID] log prefixes used to carry.
-//
-// On a terminal it also colours the records, so two peers running side by side
-// in a lab can be told apart at a glance; even and odd ARNIKA_ID get different
-// colours, as the prefixes did. Only on a terminal: the colour used to be baked
-// into the prefix strings unconditionally, which put ANSI escape sequences into
-// journald and into every log aggregator downstream of it.
 func setLogIdentity(arnikaID int) {
 	var w io.Writer = os.Stderr
 	if isTerminal(os.Stderr) {
@@ -69,9 +47,7 @@ func isTerminal(f *os.File) bool {
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
-// colorWriter wraps one record in a colour. A slog handler emits exactly one
-// Write per record, so wrapping the whole buffer is safe and needs no
-// line-splitting.
+// colorWriter colours whole writes, which is safe because a slog handler emits one Write per record.
 type colorWriter struct {
 	w    io.Writer
 	code []byte
@@ -88,11 +64,6 @@ func (c *colorWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// fatal logs at error level and exits. slog has no Fatal by design; this keeps
-// the startup failures on one path, instead of the mix of log.Fatalf (exit 1)
-// and log.Panicf (exit 2 with a stack trace) they used to take. None of them is
-// a bug worth a stack trace: they are a bad configuration or an unreachable
-// device, reported to an operator.
 func fatal(msg string, args ...any) {
 	slog.Error(msg, args...)
 	os.Exit(1)

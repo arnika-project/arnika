@@ -49,9 +49,9 @@ that reaches the router's own REST API — see
 
 ## How the Module Works
 
-Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK,
-base64-encodes it, and hands it to `KeyWriterService.SetPSK`. This module turns
-that call into two REST requests.
+Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK and
+passes its raw bytes to `KeyWriterService.SetPSK`. This adapter base64-encodes
+the bytes for the RouterOS REST API, which turns the call into two REST requests.
 
 ```mermaid
 sequenceDiagram
@@ -69,10 +69,10 @@ Two behaviours define what the router side must support:
 - **The peer is re-resolved on every rotation.** RouterOS internal ids (`*3`)
   are not stable across reboots or configuration changes, so the module never
   caches one.
-- **`InvalidateTunnel` is the fail-safe.** When no valid key material is
-  available, Arnika tears the tunnel down by writing a fresh random 32-byte PSK
-  through the same code path. The peer stays configured; the session stops
-  matching.
+- **`KeyWriterService.InvalidateTunnel` is the fail-safe.** When no valid key
+  material is available, the service generates a fresh random 32-byte PSK and
+  sends it through `SetPSK`. This adapter encodes and writes it through the same
+  REST path. The peer stays configured; the session stops matching.
 
 Arnika **only updates the `preshared-key` of an existing peer** — it never
 creates the interface or the peer.
@@ -86,7 +86,7 @@ Two files, following the layout in
 
 ### The adapter — `repositories/wgmikrotik/mikrotik.go`
 
-Implements the `keyWriterRepository` contract (`SetPSK`, `InvalidateTunnel`).
+Implements the `keyWriterRepository` contract (`SetPSK` with raw key bytes).
 It carries **no build tag**, so it is compiled, vetted, linted and unit-tested
 on every ordinary `go test ./...` run even though the default binary ships the
 netlink writer.
@@ -673,9 +673,11 @@ stands up an `httptest.Server` impersonating the RouterOS peers collection:
 | --- | --- |
 | `…_SetPSK` | Basic auth is sent; the id is resolved with a server-side `.query` (exactly one `print`); a single `PATCH` targets the right `.id` with the right PSK |
 | `…_SetPSK_PeerNotFound` | A missing peer is an error, and **no** `PATCH` is attempted |
-| `…_InvalidateTunnel` | The written PSK is valid base64 of exactly 32 bytes, and differs between calls |
 
-The tagged wiring file is not covered — check it with
+`KeyWriterService.InvalidateTunnel` is tested separately in
+[`services/keywriter_test.go`](../services/keywriter_test.go), which verifies
+that each call writes a fresh random 32-byte PSK. The tagged wiring file is not
+covered — check it with
 `GOEXPERIMENT=runtimesecret go vet -tags wireguard_mikrotik ./...`.
 
 ---

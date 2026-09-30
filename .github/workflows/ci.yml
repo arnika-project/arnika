@@ -7,9 +7,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Supersede in-flight runs for the same PR, so a rapid second push does not
-# queue behind the run it already obsoletes. Pushes to main are never
-# cancelled: every commit there keeps its own result.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -53,10 +50,6 @@ jobs:
           GOEXPERIMENT: runtimesecret
         run: go test -v ./...
 
-      # The container lab in ci/e2e: two Arnika peers over real WireGuard and
-      # the KMS simulator. Its own module, so it needs no GOEXPERIMENT and does
-      # not pull testcontainers into Arnika's go.mod, and `go test ./...` above
-      # does not see it. Same command as locally, which is the point of it.
       - name: End-to-end container lab
         run: go test -v -timeout 15m ./...
         working-directory: ci/e2e
@@ -113,8 +106,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # "<build tag>:<space-separated supported GOOS values>"
-          # Adding a writer means adding one line here. See KEYCONTROL.md.
           WRITERS=(
             "wireguard_netlink:linux darwin"
             "wireguard_mikrotik:linux darwin"
@@ -196,8 +187,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # One family per reader port. Adding a reader means adding its tag to
-          # the family it belongs to. See KEYCONTROL.md.
           QKD=(qkd_kms qkd_none)
 
           echo "::group::Build and vet every reader"

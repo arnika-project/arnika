@@ -1,5 +1,4 @@
-// Arnika installs a rotating WireGuard pre-shared key derived from a QKD key
-// and a post-quantum key agreement with the peer.
+// Arnika rotates a WireGuard pre-shared key derived from a QKD key and a post-quantum key agreement with the peer.
 package main
 
 import (
@@ -26,53 +25,28 @@ import (
 )
 
 var (
-	// Version allows setting a version on build.
 	Version string
-	// APPName allows setting an app name on a build.
 	APPName string
 )
 
-// shouldSetPSKOnQKDFailure reports whether to set a new PSK right away after
-// a failed QKD request, or leave it to the next scheduled PQC key rotation.
-//
-// Returns false only for MODE=AtLeastPqcRequired or EitherQkdOrPqcRequired
-// with PQC_ENABLED=true; true in every other case.
+// shouldSetPSKOnQKDFailure is false exactly when runPQCSetPSKLoop takes over the rotation instead.
 func shouldSetPSKOnQKDFailure(cfg *config.Config) bool {
 	return cfg.IsQKDRequired() || !cfg.UsePQC()
 }
 
-// lastQKDPSKAt is when a QKD key was last obtained, in Unix nanoseconds. Each
-// valid QKD key sets it and applies a new PSK to the WireGuard interface,
-// combined with a PQC key when PQC_ENABLED is true.
 var lastQKDPSKAt atomic.Int64
 
-// setPSK builds the PSK for this rotation and applies it to the WireGuard
-// interface.
-//
-// The argument qkd is the QKD key for this rotation, or nil if none is available. When
-// PQC_ENABLED is true, it is combined with a fresh PQC key through HKDF; if
-// PQC_ENABLED is false, the QKD key is used as is. Which of the two must be
-// present for a valid PSK is decided by MODE.
-//
-// If no valid PSK can be built, it sets a random PSK to invalidate the
-// tunnel instead of leaving the old key active, so a failed rotation never
-// silently extends the previous key's life. Errors are logged, not
-// returned, since the caller is a rotation loop that must keep running.
-// It reports whether the PSK was configured.
 func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) bool {
 	psk := buildPSK(keyWriter, pqc, qkd, cfg, logger)
 	return psk != nil && writePSK(keyWriter, psk, qkd != nil, cfg, logger)
 }
 
-// buildPSK is setPSK without the write; on failure it invalidates the tunnel and returns nil.
+// buildPSK invalidates the tunnel and returns nil when no valid PSK can be built, so a failed rotation never keeps the old key.
 func buildPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) (psk []byte) {
 	if qkd != nil {
 		psk = make([]byte, len(qkd))
 		copy(psk, qkd)
 	}
-	// The failure is recorded rather than logged where it happens, so that the
-	// reason and the invalidation it causes always appear together and no exit
-	// path can log one without the other.
 	var failure string
 	var failureAttrs []any
 	defer func() {
@@ -122,7 +96,6 @@ func buildPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderServi
 	return psk
 }
 
-// writePSK configures and clears psk; fromQKD marks a QKD rotation for the PQC-only fallback timer.
 func writePSK(keyWriter *services.KeyWriterService, psk []byte, fromQKD bool, cfg *config.Config, logger *slog.Logger) bool {
 	defer clear(psk)
 	if err := keyWriter.SetPSK(psk); err != nil {
@@ -132,10 +105,7 @@ func writePSK(keyWriter *services.KeyWriterService, psk []byte, fromQKD bool, cf
 	if fromQKD {
 		lastQKDPSKAt.Store(time.Now().UnixNano())
 	}
-	// Wording is load-bearing: ci/local-darwin/run.sh and the e2e lab count this
-	// line to assert that both peers rotated. Change the attributes freely, the
-	// message only together with them.
-	logger.Info("PSK configured on WireGuard interface",
+	logger.Info("PSK configured on WireGuard interface", // message counted by ci/local-darwin/run.sh and ci/e2e
 		"iface", cfg.WireGuardInterface, "peer", cfg.WireguardPeerPublicKey)
 	return true
 }
@@ -148,15 +118,7 @@ func invalidate(keyWriter *services.KeyWriterService, logger *slog.Logger, reaso
 	}
 }
 
-// nextPQCSetPSKAt returns the next moment to set a PQC-derived PSK. Both
-// peers compute the same moment from the clock alone, roughly halfway
-// between one round's publish window and the next, for the widest margin.
-//
-// The second grid comes from the PQC scheduler itself (RoundSeconds) rather
-// than from a second rounding rule here. The two must agree exactly: this
-// instant is only in the scheduler's quiet window if both derive the boundary
-// from the same whole seconds, and a peer that landed on a different grid would
-// read a different round's key.
+// nextPQCSetPSKAt falls between two rounds on the scheduler's RoundSeconds grid, so both peers read the same round's key.
 func nextPQCSetPSKAt(now time.Time, roundInterval, roundTimeout time.Duration) time.Time {
 	secs := pqchpke.RoundSeconds(roundInterval)
 	boundary := time.Unix((now.Unix()/secs+1)*secs, 0)
@@ -167,14 +129,6 @@ func nextPQCSetPSKAt(now time.Time, roundInterval, roundTimeout time.Duration) t
 	return boundary.Add(quiet / 2)
 }
 
-// runPQCSetPSKLoop installs a PQC-only PSK on every nextPQCSetPSKAt instant,
-// until the process ends. Both peers pick that instant from the clock alone,
-// which is what keeps them on the same PQC key with no message between them;
-// waking on INTERVAL instead could put them on different rounds.
-//
-// due gates each instant and reports whether a PSK is owed, so the caller can
-// log why. A nil due installs on every instant, which is what a binary with no
-// QKD key reader wants.
 func runPQCSetPSKLoop(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, cfg *config.Config, logger *slog.Logger, due func() bool) {
 	for {
 		time.Sleep(time.Until(nextPQCSetPSKAt(time.Now(), cfg.PQCRoundInterval, cfg.PQCRoundTimeout)))
@@ -202,13 +156,9 @@ func main() {
 	if logLevelWarning != "" {
 		slog.Warn(logLevelWarning)
 	}
-	// Harden before the configuration is read, so ARNIKA_PSK never exists in a
-	// process that can be core-dumped, ptraced by its own user, or swapped out.
-	for _, err := range hardening.Process() {
+	for _, err := range hardening.Process() { // before config.Parse, so ARNIKA_PSK never sits in a dumpable, ptraceable or swappable process
 		slog.Warn("process hardening incomplete", "err", err)
 	}
-	// runtime/secret erases registers, stack and unreachable heap allocations,
-	// but only on linux/amd64 and linux/arm64
 	var secretErasure bool
 	secret.Do(func() { secretErasure = secret.Enabled() })
 	if !secretErasure {
@@ -220,9 +170,6 @@ func main() {
 	if err != nil {
 		fatal("failed to parse the configuration", "err", err)
 	}
-	// Which readers exist is decided at build time, MODE and PQC_ENABLED at
-	// runtime; this rejects the combinations the binary cannot serve before any
-	// key is due.
 	if err := cfg.ValidateKeySources(qkdCompiled); err != nil {
 		fatal(err.Error())
 	}
@@ -235,8 +182,6 @@ func main() {
 	}
 	cfg.RateLimit = limit
 	arnikaID, _ := strconv.Atoi(cfg.ArnikaID)
-	// From here on every record carries arnika_id, and gets a colour when
-	// stderr is a terminal, which is what the four log prefixes used to do.
 	setLogIdentity(arnikaID)
 	arnikaLog := slog.Default()
 	primaryLog := arnikaLog.With("role", "primary")
@@ -246,12 +191,6 @@ func main() {
 	cfg.PrintStartupConfig()
 	interval := cfg.Interval
 	done := make(chan bool)
-	// peerSentKeyID reports that a key_id arrived from the peer, which means the
-	// worker goroutine has taken over the rotation for this interval. It was a
-	// buffered channel used as a flag, with four send-or-drain selects whose
-	// correctness rested on every reader consuming at most one signal. Swap(false)
-	// says "take the signal if there is one" in a single expression, so a reader
-	// cannot consume twice or forget to consume.
 	var peerSentKeyID atomic.Bool
 	result := make(chan transport.KeyIDRequest, transport.QKDQueueDepth)
 	keyWriter, err := getKeyWriterService(cfg)
@@ -272,8 +211,6 @@ func main() {
 		go pqcRun(pqcCtx)
 	}
 
-	// Serve returns an error rather than ending the process itself, so the
-	// failure surfaces here, next to every other startup failure.
 	go func() {
 		if err := transport.Serve(transport.ServerConfig{
 			Address:      cfg.ListenAddress,
@@ -292,16 +229,10 @@ func main() {
 		}
 	}()
 	if qkdCompiled {
-		// Without this the PSK would stay unchanged for as long as the KMS is
-		// down. After two INTERVALs without a key both peers switch, at the same
-		// moment taken from the wall clock, to a PSK built from the PQC key alone,
-		// and renew it every PQC_ROUND_INTERVAL until the KMS returns. Two and not
-		// one, because one late or lost key often affects only one of the two
-		// peers, and switching on it would leave them with different PSKs.
 		if cfg.UsePQC() && !cfg.IsQKDRequired() {
 			lastQKDPSKAt.Store(time.Now().UnixNano())
 			go runPQCSetPSKLoop(keyWriter, pqc, cfg, arnikaLog, func() bool {
-				if time.Since(time.Unix(0, lastQKDPSKAt.Load())) < 2*interval {
+				if time.Since(time.Unix(0, lastQKDPSKAt.Load())) < 2*interval { // not one: a single lost key often hits only one peer and would split their PSKs
 					return false
 				}
 				arnikaLog.Warn("no QKD key, installing a PQC-only PSK",
@@ -344,28 +275,18 @@ func main() {
 							setPSK(keyWriter, pqc, nil, cfg, primaryLog)
 						}
 					} else {
-						// wait until the next full second (e.g., 12:34:57.000)
 						now := time.Now()
 						nextTick := now.Truncate(time.Second).Add(time.Second)
 						primaryLog.Info("serving this interval", "interval", intervalCounter)
 						time.Sleep(nextTick.Sub(now))
-						// A key_id from the peer in the meantime means it is
-						// acting as PRIMARY for this interval too, so its
-						// rotation already won and sending ours as well would
-						// put the two on different keys.
-						if !peerSentKeyID.Swap(false) {
-							// Checked against the empty string, not against a
-							// nil pointer: the previous form could never fire,
-							// because the service handed out a pointer to its
-							// own local variable even when the KMS returned no
-							// identifier at all.
+						peerIsPrimaryToo := peerSentKeyID.Swap(false)
+						if !peerIsPrimaryToo {
 							if key.ID == "" {
 								primaryLog.Error("the KMS returned an empty key_id, skipping this interval")
 								if shouldSetPSKOnQKDFailure(cfg) {
 									setPSK(keyWriter, pqc, nil, cfg, primaryLog)
 								}
 							} else {
-								// Built before sending, so a failure on this side takes its own MODE decision at once.
 								psk := buildPSK(keyWriter, pqc, key.Key, cfg, primaryLog)
 								primaryLog.Info("sending the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress)
 								err = transport.SendKeyID(transport.ClientConfig{
@@ -379,7 +300,6 @@ func main() {
 									MaxClockSkew: cfg.MaxClockSkew,
 									Log:          primaryLog,
 								})
-								// Without the ACK the peer has not installed this key, so it is treated like a failed KMS request.
 								switch {
 								case err != nil:
 									primaryLog.Error("the peer did not confirm the key_id", "key_id", key.ID, "peer", cfg.ServerAddress, "err", err)
@@ -398,18 +318,7 @@ func main() {
 				}
 				intervalCounter++
 				<-ticker.C
-				// Every interval takes the signal at its end, PRIMARY included,
-				// even though only a BACKUP acts on it. Taking it inside the
-				// condition let `backup &&` short-circuit past the Swap, so a
-				// key_id that reached a PRIMARY interval after its own check -
-				// a late udpClient retry, or two peers whose interval counters
-				// drifted apart across a restart - stayed set into the next
-				// interval. A BACKUP there then read it as proof that a key_id
-				// had arrived when none had, and skipped failing closed.
-				sawKeyID := peerSentKeyID.Swap(false)
-				// Without a signal, MODE has to decide, exactly as it does for a
-				// failed KMS request on the PRIMARY side: without this the
-				// BACKUP kept the superseded PSK installed for an interval.
+				sawKeyID := peerSentKeyID.Swap(false) // outside the if: a late key_id in a PRIMARY interval must not leak into the next BACKUP one
 				if backup && !sawKeyID {
 					if shouldSetPSKOnQKDFailure(cfg) {
 						backupLog.Error("no key_id from the peer", "interval", intervalCounter-1)
@@ -419,15 +328,10 @@ func main() {
 			}
 		}()
 	} else {
-		// PQC-only build: so any key_id from the peer means a misconfigured
-		// build or MODE mismatch. Drain and log it here, or it would just fill
-		// the shared queue and get silently dropped.
 		go transport.RunKeyIDWorker(done, result, func(r string) bool {
 			arnikaLog.Warn("received a key_id from the peer, but this binary has no QKD key reader", "key_id", r)
 			return false
 		})
-		// The PQC key agreement is the only key source here, so every instant
-		// is due and there is nothing to gate on.
 		go runPQCSetPSKLoop(keyWriter, pqc, cfg, arnikaLog, nil)
 	}
 	<-done

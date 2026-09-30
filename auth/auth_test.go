@@ -188,16 +188,11 @@ func TestDomainSeparation(t *testing.T) {
 		t.Fatal("AES key and HMAC key must be different (domain separation)")
 	}
 
-	// The two directions must not share an HMAC key either.
 	if string(deriveHMACKey(psk, DirEven)) == string(deriveHMACKey(psk, DirOdd)) {
 		t.Fatal("the two directions must derive different HMAC keys")
 	}
 }
 
-// --- Security validation tests (attack vector coverage) ---
-
-// TestReplayDetectable verifies that the timestamp in a packet is preserved
-// faithfully so that the application layer can detect stale packets.
 func TestReplayDetectable(t *testing.T) {
 	psk := []byte("replay-psk")
 	oldTime := time.Now().Add(-10 * time.Minute).Unix()
@@ -209,25 +204,20 @@ func TestReplayDetectable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
-	// The timestamp should be faithfully preserved so the caller can reject it.
 	if parsed.Timestamp != oldTime {
 		t.Fatal("timestamp must be preserved for replay detection")
 	}
-	// Verify it is actually old (application-layer check).
 	if time.Now().Unix()-parsed.Timestamp < 300 {
 		t.Fatal("expected stale timestamp to be detectable")
 	}
 }
 
-// TestSignatureBindsToPacketType verifies that changing the packet type byte
-// after signing invalidates the HMAC, preventing type-confusion attacks.
 func TestSignatureBindsToPacketType(t *testing.T) {
 	psk := []byte("type-confusion-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("payload")}
 	data := pkt.Marshal(psk, DirEven)
 
-	// Flip type byte from 'D' to 'A' — should break HMAC
 	data[0] = byte(PacketAck)
 
 	_, err := UnmarshalPacket(psk, data, DirEven)
@@ -236,15 +226,12 @@ func TestSignatureBindsToPacketType(t *testing.T) {
 	}
 }
 
-// TestSignatureBindsToTimestamp verifies that modifying the timestamp after
-// signing invalidates the HMAC, preventing timestamp-manipulation attacks.
 func TestSignatureBindsToTimestamp(t *testing.T) {
 	psk := []byte("ts-tamper-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("data")}
 	data := pkt.Marshal(psk, DirEven)
 
-	// Flip a bit in the timestamp field (bytes 1–8)
 	data[5] ^= 0x01
 
 	_, err := UnmarshalPacket(psk, data, DirEven)
@@ -253,9 +240,6 @@ func TestSignatureBindsToTimestamp(t *testing.T) {
 	}
 }
 
-// TestEncryptNonDeterministic verifies that AES-GCM encryption is
-// non-deterministic: encrypting the same plaintext twice with the same PSK
-// must produce different ciphertexts (due to random nonce).
 func TestEncryptNonDeterministic(t *testing.T) {
 	psk := []byte("nonce-psk")
 	plaintext := []byte("same-input")
@@ -273,8 +257,6 @@ func TestEncryptNonDeterministic(t *testing.T) {
 	}
 }
 
-// TestBitFlipInPayload verifies that flipping a single bit anywhere in the
-// encrypted payload invalidates the HMAC before decryption is attempted.
 func TestBitFlipInPayload(t *testing.T) {
 	psk := []byte("bitflip-psk")
 	payload := []byte("encrypted-key-material")
@@ -282,7 +264,6 @@ func TestBitFlipInPayload(t *testing.T) {
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: payload}
 	data := pkt.Marshal(psk, DirEven)
 
-	// Flip one bit in the payload region (starts at offset 11)
 	data[15] ^= 0x02
 
 	_, err := UnmarshalPacket(psk, data, DirEven)
@@ -291,15 +272,12 @@ func TestBitFlipInPayload(t *testing.T) {
 	}
 }
 
-// TestBitFlipInSignature verifies that corrupting the signature itself causes
-// rejection.
 func TestBitFlipInSignature(t *testing.T) {
 	psk := []byte("sigflip-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("data")}
 	data := pkt.Marshal(psk, DirEven)
 
-	// Flip one bit in the last byte of the signature
 	data[len(data)-1] ^= 0x01
 
 	_, err := UnmarshalPacket(psk, data, DirEven)
@@ -308,15 +286,12 @@ func TestBitFlipInSignature(t *testing.T) {
 	}
 }
 
-// TestUnmarshalRejectsInvalidLengthFields verifies that a packet with a
-// payload_len larger than remaining data is rejected.
 func TestUnmarshalRejectsInvalidLengthFields(t *testing.T) {
 	psk := []byte("length-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("x")}
 	data := pkt.Marshal(psk, DirEven)
 
-	// Overwrite payload_len to a huge value (0xFFFF) while keeping small data
 	data[9] = 0xFF
 	data[10] = 0xFF
 
@@ -326,8 +301,6 @@ func TestUnmarshalRejectsInvalidLengthFields(t *testing.T) {
 	}
 }
 
-// TestEmptyPSKStillProducesDeterministicKeys ensures that even an empty PSK
-// produces consistent domain-separated keys (no panics, deterministic behavior).
 func TestEmptyPSKStillProducesDeterministicKeys(t *testing.T) {
 	psk := []byte{}
 	k1 := deriveKey(psk)
@@ -346,12 +319,9 @@ func TestEmptyPSKStillProducesDeterministicKeys(t *testing.T) {
 	}
 }
 
-// TestDirectionForParity asserts that two peers whose ARNIKA_ID values differ
-// in parity get opposite direction labels, and that each side's outbound label
-// is the other's inbound label.
 func TestDirectionForParity(t *testing.T) {
-	outA, inA := DirectionFor(9999) // odd
-	outB, inB := DirectionFor(9998) // even
+	outA, inA := DirectionFor(9999)
+	outB, inB := DirectionFor(9998)
 
 	if outA == outB {
 		t.Fatalf("peers with different ID parity must sign with different labels, both got %q", outA)
@@ -361,30 +331,22 @@ func TestDirectionForParity(t *testing.T) {
 	}
 }
 
-// TestReflectedPacketFailsAtSender is the reason directional keys exist:
-// signedPayload covers only type, timestamp and payload, so with one shared
-// HMAC key a packet bounced back to its sender would verify there.
 func TestReflectedPacketFailsAtSender(t *testing.T) {
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
 	outA, inA := DirectionFor(9999)
 
-	// A sends a packet, signing with its outbound label.
 	pkt := &Packet{Type: PacketData, Timestamp: 1234567890, Payload: []byte("key-id")}
 	wire := pkt.Marshal(psk, outA)
 
-	// The peer accepts it: it verifies with A's outbound label.
 	if _, err := UnmarshalPacket(psk, wire, outA); err != nil {
 		t.Fatalf("peer should accept a correctly directed packet: %v", err)
 	}
 
-	// Reflected straight back to A, which verifies with its inbound label.
 	if _, err := UnmarshalPacket(psk, wire, inA); err == nil {
 		t.Fatal("reflected packet verified at its own sender; direction separation is not working")
 	}
 }
 
-// TestPacketPQCRoundTrip asserts the new type survives marshal/unmarshal and
-// stays distinct from the existing types.
 func TestPacketPQCRoundTrip(t *testing.T) {
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
 	if PacketPQC == PacketData || PacketPQC == PacketAck {

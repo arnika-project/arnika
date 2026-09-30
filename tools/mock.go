@@ -25,7 +25,7 @@ const DEBUG = "[DEBUG]"
 
 type KeyStore struct {
 	mu   sync.RWMutex
-	keys map[string]string // key_ID -> key
+	keys map[string]string
 }
 
 type KeyResponse struct {
@@ -91,12 +91,8 @@ const (
 )
 
 func main() {
-	// Microseconds, like arnika's own (main.go): a run interleaves this log
-	// with the peers', and second resolution ties every line of a startup
-	// banner together for the merge to order however it likes.
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // lab runs interleave this log with the peers', seconds cannot order it
 
-	// Register handlers for both CONSA and CONSB
 	http.HandleFunc("/api/v1/keys/CONSA/enc_keys", freezable("CONSA", handleEncKeys))
 	http.HandleFunc("/api/v1/keys/CONSA/dec_keys", freezable("CONSA", handleDecKeys))
 	http.HandleFunc("/api/v1/keys/CONSA/status", freezable("CONSA", handleStatus))
@@ -123,8 +119,6 @@ func main() {
 	}
 }
 
-// freezable simulates a hung KMS (or an exhausted key pool that never resolves):
-// the request is accepted and logged as usual, but no response is ever written.
 func freezable(sae string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !frozenSAEs[sae] {
@@ -134,16 +128,12 @@ func freezable(sae string, next http.HandlerFunc) http.HandlerFunc {
 
 		rawBody, _ := readAndRestoreBody(r)
 		debugLogRequest(r, rawBody)
-		// No status: nothing is ever sent, so LOG's %d had nothing but a
-		// misleading 0 to put there.
 		log.Printf("[FREEZE] [---] %s %s from %s", r.Method, r.URL.Path+getQueryParameters(r), r.RemoteAddr)
 
-		// Hold the connection open until the client gives up or the server shuts down.
 		<-r.Context().Done()
 	}
 }
 
-// handleEncKeys generates a new key and returns it
 func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 	rawBody, err := readAndRestoreBody(r)
 	if err != nil {
@@ -181,27 +171,22 @@ func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// create an RFC4122-compatible UUID whose first 4 bytes are 0xff
-	u := uuid.New()          // type uuid.UUID == [16]byte
-	for i := 0; i < 4; i++ { // set first 4 bytes -> first 8 hex chars "ffffffff"
+	u := uuid.New()
+	for i := 0; i < 4; i++ {
 		u[i] = 0xff
 	}
-	// ensure RFC4122 v4 version and variant bits are correct
-	u[6] = (u[6] & 0x0f) | 0x40 // set version = 4
-	u[8] = (u[8] & 0x3f) | 0x80 // set variant = RFC4122 (10xx)
+	u[6] = (u[6] & 0x0f) | 0x40
+	u[8] = (u[8] & 0x3f) | 0x80
 
-	keyID := u.String() // e.g. "ffffffff-xxxx-4xxx-8xxx-xxxxxxxxxxxx"
+	keyID := u.String()
 
-	// Generate key material as SHA256 hash of the UUID
 	hash := sha256.Sum256([]byte(keyID))
 	keyMaterial := base64.StdEncoding.EncodeToString(hash[:])
 
-	// Store the key
 	keyStore.mu.Lock()
 	keyStore.keys[keyID] = keyMaterial
 	keyStore.mu.Unlock()
 
-	// Return the key
 	response := KeyResponse{
 		Keys: []Key{
 			{
@@ -218,7 +203,6 @@ func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 	log.Printf(LOG, "[INFO]", http.StatusOK, r.Method, r.URL.Path, r.RemoteAddr)
 }
 
-// handleDecKeys retrieves a previously generated key by ID
 func handleDecKeys(w http.ResponseWriter, r *http.Request) {
 	rawBody, err := readAndRestoreBody(r)
 	if err != nil {
@@ -242,7 +226,6 @@ func handleDecKeys(w http.ResponseWriter, r *http.Request) {
 
 	keyID := keyIDs[0]
 
-	// Retrieve the key
 	keyStore.mu.RLock()
 	keyMaterial, exists := keyStore.keys[keyID]
 	keyStore.mu.RUnlock()
@@ -253,7 +236,6 @@ func handleDecKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return the key
 	response := KeyResponse{
 		Keys: []Key{
 			{
@@ -419,7 +401,6 @@ func boundedDummyCount(masterSAEID, slaveSAEID, field string) int {
 	_ = statusRandomRangeExponent
 	v := localRandomizer.Intn(maxStatusKeyCount-minStatusKeyCount+1) + minStatusKeyCount
 
-	// Slight process-local variation while keeping strict bounds.
 	offset := randomizer.Intn(11) - 5
 	v += offset
 

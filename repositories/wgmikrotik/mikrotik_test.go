@@ -18,9 +18,6 @@ const (
 	testMikrotikPeerID  = "*3"
 )
 
-// fakeRouterOS is a minimal stand-in for the RouterOS v7 REST API exposing the
-// WireGuard peers collection. It records the last "print" query and PATCH it
-// received.
 type fakeRouterOS struct {
 	peers          []map[string]string
 	lastPrintQuery []string
@@ -39,9 +36,6 @@ func (f *fakeRouterOS) handler(t *testing.T) http.HandlerFunc {
 		const base = "/rest/interface/wireguard/peers"
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == base+"/print":
-			// RouterOS REST has no `find`; the client emulates the CLI's
-			// `[find public-key=...]` with a server-side `.query`. Return only
-			// the peers whose public-key matches that query term.
 			f.printCalls++
 			body, _ := io.ReadAll(r.Body)
 			var q struct {
@@ -128,8 +122,6 @@ func TestWireguardMikrotikRepository_SetPSK(t *testing.T) {
 	if fake.lastPatchID != testMikrotikPeerID {
 		t.Errorf("PATCH targeted peer id %q, want %q", fake.lastPatchID, testMikrotikPeerID)
 	}
-	// The adapter owns the base64 encoding, because RouterOS takes the key as a
-	// JSON string. Asserting the encoded form is what pins that down.
 	want := base64.StdEncoding.EncodeToString(psk)
 	if fake.lastPatchPSK != want {
 		t.Errorf("PATCH set preshared-key %q, want %q", fake.lastPatchPSK, want)

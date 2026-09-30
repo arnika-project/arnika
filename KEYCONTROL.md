@@ -313,27 +313,27 @@ module, while a remote-API writer talks over HTTPS and needs neither.
 Compile-time selection means the unused backend's code and any of its
 dependencies are simply not part of the shipped binary.
 
-Every writer adapter implements the same two-method contract:
+Every writer adapter implements the same repository port:
 
 ```go
 // services/keywriter.go
 type keyWriterRepository interface {
-    InvalidateTunnel() error // Invalidate the WireGuard session by setting a random PSK
-    SetPSK(psk string) error // Set the PSK on the WireGuard interface
+    SetPSK(psk []byte) error
 }
 ```
 
 **Contract notes for implementers:**
 
-- `psk` arrives **base64-encoded** — 32 raw bytes, standard encoding. Pass it
-  through as-is unless the backend needs another representation.
+- `psk` contains the **32 raw key bytes**, not a base64-encoded string. Encode it
+  at the adapter boundary only if the backend requires another representation,
+  as the RouterOS REST adapter does.
 - `SetPSK` must be **idempotent and re-resolving**. It is called on every
   rotation interval, so resolve the target peer on each call rather than
   caching a handle or an internal id that a backend restart may invalidate.
-- `InvalidateTunnel` is the **fail-safe**. `setPSK` in [`main.go`](main.go)
-  calls it whenever no valid key material is available, and it must tear the
-  session down by installing a fresh random 32-byte PSK. Generate it from
-  `crypto/rand` (or the backend's own key generator) — never a fixed value.
+- `KeyWriterService.InvalidateTunnel` is the **fail-safe**. `setPSK` in
+  [`main.go`](main.go) calls it whenever no valid key material is available.
+  The service generates a fresh random 32-byte PSK with `crypto/rand` and
+  passes it through `SetPSK`; adapters do not implement invalidation themselves.
 - Errors are surfaced and logged by the caller; return wrapped errors with
   enough context to identify the interface and peer.
 
@@ -378,7 +378,8 @@ that must not survive a build.
 ### Adding a new key writer
 
 1. **Write the adapter** at `repositories/<module-name>.go` implementing
-   `SetPSK` and `InvalidateTunnel` as described above. Do **not** put a
+   `SetPSK` as described above. `KeyWriterService` provides
+   `InvalidateTunnel`; adapters do not implement it. Do **not** put a
    writer-selection tag on this file. Take the HTTP client (or equivalent
    transport) as a constructor argument so that TLS trust and timeouts are
    configured once, at the wiring layer.
@@ -425,12 +426,11 @@ that must not survive a build.
    backend, stand up an `httptest.Server` that impersonates the remote API and
    assert on the requests the adapter makes — see
    [`repositories/wgmikrotik/mikrotik_test.go`](repositories/wgmikrotik/mikrotik_test.go)
-   for a worked example, including the check that `InvalidateTunnel` produces a
-   fresh 32-byte key on each call.
+   for a worked example. The service-level invalidation behavior is tested in
+   [`services/keywriter_test.go`](services/keywriter_test.go).
 
-5. **Verify the wiring compiles.** `go test ./...` and `golangci-lint` run
-   against the **default (netlink) build**, so a tagged wiring file is not
-   covered by them. Check it explicitly:
+5. **Verify the wiring compiles.** `go test ./...` checks the **default
+   (netlink) build**, so a tagged wiring file is not covered. Check it explicitly:
 
    ```bash
    GOEXPERIMENT=runtimesecret go vet -tags wireguard_foo ./...
@@ -531,7 +531,7 @@ Before considering a module done:
 - [ ] Constructor takes all dependencies as arguments (no global state)
 - [ ] Key material cleared with `clear()` / handled inside `secret.Do(...)`
 - [ ] Writers: `SetPSK` re-resolves its target on every call
-- [ ] Writers: `InvalidateTunnel` installs a fresh random 32-byte PSK
+- [ ] `KeyWriterService.InvalidateTunnel` installs a fresh random 32-byte PSK
 - [ ] Wiring file added, and its family's default constraint updated (`wire_wireguard_netlink.go`
       or `wire_qkd_kms.go`; `wire_pqc_hpke.go` gets its first constraint with a second PQC backend),
       keeping the leading `<tag> ||` clause

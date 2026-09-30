@@ -1,4 +1,3 @@
-# .github/workflows/release-go126.yml
 name: Release (Go 1.26)
 
 on:

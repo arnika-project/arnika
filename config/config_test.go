@@ -10,20 +10,17 @@ import (
 )
 
 func TestUsePQC(t *testing.T) {
-	// Test case 1: PQC key agreement enabled
 	c := &Config{PQCEnabled: true}
 	if !c.UsePQC() {
 		t.Error("Expected UsePQC to be true when PQCEnabled is set")
 	}
 
-	// Test case 2: disabled by default
 	c = &Config{}
 	if c.UsePQC() {
 		t.Error("Expected UsePQC to be false by default")
 	}
 }
 
-// testArnikaPSK is 44 bytes, satisfying minArnikaPSKLen.
 const testArnikaPSK = "0123456789abcdef0123456789abcdef0123456789ab"
 
 func TestParse_ArnikaPSKValidation(t *testing.T) {
@@ -77,7 +74,6 @@ func TestRedactSecret(t *testing.T) {
 }
 
 func TestParse(t *testing.T) {
-	// Test case 1: Missing environment variable
 	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY", "ARNIKA_PSK"} {
 		_, err := Parse()
 		if err == nil {
@@ -86,53 +82,48 @@ func TestParse(t *testing.T) {
 		t.Setenv(mandatoryEnvVar, fmt.Sprintf("value_of_%s", mandatoryEnvVar))
 	}
 
-	// Mocking environment variables for testing
 	t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
 	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
 	t.Setenv("KMS_URL", "https://example.com")
 	t.Setenv("WIREGUARD_INTERFACE", "wg0")
 	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
 	t.Setenv("MODE", "AtLeastQkdRequired")
-	// The loop above set a short placeholder; ARNIKA_PSK has a minimum length.
 	t.Setenv("ARNIKA_PSK", testArnikaPSK)
 
-	// Test case 2: All environment variables present
 	expectedConfig := &Config{
 		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
 		ArnikaID:               "8080",
 		ArnikaPSK:              []byte(testArnikaPSK),
-		Certificate:            "",                     // Default value for Certificate
-		PrivateKey:             "",                     // Default value for PrivateKey
-		CACertificate:          "",                     // Default value for CACertificate
-		ArnikaPeerTimeout:      time.Millisecond * 500, // Actual default value for ArnikaPeerTimeout
+		Certificate:            "",
+		PrivateKey:             "",
+		CACertificate:          "",
+		ArnikaPeerTimeout:      time.Millisecond * 500,
 		KMSURL:                 "https://example.com",
-		KMSHTTPTimeout:         time.Second * 10,       // Actual default value for KMSHTTPTimeout
-		KMSBackoffMaxRetries:   5,                      // Actual default value for KMSBackoffMaxRetries
-		KMSBackoffBaseDelay:    time.Millisecond * 100, // Actual default value for KMSBackoffBaseDelay
-		KMSRetryInterval:       time.Second * 5,        // Actual default value for KMSRetryInterval
-		Interval:               time.Second * 10,       // Actual default value for Interval
+		KMSHTTPTimeout:         time.Second * 10,
+		KMSBackoffMaxRetries:   5,
+		KMSBackoffBaseDelay:    time.Millisecond * 100,
+		KMSRetryInterval:       time.Second * 5,
+		Interval:               time.Second * 10,
 		WireGuardInterface:     "wg0",
 		WireguardPeerPublicKey: "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=",
-		PQCEnabled:             true,             // Default: PQC key agreement on
-		PQCRoundInterval:       time.Second * 10, // Defaults to INTERVAL
-		PQCMaxKeyAge:           time.Second * 20, // Defaults to 2 x PQC_ROUND_INTERVAL
+		PQCEnabled:             true,
+		PQCRoundInterval:       time.Second * 10,
+		PQCMaxKeyAge:           time.Second * 20,
 		PQCRoundTimeout:        time.Millisecond * 2500,
 		Mode:                   "AtLeastQkdRequired",
-		RateLimit:              0,           // Unset: derived from protocol traffic by the caller
-		RateWindow:             time.Minute, // Real default value for RateWindow
-		MaxClockSkew:           time.Minute, // Real default value for MaxClockSkew
+		RateLimit:              0,
+		RateWindow:             time.Minute,
+		MaxClockSkew:           time.Minute,
 	}
 	result, err := Parse()
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
-	// Assert the values of the config struct here
 	if !reflect.DeepEqual(result, expectedConfig) {
 		t.Errorf("Expected config	%#v, but got %#v", expectedConfig, result)
 	}
 
-	// Test case 3: Interval parsing failure
 	t.Setenv("INTERVAL", "invalid")
 	_, err = Parse()
 	if err == nil {
@@ -140,7 +131,6 @@ func TestParse(t *testing.T) {
 	}
 	t.Setenv("INTERVAL", "1m")
 
-	// Test case 4: PQC round timeout must be shorter than the round interval
 	t.Setenv("PQC_ENABLED", "true")
 	t.Setenv("PQC_ROUND_INTERVAL", "10s")
 	t.Setenv("PQC_ROUND_TIMEOUT", "10s")
@@ -155,7 +145,6 @@ func TestParse(t *testing.T) {
 }
 
 func TestGetEnvOrDefault(t *testing.T) {
-	// Test case 1: environment variable exists
 	t.Setenv("TEST_KEY", "test_value")
 	result := getEnvOrDefault("TEST_KEY", "default_value")
 	expected := "test_value"
@@ -163,7 +152,6 @@ func TestGetEnvOrDefault(t *testing.T) {
 		t.Errorf("Expected %s, but got %s", expected, result)
 	}
 
-	// Test case 2: environment variable does not exist
 	result = getEnvOrDefault("NON_EXISTENT_KEY", "default_value")
 	expected = "default_value"
 	if result != expected {
@@ -172,7 +160,6 @@ func TestGetEnvOrDefault(t *testing.T) {
 }
 
 func TestGetEnv(t *testing.T) {
-	// Test case 1: Testing when the environment variable exists
 	t.Setenv("TEST_ENV", "test_value")
 	result, err := getEnv("TEST_ENV")
 	if err != nil {
@@ -183,7 +170,6 @@ func TestGetEnv(t *testing.T) {
 		t.Errorf("Expected %s, but got %s", expected, result)
 	}
 
-	// Test case 2: Testing when the environment variable does not exist
 	if err := os.Unsetenv("TEST_ENV"); err != nil {
 		t.Fatalf("failed to unset env var: %v", err)
 	}
@@ -198,7 +184,6 @@ func TestGetEnv(t *testing.T) {
 }
 
 func TestIsQKDRequired(t *testing.T) {
-	// Test case 1: Mode is "QkdAndPqcRequired"
 	c := &Config{Mode: "QkdAndPqcRequired"}
 	result := c.IsQKDRequired()
 	expected := true
@@ -206,7 +191,6 @@ func TestIsQKDRequired(t *testing.T) {
 		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
 	}
 
-	// Test case 2: Mode is "AtLeastQkdRequired"
 	c = &Config{Mode: "AtLeastQkdRequired"}
 	result = c.IsQKDRequired()
 	expected = true
@@ -214,7 +198,6 @@ func TestIsQKDRequired(t *testing.T) {
 		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
 	}
 
-	// Test case 3: Mode is "AtLeastPqcRequired"
 	c = &Config{Mode: "AtLeastPqcRequired"}
 	result = c.IsQKDRequired()
 	expected = false
@@ -222,7 +205,6 @@ func TestIsQKDRequired(t *testing.T) {
 		t.Errorf("Expected %t for Mode=%s, but got %t", expected, c.Mode, result)
 	}
 
-	// Test case 4: Mode is "EitherQkdOrPqcRequired"
 	c = &Config{Mode: "EitherQkdOrPqcRequired"}
 	result = c.IsQKDRequired()
 	expected = false
@@ -237,7 +219,6 @@ func TestIsPrimary(t *testing.T) {
 	nodeA := &Config{ArnikaID: "9999", ArnikaPSK: psk}
 	nodeB := &Config{ArnikaID: "9998", ArnikaPSK: psk}
 
-	// For each interval, the two nodes must get opposite roles
 	for i := uint64(0); i < 100; i++ {
 		a := nodeA.IsPrimary(i)
 		b := nodeB.IsPrimary(i)
@@ -246,7 +227,6 @@ func TestIsPrimary(t *testing.T) {
 		}
 	}
 
-	// Deterministic: same input → same output
 	for i := uint64(0); i < 50; i++ {
 		first := nodeA.IsPrimary(i)
 		second := nodeA.IsPrimary(i)
@@ -256,10 +236,6 @@ func TestIsPrimary(t *testing.T) {
 	}
 }
 
-// TestValidateKeySources covers the compile-time/runtime mismatches: a MODE or
-// PQC_ENABLED that the readers built into the binary cannot serve. KMS_URL is
-// mandatory here rather than in Parse, because only the caller knows whether a
-// QKD reader was compiled in.
 func TestValidateKeySources(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -290,9 +266,6 @@ func TestValidateKeySources(t *testing.T) {
 	}
 }
 
-// TestParse_PQCKeyAge covers AC-1.1 to AC-1.3: the default is derived from
-// PQC_ROUND_INTERVAL rather than INTERVAL, a key age that does not outlive its
-// own round is rejected, and an explicit valid value is kept verbatim.
 func TestParse_PQCKeyAge(t *testing.T) {
 	setValidEnv := func(t *testing.T, interval, roundInterval, maxKeyAge, roundTimeout string) {
 		t.Helper()
@@ -321,14 +294,12 @@ func TestParse_PQCKeyAge(t *testing.T) {
 		}
 	})
 
-	t.Run("equal to the round interval is fatal", func(t *testing.T) {
+	t.Run("equal to the round interval is fatal and names both durations", func(t *testing.T) {
 		setValidEnv(t, "10s", "120s", "120s", "10s")
 		_, err := Parse()
 		if err == nil {
 			t.Fatal("expected Parse to reject PQC_MAX_KEY_AGE == PQC_ROUND_INTERVAL")
 		}
-		// The error has to name both durations, or an operator cannot see which
-		// of the two to change.
 		for _, want := range []string{"2m0s", "PQC_MAX_KEY_AGE", "PQC_ROUND_INTERVAL"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("error %q does not mention %q", err, want)
@@ -364,9 +335,6 @@ func TestParse_PQCKeyAge(t *testing.T) {
 	})
 }
 
-// TestParse_RateLimit covers FR-3.1 and FR-3.5: unset leaves zero, which the
-// caller reads as "derive from protocol traffic", and an explicit value is kept
-// verbatim as an operator override.
 func TestParse_RateLimit(t *testing.T) {
 	setValidEnv := func(t *testing.T) {
 		t.Helper()

@@ -204,7 +204,7 @@ func TestStatusResponseHasExpectedFieldsAndBounds(t *testing.T) {
 	}
 }
 
-func TestFreezableNeverRepliesForFrozenSAE(t *testing.T) {
+func TestFreezableNeverRepliesForFrozenSAEAndStillServesTheOther(t *testing.T) {
 	frozenSAEs = map[string]bool{"CONSA": true}
 	defer func() { frozenSAEs = map[string]bool{} }()
 
@@ -230,7 +230,6 @@ func TestFreezableNeverRepliesForFrozenSAE(t *testing.T) {
 		t.Fatalf("expected empty body, got %s", w.Body.String())
 	}
 
-	// The other side must still work.
 	w2 := httptest.NewRecorder()
 	freezable("CONSB", handleEncKeys)(w2, httptest.NewRequest(http.MethodGet, "/api/v1/keys/CONSB/enc_keys", nil))
 	if w2.Code != http.StatusOK {

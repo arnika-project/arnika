@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-// rateLimiter implements a simple per-IP rate limiter.
 type rateLimiter struct {
 	mu       sync.Mutex
 	requests map[string][]time.Time
@@ -72,15 +71,7 @@ func (rl *rateLimiter) cleanup() {
 	}
 }
 
-// logThrottle emits at most one message per interval.
-//
-// Packet-level warnings are driven by whatever arrives on the socket, so an
-// unthrottled one lets flood or malformed traffic turn logging into a denial of
-// service. The zero value allows every call, which is the safe default for a
-// caller that forgets to set an interval.
-//
-// Not safe for concurrent use: every user is the UDP read loop, a single
-// goroutine, and a mutex here would be pure ceremony.
+// logThrottle is not safe for concurrent use; its only user is the single-goroutine UDP read loop.
 type logThrottle struct {
 	interval time.Duration
 	next     time.Time

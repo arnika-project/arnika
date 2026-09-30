@@ -12,7 +12,6 @@ import (
 	"github.com/arnika-project/arnika/auth"
 )
 
-// freeUDPPort asks the kernel for an unused port and hands it back.
 func freeUDPPort(t *testing.T) string {
 	t.Helper()
 	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
@@ -28,7 +27,6 @@ func freeUDPPort(t *testing.T) string {
 	return fmt.Sprintf("127.0.0.1:%d", port)
 }
 
-// testPeer dials a server started by these tests and speaks the wire format.
 type testPeer struct {
 	t               *testing.T
 	conn            net.Conn
@@ -43,12 +41,9 @@ func startTestServer(t *testing.T, handle PQCHandler) *testPeer {
 	return startTestServerQueue(t, handle, 1)
 }
 
-// startTestServerQueue starts a server whose QKD queue holds queueDepth key
-// ids, so a test can fill it deterministically.
 func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *testPeer {
 	t.Helper()
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
-	// Peer signs with its outbound label; the server verifies with dirIn.
 	peerOut, peerIn := auth.DirectionFor(9999)
 	srvOut, srvIn := peerIn, peerOut
 
@@ -70,7 +65,6 @@ func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *test
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	// Wait for the listener to be up.
 	time.Sleep(100 * time.Millisecond)
 	p := &testPeer{t: t, conn: conn, psk: psk, peerOut: peerOut, peerIn: peerIn}
 	p.result = result
@@ -78,7 +72,6 @@ func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *test
 	return p
 }
 
-// ackWithin returns the key id of an ACK arriving inside d.
 func (p *testPeer) ackWithin(d time.Duration) (string, bool) {
 	p.t.Helper()
 	if err := p.conn.SetReadDeadline(time.Now().Add(d)); err != nil {
@@ -115,10 +108,6 @@ func (p *testPeer) send(typ auth.PacketType, payload []byte) {
 	}
 }
 
-// TestPQCFloodDoesNotStallQKDPath asserts the property the inline PQC handler
-// must keep: PQC frames are handled on the read loop, so a peer flooding
-// PacketPQC must not prevent a PacketData packet from being delivered. It fails
-// if anyone ever puts a wait inside the handler or its reply.
 func TestPQCFloodDoesNotStallQKDPath(t *testing.T) {
 	var handled atomic.Int64
 	p := startTestServer(t, func(frame []byte, reply func([]byte) error) error {
@@ -144,9 +133,6 @@ func TestPQCFloodDoesNotStallQKDPath(t *testing.T) {
 	}
 }
 
-// TestPQCReplyReachesTheSender asserts the reply path: the responder answers on
-// the listening socket, back to the source address, which is what lets the
-// initiator's dialled socket read the reply synchronously.
 func TestPQCReplyReachesTheSender(t *testing.T) {
 	p := startTestServer(t, func(frame []byte, reply func([]byte) error) error {
 		return reply(append([]byte("echo:"), frame...))
@@ -162,8 +148,6 @@ func TestPQCReplyReachesTheSender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no reply from the PQC handler: %v", err)
 	}
-	// The reply is signed with the server's outbound label, which is the
-	// peer's inbound one.
 	pkt, err := auth.UnmarshalPacket(p.psk, buf[:n], p.peerIn)
 	if err != nil {
 		t.Fatalf("reply failed verification: %v", err)
@@ -180,8 +164,6 @@ func TestPQCReplyReachesTheSender(t *testing.T) {
 	}
 }
 
-// TestPQCPacketDroppedWithoutHandler asserts a binary with PQC disabled stays
-// dark on PQC traffic rather than answering it.
 func TestPQCPacketDroppedWithoutHandler(t *testing.T) {
 	p := startTestServer(t, nil)
 
@@ -196,8 +178,6 @@ func TestPQCPacketDroppedWithoutHandler(t *testing.T) {
 	}
 }
 
-// TestUnknownPacketTypeIsDroppedSilently asserts an unknown type produces no
-// reply and no delivery.
 func TestUnknownPacketTypeIsDroppedSilently(t *testing.T) {
 	p := startTestServer(t, func([]byte, func([]byte) error) error { return nil })
 
@@ -221,12 +201,8 @@ func TestUnknownPacketTypeIsDroppedSilently(t *testing.T) {
 	}
 }
 
-// TestBlockedQKDWorkerDoesNotStallPQCPath covers AC-2.1: with the QKD worker
-// stuck in a KMS request the queue fills, and the read loop must keep servicing
-// PQC frames on the same socket. Before the bounded queue the read loop blocked
-// on the unbuffered hand-off and no PQC frame was seen for the duration of the
-// outage, which is longer than any PQC round timeout.
 func TestBlockedQKDWorkerDoesNotStallPQCPath(t *testing.T) {
+	const queueDepth = 2
 	pqcSeen := make(chan struct{}, 1)
 	p := startTestServerQueue(t, func([]byte, func([]byte) error) error {
 		select {
@@ -234,11 +210,9 @@ func TestBlockedQKDWorkerDoesNotStallPQCPath(t *testing.T) {
 		default:
 		}
 		return nil
-	}, 2)
+	}, queueDepth)
 
-	// Nothing drains p.result: that is a worker blocked in a KMS request. Send
-	// more identifiers than the queue holds so the read loop meets a full one.
-	for i := 0; i < 5; i++ {
+	for i := 0; i < queueDepth+3; i++ {
 		p.send(auth.PacketData, []byte(fmt.Sprintf("key-id-%d", i)))
 	}
 	p.send(auth.PacketPQC, []byte("pqc frame"))
@@ -453,8 +427,6 @@ func TestSendKeyIDWaitsForASlowInstallWithoutReinstalling(t *testing.T) {
 	}
 }
 
-// TestRunQKDWorkerProcessesInReceiveOrder covers AC-2.3. A pool of workers
-// would install PSKs in the reverse of the order the peer sent the identifiers.
 func TestRunQKDWorkerProcessesInReceiveOrder(t *testing.T) {
 	const n = 32
 	queue := make(chan KeyIDRequest, n)
@@ -483,8 +455,6 @@ func TestRunQKDWorkerProcessesInReceiveOrder(t *testing.T) {
 	}
 }
 
-// TestRunQKDWorkerStopsOnShutdown covers AC-2.4: the worker must not outlive
-// the server that feeds it, whether the queue is empty, full, or being served.
 func TestRunQKDWorkerStopsOnShutdown(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -515,8 +485,6 @@ func TestRunQKDWorkerStopsOnShutdown(t *testing.T) {
 	}
 }
 
-// TestLogThrottle asserts the packet-path warnings cannot become a logging
-// denial of service, and that the zero value stays permissive.
 func TestLogThrottle(t *testing.T) {
 	tr := logThrottle{interval: time.Hour}
 	if !tr.allow() {

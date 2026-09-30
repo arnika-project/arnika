@@ -49,14 +49,13 @@ runs Arnika — the classic deployment described in
 
 ## How the Module Works
 
-Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK,
-base64-encodes it, and hands it to `KeyWriterService.SetPSK`. This module turns
-that call into a local netlink transaction — no sockets, no remote party, no
-TLS.
+Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK and
+passes its raw bytes to `KeyWriterService.SetPSK`. This module turns that call
+into a local netlink transaction — no sockets, no remote party, no TLS.
 
 ```mermaid
 flowchart LR
-    A["Arnika<br/>KeyWriterService"] -->|SetPSK base64| R["WireguardNetlink<br/>Repository"]
+    A["Arnika<br/>KeyWriterService"] -->|SetPSK raw 32-byte PSK| R["WireguardNetlink<br/>Repository"]
     R -->|"Device(iface)"| K["kernel<br/>wireguard module"]
     R -->|"ConfigureDevice<br/>UpdateOnly=true"| K
     K --> W["wg peer<br/>preshared-key"]
@@ -68,8 +67,8 @@ Each `SetPSK` call:
    proves the interface exists.
 2. Scans the device's peers for the configured public key, reporting absence
    only after the whole list has been checked.
-3. Parses both the PSK and the peer public key into `wgtypes.Key` values,
-   which enforces "32 bytes, base64".
+3. Validates the raw PSK as a 32-byte `wgtypes.Key` and parses the configured
+   peer public key from its base64 representation.
 4. Calls `ConfigureDevice` with a single `PeerConfig` carrying
    **`UpdateOnly: true`** and the new `PresharedKey`.
 
@@ -77,9 +76,10 @@ Each `SetPSK` call:
 existing peer only** and never create one. A peer that is not already
 configured is silently left alone rather than added.
 
-`InvalidateTunnel` — the fail-safe used when no valid key material is available
-— generates a fresh key with `wgtypes.GenerateKey()` and installs it through
-the same path, so the session stops matching and traffic stops.
+When no valid key material is available, `KeyWriterService.InvalidateTunnel`
+generates a fresh random 32-byte PSK and sends it through `SetPSK`. The adapter
+installs it through the same path, so the session stops matching and traffic
+stops.
 
 ---
 
@@ -90,7 +90,7 @@ Two files, following the layout in
 
 ### The adapter — `repositories/wgnetlink/netlink.go`
 
-Implements the `keyWriterRepository` contract (`SetPSK`, `InvalidateTunnel`).
+Implements the `keyWriterRepository` contract (`SetPSK` with raw key bytes).
 It carries **no build tag**, so it compiles and lints on every build regardless
 of which writer the binary ships.
 
@@ -110,9 +110,9 @@ Two points distinguish it from the MikroTik adapter:
    configure — no TLS, no timeouts, no credentials — so there is nothing for a
    caller to supply. This is also why the constructor returns `(repo, error)`
    while the MikroTik one cannot fail.
-2. **Key material is handled as `wgtypes.Key`.** `wgtypes.ParseKey` rejects
-   anything that is not 32 bytes of valid base64, so malformed PSKs fail before
-   reaching the kernel.
+2. **Key material is handled as `wgtypes.Key`.** `wgtypes.NewKey` rejects raw
+   PSKs that are not exactly 32 bytes, while `wgtypes.ParseKey` parses the
+   configured peer public key from base64.
 
 ### The wiring — `wire_wireguard_netlink.go`
 

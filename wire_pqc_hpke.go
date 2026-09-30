@@ -1,7 +1,3 @@
-// Wiring for the pqc-hpke key reader (PQC, unmanaged). The only PQC backend, so
-// it carries no build tag yet: a second one gets its own file plus the family
-// constraint `pqc_hpke || !pqc_<other>` here. See KEYCONTROL.md.
-
 package main
 
 import (
@@ -19,15 +15,7 @@ import (
 	"github.com/arnika-project/arnika/transport"
 )
 
-// pqcDial opens the initiator's request/response channel to the peer: a
-// connected UDP socket, the same shape udpClient uses for the QKD key id. The
-// peer answers the source address, so the reply arrives here rather than on the
-// listening socket, which is what keeps the exchange synchronous.
-//
-// The destination is pinned to SERVER_ADDRESS and never taken from an observed
-// source address, so this cannot be used as a reflection primitive. The socket
-// is dialled, not bound: it takes an ephemeral source port and adds no
-// listener, leaving LISTEN_ADDRESS the only one Arnika serves.
+// pqcDial gives the initiator its own socket connected to SERVER_ADDRESS, so the responder's reply arrives here and not on the listener.
 func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 	send func(frame []byte) error,
 	recv func(deadline time.Time) ([]byte, error),
@@ -60,10 +48,6 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 		return nil
 	}
 
-	// The same checks the UDP server applies, minus the rate limit: a connected
-	// socket already drops anything not coming from SERVER_ADDRESS. Rejected
-	// datagrams are skipped rather than returned, so a peer spraying junk costs
-	// a loop iteration and not the round; the read deadline bounds the loop.
 	buf := make([]byte, 2048)
 	recv = func(deadline time.Time) ([]byte, error) {
 		for {
@@ -91,11 +75,6 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 	return send, recv, nil
 }
 
-// getPQCService wires the pqc-hpke key reader. It returns the reader service
-// used by setPSK, the round driver main.go runs in its own goroutine, and the
-// responder handler the UDP server calls for inbound PQC frames. The last two
-// are returned as functions, not as the concrete repository, so that a second
-// PQC backend can be wired behind its own build tag without touching main.go.
 func getPQCService(cfg *config.Config, logger *slog.Logger, dirOut, dirIn auth.Direction) (
 	*services.KeyReaderService, func(context.Context), transport.PQCHandler, error,
 ) {
@@ -104,9 +83,6 @@ func getPQCService(cfg *config.Config, logger *slog.Logger, dirOut, dirIn auth.D
 		return nil, nil, nil, err
 	}
 
-	// Both peers derive this from the same PSK and the same clock-derived round
-	// index, using the same derivation that decides PRIMARY/BACKUP for an
-	// interval, so exactly one of them initiates a given round.
 	isInitiator := func(round uint32) bool {
 		return cfg.IsPrimary(uint64(round))
 	}
@@ -122,16 +98,7 @@ func getPQCService(cfg *config.Config, logger *slog.Logger, dirOut, dirIn auth.D
 	return services.NewKeyReaderService(pqcReader{pqcRepo}), pqcRepo.Run, pqcRepo.HandleFrame, nil
 }
 
-// pqcReader adapts the pqc-hpke reader to the services.KeyReader port.
-//
-// The port carries a key identifier because a KMS-backed source needs one to
-// put both peers on the same key. This source needs none: both peers derive
-// the key from the agreement itself, so the identifier is always empty, and
-// saying that here keeps the adapter's own signature honest rather than making
-// it return an identifier it never has.
-//
-// It implements no GetKeyByID, which is exactly how services.KeyReaderService
-// learns that this source has nothing to resolve.
+// pqcReader lacks GetKeyByID on purpose: that is how services.KeyReaderService learns there is no key id to resolve.
 type pqcReader struct{ repo *pqchpke.Repository }
 
 func (r pqcReader) GetNewKey() (string, []byte, error) {

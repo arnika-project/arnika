@@ -9,7 +9,6 @@ import (
 	"github.com/arnika-project/arnika/config"
 )
 
-// budgetCfg is a configuration with only the fields the budget reads.
 func budgetCfg(interval, roundInterval, window time.Duration, pqc bool) *config.Config {
 	return &config.Config{
 		Interval:         interval,
@@ -19,15 +18,11 @@ func budgetCfg(interval, roundInterval, window time.Duration, pqc bool) *config.
 	}
 }
 
-// TestRateBudget pins the arithmetic for the cases §9 names: PQC enabled and
-// disabled, the default and the five-second interval, a non-default rate
-// window, the immediate startup round, and every declared retry.
 func TestRateBudget(t *testing.T) {
-	// Spelled out rather than derived from the same helper the code uses, so a
-	// change to eventsIn cannot silently move the expectation with it.
 	const (
-		qkdPerInterval = 3 // udpClientMaxAttempts
-		pqcPerRound    = 7 // 2 pubkey frames x 3 attempts + 1 tag frame
+		attempts, pubKeyFrames, tagFrames = 3, 2, 1
+		qkdPerInterval                    = attempts
+		pqcPerRound                       = pubKeyFrames*attempts + tagFrames
 	)
 	cases := []struct {
 		name                    string
@@ -35,19 +30,12 @@ func TestRateBudget(t *testing.T) {
 		pqc                     bool
 		qkdEvents, pqcEvents    int
 	}{
-		// 1m/10s -> 7 intervals, 7 rounds + 1 startup round.
 		{"defaults", 10 * time.Second, 10 * time.Second, time.Minute, true, 7, 8},
-		// AC-3.1: 1m/5s -> 13 intervals, 13 rounds + 1 startup round.
 		{"five second interval", 5 * time.Second, 5 * time.Second, time.Minute, true, 13, 14},
-		// AC-3.3: no PQC term at all.
 		{"pqc disabled", 5 * time.Second, 5 * time.Second, time.Minute, false, 13, 0},
-		// Independent cadences: the PRD's INTERVAL=10s, PQC_ROUND_INTERVAL=120s.
 		{"independent cadences", 10 * time.Second, 120 * time.Second, time.Minute, true, 7, 2},
-		// A non-default window scales both terms.
 		{"ten second window", 5 * time.Second, 5 * time.Second, 10 * time.Second, true, 3, 4},
-		// Sub-second rounds are floored to one per second by the scheduler, so
-		// the PQC term must not grow past 60 rounds in a minute.
-		{"sub second round interval", 10 * time.Second, 500 * time.Millisecond, time.Minute, true, 7, 62},
+		{"sub second round interval floors to one round per second", 10 * time.Second, 500 * time.Millisecond, time.Minute, true, 7, 62},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,11 +47,7 @@ func TestRateBudget(t *testing.T) {
 	}
 }
 
-// TestRateBudgetAdmitsMaximumLegitimateTraffic covers AC-3.1 against the real
-// limiter: the derived default must pass every packet of the worst legitimate
-// inbound sequence at a five-second interval, retries and startup round
-// included, and only then start rejecting.
-func TestRateBudgetAdmitsMaximumLegitimateTraffic(t *testing.T) {
+func TestRateBudgetAdmitsMaximumLegitimateTrafficAndNoMore(t *testing.T) {
 	cfg := budgetCfg(5*time.Second, 5*time.Second, time.Minute, true)
 	limit := RateBudget(cfg)
 
@@ -73,14 +57,11 @@ func TestRateBudgetAdmitsMaximumLegitimateTraffic(t *testing.T) {
 			t.Fatalf("legitimate packet %d of %d was rate limited", i+1, limit)
 		}
 	}
-	// FR-3.9: a protocol-aware budget must still be a budget.
 	if limiter.Allow("10.0.0.1") {
 		t.Fatal("the limiter admitted more than the calculated budget")
 	}
 }
 
-// TestRateLimitIsPerSourceIP covers AC-3.2: exhausting one source's budget must
-// not touch another's.
 func TestRateLimitIsPerSourceIP(t *testing.T) {
 	limiter := newRateLimiter(3, time.Minute)
 	for i := 0; i < 3; i++ {
@@ -98,9 +79,6 @@ func TestRateLimitIsPerSourceIP(t *testing.T) {
 	}
 }
 
-// TestEffectiveRateLimit covers FR-3.5, FR-3.6 and AC-3.4: unset takes the
-// budget, an explicit value stays an override, and one below the budget carries
-// a warning naming both numbers and the cadences behind them.
 func TestEffectiveRateLimit(t *testing.T) {
 	cfg := budgetCfg(5*time.Second, 5*time.Second, time.Minute, true)
 	budget := RateBudget(cfg)

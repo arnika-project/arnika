@@ -3,18 +3,11 @@ set -e
 
 echo "====== Arnika CI Integration Test - Key Verification ======"
 
-# Function to extract PSK from WireGuard interface
 get_psk() {
     local node=$1
     docker exec clab-arnika-ci-test-${node} wg show wg0 preshared-keys | awk '{print $2}'
 }
 
-# Poll until both nodes report the same non-empty PSK, instead of sleeping for
-# the worst case. The rotation interval is 5 s, so a healthy pair converges in
-# well under 15 s; polling also covers the case where the two sequential
-# docker-exec calls straddle a rotation boundary (a single mismatched snapshot
-# is not a real failure). On timeout we fall through to the checks below, which
-# report exactly what was wrong - the assertions are unchanged.
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-90}"
 POLL_INTERVAL=2
 DEADLINE=$((SECONDS + VERIFY_TIMEOUT))
@@ -60,11 +53,9 @@ if [ "$PSK_A" = "$PSK_B" ]; then
     echo "✅ SUCCESS: Both nodes have the same PSK!"
     echo "PSK: ${PSK_A}"
 
-    # Additional checks
     echo ""
     echo "====== Additional Checks ======"
 
-    # Check if nodes can ping each other over WireGuard
     echo "Testing connectivity between nodes..."
     if docker exec clab-arnika-ci-test-node-a ping -c 3 -W 2 172.16.0.2 > /dev/null 2>&1; then
         echo "✅ Node-A can ping Node-B through WireGuard tunnel"
@@ -72,15 +63,6 @@ if [ "$PSK_A" = "$PSK_B" ]; then
         echo "⚠️  WARNING: Node-A cannot ping Node-B (may need more time)"
     fi
 
-    # The transport must carry a healthy pair without the flood protections
-    # firing. At INTERVAL=5s the derived RATE_LIMIT is well above what two
-    # peers exchange, so any rejection here is legitimate traffic being
-    # dropped; likewise a full QKD queue means the read loop had to refuse a
-    # key_id the peer had to retry.
-    #
-    # "key stale" and not every PQC retrieval failure: "no key agreed yet" is
-    # the expected state before the first round completes, while a stale key is
-    # a tunnel invalidated because of key age, which is what must not happen.
     echo ""
     echo "====== Transport Health ======"
     FAILURES=0
@@ -98,7 +80,6 @@ if [ "$PSK_A" = "$PSK_B" ]; then
         done
     done
 
-    # Check Arnika logs
     echo ""
     echo "Node-A Arnika logs (last 40 lines):"
     docker exec clab-arnika-ci-test-node-a tail -n 40 /tmp/arnika.log || echo "No logs available"

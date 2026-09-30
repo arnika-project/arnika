@@ -12,9 +12,7 @@ import (
 	"time"
 )
 
-// minArnikaPSKLen is the minimum accepted length of ARNIKA_PSK. The
-// ~128-bit post-Grover authentication claim assumes 256 bits of real
-// entropy, which a human-chosen passphrase does not provide.
+// minArnikaPSKLen is 256 bits, the entropy the ~128-bit post-Grover authentication claim assumes.
 const minArnikaPSKLen = 32
 
 // Config contains the configuration values for the arnika service.
@@ -45,7 +43,6 @@ type Config struct {
 	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
 }
 
-// UsePQC reports whether the PQC key agreement is enabled.
 func (c *Config) UsePQC() bool {
 	return c.PQCEnabled
 }
@@ -54,21 +51,6 @@ func (c *Config) IsPQCRequired() bool {
 	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastPqcRequired"
 }
 
-// ValidateKeySources rejects a configuration the compiled-in key readers
-// cannot serve. Readers are selected by build tag (see KEYCONTROL.md), so a
-// binary can lack the reader a MODE demands; catching that here keeps the
-// failure at startup instead of at the first rotation, where it would only
-// invalidate the tunnel.
-//
-// Parameters:
-//   - qkdCompiled: the wiring constant of the QKD family, true unless the
-//     binary was built with qkd_none. Callers pass the constant, never a
-//     configuration value.
-//
-// Returns nil if this binary can serve cfg. Returns an error if KMS_URL is
-// missing while a QKD reader is compiled in, if KMS_URL is set while it is
-// not, or if MODE or PQC_ENABLED name key material this binary cannot produce.
-// Call it directly after Parse, before any key is due.
 func (c *Config) ValidateKeySources(qkdCompiled bool) error {
 	if qkdCompiled && c.KMSURL == "" {
 		return fmt.Errorf("[ERROR] KMS_URL is not set")
@@ -77,10 +59,7 @@ func (c *Config) ValidateKeySources(qkdCompiled bool) error {
 		if c.KMSURL != "" {
 			return fmt.Errorf("[ERROR] KMS_URL is set but this binary was built without a QKD key reader (build tag qkd_none)")
 		}
-		// Only AtLeastPqcRequired is servable: a QKD-requiring mode fails every
-		// interval, and EitherQkdOrPqcRequired would permit running with no key
-		// material at all. Both only ever invalidate the tunnel.
-		if c.IsQKDRequired() || !c.IsPQCRequired() {
+		if c.IsQKDRequired() || !c.IsPQCRequired() { // EitherQkdOrPqcRequired would allow running with no key material
 			return fmt.Errorf("[ERROR] this binary was built without a QKD key reader (build tag qkd_none), which requires MODE=AtLeastPqcRequired, got %s", c.Mode)
 		}
 		if !c.UsePQC() {
@@ -94,11 +73,7 @@ func (c *Config) IsQKDRequired() bool {
 	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastQkdRequired"
 }
 
-// IsPrimary computes a deterministic role for the current interval using
-// HMAC-SHA256(ArnikaPSK, intervalNum). The first byte of the hash is XORed
-// with ArnikaID (parsed as int, truncated to uint8). The node whose result
-// has the lowest bit == 0 is PRIMARY for that interval. Because two peers
-// with different ArnikaIDs XOR different values, they get opposite results.
+// IsPrimary gives peers opposite roles per interval only if their ARNIKA_IDs differ in parity.
 func (c *Config) IsPrimary(intervalNum uint64) bool {
 	mac := hmac.New(sha256.New, c.ArnikaPSK)
 	var buf [8]byte
@@ -106,7 +81,7 @@ func (c *Config) IsPrimary(intervalNum uint64) bool {
 	mac.Write(buf[:])
 	h := mac.Sum(nil)
 
-	id, _ := strconv.Atoi(c.ArnikaID) // always valid, checked during Parse
+	id, _ := strconv.Atoi(c.ArnikaID)
 	xored := h[0] ^ byte(id)
 	return xored&1 == 0
 }
@@ -163,8 +138,6 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Println("============================")
 }
 
-// redactSecret keeps secret material out of the startup config dump, which is
-// written to stdout and from there into journals and log aggregation.
 func redactSecret(b []byte) string {
 	if len(b) == 0 {
 		return "(unset)"
@@ -172,19 +145,11 @@ func redactSecret(b []byte) string {
 	return fmt.Sprintf("(set, %d bytes)", len(b))
 }
 
-// ZeroSecrets wipes the secret material held on the Config.
-//
-// ArnikaPSK is a []byte and not a string precisely so that this is possible:
-// Go strings are immutable, so a secret held as one stays in the heap for the
-// process lifetime with no way to overwrite it.
+// ZeroSecrets wipes ArnikaPSK, which is a []byte because a string could never be overwritten.
 func (c *Config) ZeroSecrets() {
 	clear(c.ArnikaPSK)
 }
 
-// Parse parses the configuration values from environment variables and returns a Config pointer.
-//
-// No parameters.
-// Returns a pointer to a Config struct and an error.
 func Parse() (*Config, error) {
 	config := &Config{}
 	var err error
@@ -196,10 +161,8 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Parse ArnikaID from environment or extract port from ListenAddress
 	arnikaIDEnv := os.Getenv("ARNIKA_ID")
 	if arnikaIDEnv != "" {
-		// Validate that it's a number with less than 6 digits
 		if len(arnikaIDEnv) > 5 {
 			return nil, fmt.Errorf("[ERROR] ARNIKA_ID must be smaller than 6 digits, got: %s", arnikaIDEnv)
 		}
@@ -208,7 +171,6 @@ func Parse() (*Config, error) {
 		}
 		config.ArnikaID = arnikaIDEnv
 	} else {
-		// Extract port from ListenAddress as default
 		_, port, err := net.SplitHostPort(config.ListenAddress)
 		if err != nil {
 			return nil, fmt.Errorf("[ERROR] failed to extract port from LISTEN_ADDRESS: %w", err)
@@ -237,18 +199,12 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// PQC key material is now agreed with the peer over HPKE and never touches
-	// disk, so there is no file path and no permission check.
 	config.PQCEnabled = getEnvOrDefault("PQC_ENABLED", "true") == "true"
 	config.PQCRoundInterval, err = time.ParseDuration(getEnvOrDefault("PQC_ROUND_INTERVAL", config.Interval.String()))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse PQC_ROUND_INTERVAL: %w", err)
 	}
-	// Derived from PQC_ROUND_INTERVAL, not INTERVAL: the key ages against the
-	// PQC round cadence, so deriving it from the QKD interval made a key stale
-	// for most of every healthy round whenever an operator overrode only
-	// PQC_ROUND_INTERVAL. Two rounds is one round of loss tolerance.
-	config.PQCMaxKeyAge, err = time.ParseDuration(getEnvOrDefault("PQC_MAX_KEY_AGE", (2 * config.PQCRoundInterval).String()))
+	config.PQCMaxKeyAge, err = time.ParseDuration(getEnvOrDefault("PQC_MAX_KEY_AGE", (2 * config.PQCRoundInterval).String())) // two rounds tolerate one lost round
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse PQC_MAX_KEY_AGE: %w", err)
 	}
@@ -260,7 +216,6 @@ func Parse() (*Config, error) {
 		if config.PQCRoundInterval <= 0 {
 			return nil, fmt.Errorf("[ERROR] PQC_ROUND_INTERVAL must be positive, got %s", config.PQCRoundInterval)
 		}
-		// A round that outlives its interval would overlap the next one.
 		if config.PQCRoundTimeout <= 0 || config.PQCRoundTimeout >= config.PQCRoundInterval {
 			return nil, fmt.Errorf("[ERROR] PQC_ROUND_TIMEOUT (%s) must be positive and shorter than PQC_ROUND_INTERVAL (%s)",
 				config.PQCRoundTimeout, config.PQCRoundInterval)
@@ -268,10 +223,6 @@ func Parse() (*Config, error) {
 		if config.PQCMaxKeyAge <= 0 {
 			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE must be positive, got %s", config.PQCMaxKeyAge)
 		}
-		// A key that goes stale within its own round interval is stale for part
-		// of every healthy round, and in a PQC-requiring mode each rotation in
-		// that window invalidates the tunnel. Reject it rather than let it
-		// surface as intermittent handshake failures.
 		if config.PQCMaxKeyAge <= config.PQCRoundInterval {
 			return nil, fmt.Errorf("[ERROR] PQC_MAX_KEY_AGE (%s) must be longer than PQC_ROUND_INTERVAL (%s)",
 				config.PQCMaxKeyAge, config.PQCRoundInterval)
@@ -297,14 +248,6 @@ func Parse() (*Config, error) {
 	if !config.UsePQC() && config.IsPQCRequired() {
 		return nil, fmt.Errorf("[ERROR] PQC_ENABLED is false but MODE is %s, which requires a PQC key", config.Mode)
 	}
-	// ARNIKA_PSK is the sole authentication root for the peer protocol: an
-	// unset value makes the HMAC key SHA-256(""), a publicly computable
-	// constant, and anyone can then inject valid packets.
-	//
-	// Held as []byte, not string: every consumer needs bytes, so a string field
-	// would mean a fresh, unclearable heap copy of the authentication root on
-	// every interval and every PQC round. One conversion here, cleared by
-	// ZeroSecrets, replaces all of them.
 	config.ArnikaPSK = []byte(getEnvOrDefault("ARNIKA_PSK", ""))
 	if len(config.ArnikaPSK) == 0 {
 		return nil, fmt.Errorf("[ERROR] ARNIKA_PSK is not set; refusing to start")
@@ -318,11 +261,6 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse ARNIKA_PEER_TIMEOUT: %w", err)
 	}
-	// Left at zero when unset, meaning "size it from the protocol". Only the
-	// caller can do that: the frame and retry counts that decide how much
-	// traffic one healthy round produces live in the transport, not here. A
-	// static default was below what a five-second interval legitimately
-	// generates, so the limiter rejected valid frames.
 	if v := os.Getenv("RATE_LIMIT"); v != "" {
 		config.RateLimit, err = strconv.Atoi(v)
 		if err != nil {
@@ -337,7 +275,6 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse RATE_WINDOW: %w", err)
 	}
-	// Parse max clock skew config
 	maxClockSkewStr := getEnvOrDefault("MAX_CLOCK_SKEW", "1m")
 	maxClockSkew, err := time.ParseDuration(maxClockSkewStr)
 	if err != nil {
@@ -347,17 +284,6 @@ func Parse() (*Config, error) {
 	return config, nil
 }
 
-// GetEnvOrDefault returns the value of the environment variable named by the key.
-// If the variable is not present, returns defaultValue without checking
-// the rest of the environment
-//
-// Parameters:
-// - key: the name of the environment variable to retrieve the value from.
-// - defaultValue: the default value to return if the environment variable is not present.
-//
-// Return type:
-// - string: the value of the environment variable, or the default value if the
-// environment variable is not present.
 func getEnvOrDefault(key, defaultValue string) string {
 	v := os.Getenv(key)
 	if v == "" {
@@ -366,14 +292,6 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return v
 }
 
-// getEnv retrieves the value of the environment variable named by the key
-//
-// Parameters:
-// - key: the name of the environment variable to retrieve the value from.
-//
-// Return type:
-// - string: the value of the environment variable.
-// - error: an error if the environment variable is not present.
 func getEnv(key string) (string, error) {
 	v := os.Getenv(key)
 	if v == "" {

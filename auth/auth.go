@@ -1,5 +1,4 @@
-// Package auth provides the security-hardened UDP protocol implementation
-// including packet signing, encryption, and replay protection.
+// Package auth signs, encrypts and replay-checks Arnika's UDP peer packets.
 package auth
 
 import (
@@ -10,41 +9,31 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"io"
 	"runtime/secret"
 	"time"
 )
 
-// PacketType identifies the message type in the security-hardened UDP protocol.
+var errAuth = errors.New("authentication failed") // one error for every failure so the cause never leaks
+
 type PacketType byte
 
 const (
-	PacketData PacketType = 'D' // Client sends encrypted data (signed + AES-GCM encrypted payload)
-	PacketAck  PacketType = 'A' // Server confirms it installed the key ID it carries
-	PacketPQC  PacketType = 'Q' // PQC key agreement traffic; the frame kind lives inside the payload
+	PacketData PacketType = 'D'
+	PacketAck  PacketType = 'A'
+	PacketPQC  PacketType = 'Q' // the PQC frame kind lives inside the payload
 )
 
-// Direction identifies which of the two peers produced a packet.
-//
-// signedPayload covers type, timestamp and payload only, so with a single HMAC
-// key a packet sent A->B verifies unchanged if it is reflected back to A.
-// Deriving a separate key per direction makes a reflected packet fail at its
-// own sender.
+// Direction keys the HMAC per sending peer, so a packet reflected back to its sender fails verification.
 type Direction string
 
 const (
-	DirEven Direction = "even" // sender's ARNIKA_ID is even
-	DirOdd  Direction = "odd"  // sender's ARNIKA_ID is odd
+	DirEven Direction = "even"
+	DirOdd  Direction = "odd"
 )
 
-// DirectionFor returns the label a node signs with and the label it must verify
-// its peer's packets against.
-//
-// The two peers' ARNIKA_ID values are required to differ in parity - only the
-// lowest bit takes part in PRIMARY/BACKUP election, so same-parity IDs already
-// break role alternation - which makes parity a locally computable, stable
-// direction label needing no extra configuration and no extra round trip.
+// DirectionFor labels by ARNIKA_ID parity, which the two peers are required to differ in.
 func DirectionFor(arnikaID int) (out, in Direction) {
 	if arnikaID%2 == 0 {
 		return DirEven, DirOdd
@@ -52,33 +41,23 @@ func DirectionFor(arnikaID int) (out, in Direction) {
 	return DirOdd, DirEven
 }
 
-// Packet represents a security-hardened UDP message with HMAC authentication
-// and timestamp for replay protection.
 type Packet struct {
 	Type      PacketType
-	Timestamp int64  // Unix timestamp for replay protection
-	Payload   []byte // Encrypted data (AES-GCM) or nil
-	Signature []byte // HMAC-SHA256 over all preceding fields (32 bytes)
+	Timestamp int64
+	Payload   []byte
+	Signature []byte
 }
 
-// deriveKey derives a 32-byte AES-256 key from the PSK.
 func deriveKey(psk []byte) []byte {
-	// sha256 is fine since its only about Proof of Possession
 	hash := sha256.Sum256(psk)
 	return hash[:]
 }
 
-// deriveHMACKey derives a separate key for HMAC operations.
-// Uses domain separation ("hmac-key:" prefix) to prevent key reuse with AES,
-// and a direction label so the two directions never share a key.
 func deriveHMACKey(psk []byte, dir Direction) []byte {
 	hash := sha256.Sum256(append([]byte("hmac-key:"+string(dir)+":"), psk...))
 	return hash[:]
 }
 
-// Sign computes HMAC-SHA256 over the given data using the PSK and the given
-// direction label. Callers sign with their outbound direction.
-// Uses runtime/secret.Do to ensure sensitive key material is zeroed after use.
 func Sign(psk, data []byte, dir Direction) []byte {
 	result := make([]byte, sha256.Size)
 	secret.Do(func() {
@@ -90,17 +69,11 @@ func Sign(psk, data []byte, dir Direction) []byte {
 	return result
 }
 
-// Verify checks an HMAC-SHA256 signature using constant-time comparison.
-// Returns true if the signature is valid, false otherwise.
-// Callers verify with the direction they expect their peer to have signed with.
-// Timing is identical regardless of where the mismatch occurs.
 func Verify(psk, data, signature []byte, dir Direction) bool {
 	expected := Sign(psk, data, dir)
 	return subtle.ConstantTimeCompare(expected, signature) == 1
 }
 
-// Encrypt encrypts data using AES-256-GCM with the given PSK.
-// Uses runtime/secret.Do to ensure derived key material is zeroed.
 func Encrypt(psk, plaintext []byte) ([]byte, error) {
 	var result []byte
 	var encErr error
@@ -128,9 +101,6 @@ func Encrypt(psk, plaintext []byte) ([]byte, error) {
 	return result, encErr
 }
 
-// Decrypt decrypts data using AES-256-GCM with the given PSK.
-// Uses runtime/secret.Do to ensure derived key material is zeroed.
-// Returns a uniform error message regardless of failure reason (side-channel resistant).
 func Decrypt(psk, ciphertext []byte) ([]byte, error) {
 	var result []byte
 	var decErr error
@@ -138,24 +108,24 @@ func Decrypt(psk, ciphertext []byte) ([]byte, error) {
 		key := deriveKey(psk)
 		block, err := aes.NewCipher(key)
 		if err != nil {
-			decErr = fmt.Errorf("authentication failed")
+			decErr = errAuth
 			return
 		}
 		gcm, err := cipher.NewGCM(block)
 		if err != nil {
-			decErr = fmt.Errorf("authentication failed")
+			decErr = errAuth
 			return
 		}
 		nonceSize := gcm.NonceSize()
 		if len(ciphertext) < nonceSize {
-			decErr = fmt.Errorf("authentication failed")
+			decErr = errAuth
 			return
 		}
 		nonce := ciphertext[:nonceSize]
 		enc := ciphertext[nonceSize:]
 		plain, err := gcm.Open(nil, nonce, enc, nil)
 		if err != nil {
-			decErr = fmt.Errorf("authentication failed")
+			decErr = errAuth
 			return
 		}
 		result = make([]byte, len(plain))
@@ -164,9 +134,6 @@ func Decrypt(psk, ciphertext []byte) ([]byte, error) {
 	return result, decErr
 }
 
-// WithinSkew reports whether a packet timestamp is close enough to now to be
-// accepted. Replay protection, applied identically to every packet type and
-// both directions, so it lives next to the packet rather than at each caller.
 func WithinSkew(ts int64, max time.Duration) bool {
 	diff := time.Now().Unix() - ts
 	if diff < 0 {
@@ -175,7 +142,6 @@ func WithinSkew(ts int64, max time.Duration) bool {
 	return diff <= int64(max.Seconds())
 }
 
-// signedPayload returns the bytes covered by the HMAC signature.
 func (p *Packet) signedPayload() []byte {
 	buf := make([]byte, 0, 1+8+len(p.Payload))
 	buf = append(buf, byte(p.Type))
@@ -186,8 +152,6 @@ func (p *Packet) signedPayload() []byte {
 	return buf
 }
 
-// Marshal encodes a Packet to bytes and signs it with the PSK.
-// Wire format: [type(1)][timestamp(8)][payload_len(2)][payload(N)][signature(32)]
 func (p *Packet) Marshal(psk []byte, dir Direction) []byte {
 	p.Signature = Sign(psk, p.signedPayload(), dir)
 
@@ -204,12 +168,9 @@ func (p *Packet) Marshal(psk []byte, dir Direction) []byte {
 	return buf
 }
 
-// UnmarshalPacket decodes bytes into a Packet and verifies the HMAC signature.
-// Returns a uniform error message regardless of failure reason (side-channel resistant).
 func UnmarshalPacket(psk, data []byte, dir Direction) (*Packet, error) {
-	// Minimum: type(1) + timestamp(8) + payload_len(2) + signature(32) = 43
-	if len(data) < 43 {
-		return nil, fmt.Errorf("authentication failed")
+	if len(data) < 1+8+2+32 {
+		return nil, errAuth
 	}
 
 	p := &Packet{}
@@ -218,7 +179,7 @@ func UnmarshalPacket(psk, data []byte, dir Direction) (*Packet, error) {
 
 	payloadLen := int(binary.BigEndian.Uint16(data[9:11]))
 	if len(data) < 11+payloadLen+32 {
-		return nil, fmt.Errorf("authentication failed")
+		return nil, errAuth
 	}
 	if payloadLen > 0 {
 		p.Payload = make([]byte, payloadLen)
@@ -228,9 +189,8 @@ func UnmarshalPacket(psk, data []byte, dir Direction) (*Packet, error) {
 	p.Signature = make([]byte, 32)
 	copy(p.Signature, data[11+payloadLen:11+payloadLen+32])
 
-	// Verify signature using constant-time comparison
 	if !Verify(psk, p.signedPayload(), p.Signature, dir) {
-		return nil, fmt.Errorf("authentication failed")
+		return nil, errAuth
 	}
 
 	return p, nil

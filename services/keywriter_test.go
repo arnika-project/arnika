@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-// fakeWriter records what it was handed and reports the highest number of calls
-// that were ever inside SetPSK at the same time.
 type fakeWriter struct {
 	mu          sync.Mutex
 	writes      [][]byte

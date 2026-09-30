@@ -7,7 +7,6 @@ import (
 	"testing"
 )
 
-// managedReader issues identifiers and can resolve them, like the KMS reader.
 type managedReader struct{ id string }
 
 func (m managedReader) GetNewKey() (string, []byte, error) {
@@ -21,8 +20,6 @@ func (m managedReader) GetKeyByID(id string) ([]byte, error) {
 	return []byte("managed-key"), nil
 }
 
-// unmanagedReader issues no identifiers and implements no KeyResolver, like the
-// pqc-hpke reader.
 type unmanagedReader struct{}
 
 func (unmanagedReader) GetNewKey() (string, []byte, error) {
@@ -47,8 +44,7 @@ func TestGetNewKeyCarriesTheIdentifierWhenTheSourceIssuesOne(t *testing.T) {
 	}
 }
 
-// A source with nothing to resolve must report that, not panic and not pretend.
-func TestGetKeyByIDOnASourceWithoutIdentifiers(t *testing.T) {
+func TestGetKeyByIDOnASourceWithoutIdentifiersReturnsAnError(t *testing.T) {
 	got, err := NewKeyReaderService(unmanagedReader{}).GetKeyByID("abc")
 	if err == nil {
 		t.Fatalf("GetKeyByID returned %v, want an error", got)

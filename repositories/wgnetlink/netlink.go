@@ -1,5 +1,4 @@
-// Package wgnetlink writes the WireGuard PSK through netlink, optionally
-// inside a network namespace.
+// Package wgnetlink writes the WireGuard PSK through netlink, optionally inside a network namespace.
 package wgnetlink
 
 import (
@@ -28,17 +27,10 @@ func NewRepository(interfaceName, peerPublicKey string) (*Repository, error) {
 }
 
 func (r *Repository) SetPSK(psk []byte) error {
-	// Verify the specified interface exists
 	peers, err := r.conn.Device(r.InterfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to get device %s: %w", r.InterfaceName, err)
 	}
-	// verify that the peer public key exists.
-	//
-	// Scan for a match and report absence only after the whole list. The
-	// previous form returned on the first NON-match, so the check passed
-	// only when the interface had exactly one peer: a node with two
-	// neighbours failed on whichever peer was iterated first.
 	found := false
 	for _, peer := range peers.Peers {
 		if peer.PublicKey.String() == r.PeerPublicKey {
@@ -49,9 +41,6 @@ func (r *Repository) SetPSK(psk []byte) error {
 	if !found {
 		return fmt.Errorf("peer with public key %s not found on interface %s", r.PeerPublicKey, r.InterfaceName)
 	}
-	// NewKey and not ParseKey: netlink wants the 32 bytes, so a base64 round
-	// trip here would exist only to undo an encoding the caller should not have
-	// applied. NewKey rejects any length other than 32.
 	validPSK, err := wgtypes.NewKey(psk)
 	if err != nil {
 		return err
