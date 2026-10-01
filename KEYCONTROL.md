@@ -207,9 +207,9 @@ type KeyReaderManaged interface {
 ```
 
 Readers return **raw key bytes**, not base64. `KeyReaderService` wraps them
-into a [`services.Key`](services/key.go) and tags it managed or unmanaged; the base64
-encoding happens once, in `setPSK`, immediately before handing the PSK to the
-writer.
+into a [`services.Key`](services/key.go) and tags it managed or unmanaged. The PSK
+stays raw bytes all the way into the writer; only an adapter whose backend needs
+a string encodes it, at its own boundary.
 
 ### The reader families
 
@@ -278,7 +278,7 @@ at startup rather than at the first rotation.
 
 ### Adding a new key reader
 
-1. **Write the adapter** at `repositories/<module-name>.go` implementing either
+1. **Write the adapter** at `repositories/<pkg>/<name>.go` implementing either
    `KeyReaderManaged` or `KeyReaderUnmanaged`. Handle key material carefully:
    decode inside a `secret.Do(...)` block and `clear()` every intermediate
    buffer, as [`repositories/pqchpke/pqchpke.go`](repositories/pqchpke/pqchpke.go) does.
@@ -327,6 +327,7 @@ type keyWriterRepository interface {
 - `psk` contains the **32 raw key bytes**, not a base64-encoded string. Encode it
   at the adapter boundary only if the backend requires another representation,
   as the RouterOS REST adapter does.
+- Do not keep `psk` after `SetPSK` returns: the caller clears the buffer.
 - `SetPSK` must be **idempotent and re-resolving**. It is called on every
   rotation interval, so resolve the target peer on each call rather than
   caching a handle or an internal id that a backend restart may invalidate.
@@ -377,7 +378,7 @@ that must not survive a build.
 
 ### Adding a new key writer
 
-1. **Write the adapter** at `repositories/<module-name>.go` implementing
+1. **Write the adapter** at `repositories/<pkg>/<name>.go` implementing
    `SetPSK` as described above. `KeyWriterService` provides
    `InvalidateTunnel`; adapters do not implement it. Do **not** put a
    writer-selection tag on this file. Take the HTTP client (or equivalent
@@ -422,7 +423,7 @@ that must not survive a build.
    Dropping that leading clause silently disables the duplicate-symbol trap — see the
    warning under [The build-tag mechanism](#the-build-tag-mechanism).
 
-4. **Add tests** at `repositories/<module-name>_test.go`. For a network
+4. **Add tests** at `repositories/<pkg>/<name>_test.go`. For a network
    backend, stand up an `httptest.Server` that impersonates the remote API and
    assert on the requests the adapter makes — see
    [`repositories/wgmikrotik/mikrotik_test.go`](repositories/wgmikrotik/mikrotik_test.go)
@@ -523,7 +524,7 @@ backend-specific constraints, belong in `docs/<module-name>.md`.
 
 Before considering a module done:
 
-- [ ] Adapter at `repositories/<module-name>.go`, **without** a backend-selection tag
+- [ ] Adapter at `repositories/<pkg>/<name>.go`, **without** a backend-selection tag
 - [ ] Platform-bound backends: `//go:build linux` on the adapter *and* its test file,
       `wireguard_<tag> && linux` on the wiring, and a **Platform** row in
       `docs/<module-name>.md`
@@ -531,14 +532,14 @@ Before considering a module done:
 - [ ] Constructor takes all dependencies as arguments (no global state)
 - [ ] Key material cleared with `clear()` / handled inside `secret.Do(...)`
 - [ ] Writers: `SetPSK` re-resolves its target on every call
-- [ ] `KeyWriterService.InvalidateTunnel` installs a fresh random 32-byte PSK
+- [ ] Writers: only `SetPSK(psk []byte)` implemented, and `psk` not kept after it returns
 - [ ] Wiring file added, and its family's default constraint updated (`wire_wireguard_netlink.go`
       or `wire_qkd_kms.go`; `wire_pqc_hpke.go` gets its first constraint with a second PQC backend),
       keeping the leading `<tag> ||` clause
 - [ ] Readers that can be absent from a build: a `<port>Compiled` constant in the wiring
       file, and a `ValidateKeySources` case for the modes it cannot serve
 - [ ] Backend config read in the wiring file, not in `config.Config`
-- [ ] Tests at `repositories/<module-name>_test.go` pass under `go test ./...`
+- [ ] Tests at `repositories/<pkg>/<name>_test.go` pass under `go test ./...`
 - [ ] `go vet -tags <tag> ./...` and `go build -tags <tag> .` pass
 - [ ] Every `go` command above run with `GOEXPERIMENT=runtimesecret`
 - [ ] Building with two tags from the same family still fails with a duplicate symbol,

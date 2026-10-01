@@ -95,7 +95,7 @@ It carries **no build tag**, so it compiles and lints on every build regardless
 of which writer the binary ships.
 
 ```go
-type WireguardNetlinkRepository struct {
+type Repository struct {
     InterfaceName string
     PeerPublicKey string
     conn          *wgctrl.Client
@@ -105,7 +105,7 @@ type WireguardNetlinkRepository struct {
 Two points distinguish it from the MikroTik adapter:
 
 1. **The client is created in the constructor, not injected.**
-   `NewWireguardNetlinkRepository` calls `wgctrl.New()` itself and returns an
+   `NewRepository` calls `wgctrl.New()` itself and returns an
    error if the netlink connection cannot be opened. There is no transport to
    configure — no TLS, no timeouts, no credentials — so there is nothing for a
    caller to supply. This is also why the constructor returns `(repo, error)`
@@ -117,23 +117,24 @@ Two points distinguish it from the MikroTik adapter:
 ### The wiring — `wire_wireguard_netlink.go`
 
 ```go
-//go:build wireguard_netlink || !wireguard_mikrotik
+//go:build wireguard_netlink || (!wireguard_mikrotik && !wireguard_netlink_netns)
 ```
 
 That constraint is what makes netlink the **default**: the file is included
-unless `wireguard_mikrotik` is requested, and also when `wireguard_netlink` is
-named explicitly. The wiring itself is minimal — it reads nothing from the
-environment beyond the shared config, because this module has no
-backend-specific settings.
+unless another writer tag (`wireguard_mikrotik`, `wireguard_netlink_netns`) is
+requested, and also when `wireguard_netlink` is named explicitly. The wiring
+itself is minimal: it reads nothing from the environment beyond the shared
+config, because this module has no backend-specific settings.
 
-Because both this file and
-[`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go) define
-`getKeyWriterService`, asking for both tags at once is a compile error rather
-than a silent choice.
+Because this file,
+[`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go) and
+[`wire_wireguard_netlink_netns.go`](../wire_wireguard_netlink_netns.go) all define
+`getKeyWriterService`, asking for two writer tags at once is a compile error
+rather than a silent choice.
 
-> When adding a third writer, its tag must be added to the negated clause here
-> — `!wireguard_mikrotik && !wireguard_yours` — or the default will collide
-> with it. See [`KEYCONTROL.md`](../KEYCONTROL.md#adding-a-new-key-writer).
+> When adding another writer, its tag must be added to the negated clause here,
+> `(!wireguard_mikrotik && !wireguard_netlink_netns && !wireguard_yours)`, or the
+> default will collide with it. See [`KEYCONTROL.md`](../KEYCONTROL.md#adding-a-new-key-writer).
 
 ---
 

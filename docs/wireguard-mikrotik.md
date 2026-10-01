@@ -119,7 +119,7 @@ misconfiguration fails immediately rather than at the first rotation.
 
 Because this file defines `getKeyWriterService`, and
 [`wire_wireguard_netlink.go`](../wire_wireguard_netlink.go) defines the same symbol under
-`//go:build wireguard_netlink || !wireguard_mikrotik`, exactly one writer is
+`//go:build wireguard_netlink || (!wireguard_mikrotik && !wireguard_netlink_netns)`, exactly one writer is
 ever compiled — and asking for both tags is a compile error, not a silent
 choice.
 
@@ -407,8 +407,8 @@ Confirm the binary is really the MikroTik build, then build a
 **docker-archive**:
 
 ```sh
-strings -a arnika-linux-arm64-mikrotik | grep -oE "arnika/repositories\.[A-Za-z]+" | sort -u
-# expect NewWireguardMikrotikRepository — and NO WireguardNetlinkRepository
+strings -a arnika-linux-arm64-mikrotik | grep -oE "arnika/repositories/[a-z]+" | sort -u
+# expect arnika/repositories/wgmikrotik, and NO arnika/repositories/wgnetlink
 
 docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
     -t arnika:2.0.0a -o type=docker,dest=arnika.tar .
@@ -663,7 +663,7 @@ the Arnika log.
 The adapter carries no build tag, so its tests run in the ordinary suite:
 
 ```bash
-GOEXPERIMENT=runtimesecret go test ./repositories/ -run TestWireguardMikrotik -v
+GOEXPERIMENT=runtimesecret go test ./repositories/wgmikrotik/ -run TestWireguardMikrotik -v
 ```
 
 [`repositories/wgmikrotik/mikrotik_test.go`](../repositories/wgmikrotik/mikrotik_test.go)
