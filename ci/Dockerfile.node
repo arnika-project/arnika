@@ -10,7 +10,8 @@ COPY . .
 ENV CGO_ENABLED=0
 ENV GOEXPERIMENT=runtimesecret
 
-RUN go build -o /arnika .
+ARG BUILD_TAGS=""
+RUN go build -tags="${BUILD_TAGS}" -o /arnika .
 
 FROM alpine:latest
 

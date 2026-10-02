@@ -37,7 +37,7 @@ type Config struct {
 	PQCRoundInterval       time.Duration // PQC_ROUND_INTERVAL, Period of the PQC key agreement
 	PQCRoundTimeout        time.Duration // PQC_ROUND_TIMEOUT, Per-round deadline, must be shorter than PQC_ROUND_INTERVAL
 	PQCMaxKeyAge           time.Duration // PQC_MAX_KEY_AGE, Staleness threshold for the agreed PQC key
-	Mode                   string        // MODE, Operation mode ("QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "EitherQkdOrPqcRequired")
+	Mode                   string        // MODE, operation mode ("QkdAndPqcRequired", "AtLeastQkdRequired", "AtLeastPqcRequired", "PqcOnly", "EitherQkdOrPqcRequired")
 	RateLimit              int           // RATE_LIMIT, Max requests per IP per window; zero means derive it from protocol traffic
 	RateWindow             time.Duration // RATE_WINDOW, Window duration for rate limiting
 	MaxClockSkew           time.Duration // MAX_CLOCK_SKEW, allowed timestamp difference as duration (replay protection)
@@ -48,10 +48,20 @@ func (c *Config) UsePQC() bool {
 }
 
 func (c *Config) IsPQCRequired() bool {
-	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastPqcRequired"
+	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastPqcRequired" || c.IsPQCOnly()
+}
+
+func (c *Config) IsPQCOnly() bool {
+	return c.Mode == "PqcOnly"
 }
 
 func (c *Config) ValidateKeySources(qkdCompiled bool) error {
+	if c.IsPQCOnly() {
+		if !c.UsePQC() {
+			return fmt.Errorf("[ERROR] PQC_ENABLED is false but MODE is PqcOnly")
+		}
+		return nil
+	}
 	if qkdCompiled && c.KMSURL == "" {
 		return fmt.Errorf("[ERROR] KMS_URL is not set")
 	}
@@ -60,7 +70,10 @@ func (c *Config) ValidateKeySources(qkdCompiled bool) error {
 			return fmt.Errorf("[ERROR] KMS_URL is set but this binary was built without a QKD key reader (build tag qkd_none)")
 		}
 		if c.IsQKDRequired() || !c.IsPQCRequired() { // EitherQkdOrPqcRequired would allow running with no key material
-			return fmt.Errorf("[ERROR] this binary was built without a QKD key reader (build tag qkd_none), which requires MODE=AtLeastPqcRequired, got %s", c.Mode)
+			return fmt.Errorf(
+				"[ERROR] this binary was built without a QKD key reader (build tag qkd_none), which requires MODE=AtLeastPqcRequired or PqcOnly, got %s",
+				c.Mode,
+			)
 		}
 		if !c.UsePQC() {
 			return fmt.Errorf("[ERROR] this binary was built without a QKD key reader (build tag qkd_none), so PQC_ENABLED must not be false")
@@ -95,7 +108,9 @@ func (c *Config) PrintStartupConfig() {
 	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
 	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
 	fmt.Printf("Arnika Peer Timeout:			%s\n", c.ArnikaPeerTimeout)
-	if c.KMSURL != "" {
+	if c.IsPQCOnly() {
+		fmt.Println("QKD key reader:           DISABLED BY MODE (PqcOnly; KMS_URL ignored)")
+	} else if c.KMSURL != "" {
 		fmt.Printf("KMS URL:                  %s\n", c.KMSURL)
 		fmt.Printf("KMS HTTP Timeout:         %s\n", c.KMSHTTPTimeout)
 		fmt.Printf("KMS Backoff Max Retries:  %d\n", c.KMSBackoffMaxRetries)
@@ -229,7 +244,9 @@ func Parse() (*Config, error) {
 		}
 	}
 	config.Mode = getEnvOrDefault("MODE", "QkdAndPqcRequired")
-	if config.Mode != "QkdAndPqcRequired" && config.Mode != "AtLeastQkdRequired" && config.Mode != "AtLeastPqcRequired" && config.Mode != "EitherQkdOrPqcRequired" {
+	if config.Mode != "QkdAndPqcRequired" && config.Mode != "AtLeastQkdRequired" &&
+		config.Mode != "AtLeastPqcRequired" && config.Mode != "PqcOnly" &&
+		config.Mode != "EitherQkdOrPqcRequired" {
 		return nil, fmt.Errorf("[ERROR] invalid MODE value: %s", config.Mode)
 	}
 	config.KMSBackoffMaxRetries, err = strconv.Atoi(getEnvOrDefault("KMS_BACKOFF_MAX_RETRIES", "5"))

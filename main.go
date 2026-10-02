@@ -34,6 +34,10 @@ func shouldSetPSKOnQKDFailure(cfg *config.Config) bool {
 	return cfg.IsQKDRequired() || !cfg.UsePQC()
 }
 
+func shouldRunQKD(cfg *config.Config) bool {
+	return qkdCompiled && !cfg.IsPQCOnly()
+}
+
 var lastQKDPSKAt atomic.Int64
 
 func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) bool {
@@ -43,6 +47,9 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 
 // buildPSK invalidates the tunnel and returns nil when no valid PSK can be built, so a failed rotation never keeps the old key.
 func buildPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) (psk []byte) {
+	if cfg.IsPQCOnly() {
+		qkd = nil
+	}
 	if qkd != nil {
 		psk = make([]byte, len(qkd))
 		copy(psk, qkd)
@@ -62,7 +69,7 @@ func buildPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderServi
 			failure, failureAttrs = "no QKD key received", []any{"mode", cfg.Mode}
 			return
 		}
-		if qkdCompiled {
+		if qkdCompiled && !cfg.IsPQCOnly() {
 			logger.Warn("no QKD key, falling back to the PQC key", "mode", cfg.Mode)
 		}
 	}
@@ -86,7 +93,11 @@ func buildPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderServi
 			}
 			clear(psk)
 			psk = derivedKey
-			logger.Info("HKDF derivation completed for the QKD+PQC key")
+			if qkd == nil {
+				logger.Info("HKDF derivation completed for the PQC-only key")
+			} else {
+				logger.Info("HKDF derivation completed for the QKD+PQC key")
+			}
 		}
 	}
 	if len(psk) == 0 {
@@ -228,7 +239,7 @@ func main() {
 			fatal("UDP server stopped", "err", err)
 		}
 	}()
-	if qkdCompiled {
+	if shouldRunQKD(cfg) {
 		if cfg.UsePQC() && !cfg.IsQKDRequired() {
 			lastQKDPSKAt.Store(time.Now().UnixNano())
 			go runPQCSetPSKLoop(keyWriter, pqc, cfg, arnikaLog, func() bool {
@@ -329,7 +340,7 @@ func main() {
 		}()
 	} else {
 		go transport.RunKeyIDWorker(done, result, func(r string) bool {
-			arnikaLog.Warn("received a key_id from the peer, but this binary has no QKD key reader", "key_id", r)
+			arnikaLog.Warn("received a key_id from the peer, but QKD is disabled", "key_id", r, "mode", cfg.Mode)
 			return false
 		})
 		go runPQCSetPSKLoop(keyWriter, pqc, cfg, arnikaLog, nil)

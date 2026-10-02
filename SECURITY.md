@@ -283,7 +283,7 @@ construction or weakness in the implementation is a high-severity finding.
 ### Operational Modes
 
 Operation modes (`QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired`,
-`EitherQkdOrPqcRequired`) define the minimum security level. Downgrade attacks that force a weaker
+`PqcOnly`, `EitherQkdOrPqcRequired`) define the minimum security level. Downgrade attacks that force a weaker
 mode are in scope.
 
 ### PQC Key Agreement (`pqc-hpke`)

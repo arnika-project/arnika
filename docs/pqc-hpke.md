@@ -280,6 +280,7 @@ from the file-based reader:
 | --- | --- |
 | `QkdAndPqcRequired` _(default)_ | Fatal for the interval; the tunnel is invalidated |
 | `AtLeastPqcRequired` | Fatal for the interval |
+| `PqcOnly` | Fatal for the interval; QKD and KMS are disabled regardless of build tags |
 | `AtLeastQkdRequired` | Falls back to the QKD key alone |
 | `EitherQkdOrPqcRequired` | Falls back to whichever source answered |
 

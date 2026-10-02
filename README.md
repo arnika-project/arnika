@@ -51,7 +51,7 @@ The approach of combining symmetric keys from Quantum Key Distribution (QKD) and
 
 ### QKD | PQC key handling
 
-The setup supports 3 operational modes, A, B, and C
+The setup supports these operational modes:
 
 * (A) ... QKD mode
 * (B) ... PQC mode
@@ -64,6 +64,7 @@ is allowed to fall back to if one key source fails:
 | --- | --- | --- | --- |
 | (A) QKD | `AtLeastQkdRequired` | QKD, PQC optional | QKD key is mandatory; PQC is mixed in unless `PQC_ENABLED=false` |
 | (B) PQC | `AtLeastPqcRequired` | PQC, QKD optional | PQC key is mandatory, so `PQC_ENABLED` must stay enabled |
+| (B-only) PQC only | `PqcOnly` | PQC only | PQC key is mandatory; QKD is disabled and no KMS request is attempted, even if the KMS reader is compiled in |
 | (C) hybrid | `QkdAndPqcRequired` _(default)_ | QKD **and** PQC | Both keys mandatory — no fallback, the strictest mode |
 | — | `EitherQkdOrPqcRequired` | QKD **or** PQC | Either source alone is accepted; the weakest mode |
 
@@ -445,7 +446,7 @@ start without them.
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `KMS_URL` | ✅ | — | KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA`. Must be **unset** in a `qkd_none` (PQC-only) build |
+| `KMS_URL` | Conditional | — | Required when QKD is active. KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA`. Ignored in `MODE=PqcOnly`; in `qkd_none` builds it must be unset unless that mode is used |
 | `KMS_HTTP_TIMEOUT` | ➖ | `10s` | HTTP timeout for KMS requests |
 | `KMS_BACKOFF_MAX_RETRIES` | ➖ | `5` | Retry attempts per failed KMS request |
 | `KMS_BACKOFF_BASE_DELAY` | ➖ | `100ms` | First backoff delay; grows exponentially per retry |
@@ -475,7 +476,7 @@ start without them.
 | `PQC_ROUND_INTERVAL` | ➖ | `INTERVAL` | Period of one agreement round |
 | `PQC_MAX_KEY_AGE` | ➖ | `2 × PQC_ROUND_INTERVAL` | Staleness threshold for the agreed key. **Must be longer than `PQC_ROUND_INTERVAL`**, or the key is stale for part of every healthy round; this is rejected at startup with both values in the error |
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline; must be shorter than `PQC_ROUND_INTERVAL` |
-| `MODE` | ➖ | `QkdAndPqcRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired` or `EitherQkdOrPqcRequired` — see the mode table above. The default is the **strictest** mode: both key sources are mandatory and there is no fallback |
+| `MODE` | ➖ | `QkdAndPqcRequired` | `QkdAndPqcRequired`, `AtLeastQkdRequired`, `AtLeastPqcRequired`, `PqcOnly` or `EitherQkdOrPqcRequired` — see the mode table above. `PqcOnly` disables QKD at runtime, independent of build tags |
 
 These settings choose between the readers **compiled into** the binary. The QKD
 reader is selected by build tag (`qkd_kms` / `qkd_none`), and a `MODE` that

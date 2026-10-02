@@ -76,6 +76,15 @@ func TestInstallOnQKDFailureUnlessQKDIsOptionalAndPQCInstallsAtTheSharedInstant(
 	}
 }
 
+func TestShouldRunQKD(t *testing.T) {
+	if got := shouldRunQKD(&config.Config{Mode: "PqcOnly"}); got {
+		t.Fatal("shouldRunQKD returned true for PqcOnly")
+	}
+	if got := shouldRunQKD(&config.Config{Mode: "AtLeastPqcRequired"}); got != qkdCompiled {
+		t.Fatalf("shouldRunQKD with AtLeastPqcRequired = %t, want qkdCompiled (%t)", got, qkdCompiled)
+	}
+}
+
 type countingWriter struct{ writes int }
 
 func (w *countingWriter) SetPSK([]byte) error {
@@ -99,6 +108,22 @@ func TestBuildPSKLeavesTheWriteToTheCaller(t *testing.T) {
 	}
 	if w.writes != 0 {
 		t.Fatalf("buildPSK wrote %d PSK(s)", w.writes)
+	}
+}
+
+func TestBuildPSKIgnoresQKDInPqcOnlyMode(t *testing.T) {
+	keyWriter := services.NewKeyWriterService(&countingWriter{})
+	pqc := services.NewKeyReaderService(fakePQCReader{})
+	logger := slog.New(slog.DiscardHandler)
+	qkd := bytes.Repeat([]byte{1}, 32)
+
+	got := buildPSK(keyWriter, pqc, qkd, &config.Config{Mode: "PqcOnly", PQCEnabled: true}, logger)
+	want := buildPSK(keyWriter, pqc, nil, &config.Config{Mode: "AtLeastPqcRequired", PQCEnabled: true}, logger)
+	defer clear(got)
+	defer clear(want)
+
+	if !bytes.Equal(got, want) {
+		t.Fatal("PqcOnly PSK included QKD material")
 	}
 }
 

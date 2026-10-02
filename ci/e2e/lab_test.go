@@ -27,6 +27,7 @@ const (
 
 	simulatorImage = "qkd-simulator:e2e"
 	nodeImage      = "arnika-node:e2e"
+	qkdNoneImage   = "arnika-node:qkd-none-e2e"
 
 	cycles = 3
 
@@ -41,13 +42,17 @@ type mode struct {
 	name        string
 	qkdRequired bool
 	pqcRequired bool
+	pqcOnly     bool
+	qkdNone     bool
 	color       string
 }
 
 var modes = []mode{
-	{"QkdAndPqcRequired", true, true, cyan},
-	{"AtLeastQkdRequired", true, false, yellow},
-	{"AtLeastPqcRequired", false, true, magenta},
+	{name: "QkdAndPqcRequired", qkdRequired: true, pqcRequired: true, color: cyan},
+	{name: "AtLeastQkdRequired", qkdRequired: true, color: yellow},
+	{name: "AtLeastPqcRequired", pqcRequired: true, color: magenta},
+	{name: "AtLeastPqcRequired", pqcRequired: true, qkdNone: true, color: green},
+	{name: "PqcOnly", pqcRequired: true, pqcOnly: true, color: green},
 }
 
 const (
@@ -71,7 +76,11 @@ func c(style string) string {
 }
 
 func (m mode) prefix() string {
-	name := fmt.Sprintf("%-10s ", strings.TrimSuffix(m.name, "Required"))
+	label := strings.TrimSuffix(m.name, "Required")
+	if m.qkdNone {
+		label += "/qkd_none"
+	}
+	name := fmt.Sprintf("%-20s ", label)
 	return c(m.color) + name + c(reset)
 }
 
@@ -100,14 +109,24 @@ func TestMain(m *testing.M) {
 
 	tclog.SetDefault(tclog.NewNoopLogger())
 
-	for _, img := range [][2]string{
-		{simulatorImage, "ci/Dockerfile.simulator"},
-		{nodeImage, "ci/Dockerfile.node"},
+	for _, img := range []struct {
+		name       string
+		dockerfile string
+		buildTags  string
+	}{
+		{name: simulatorImage, dockerfile: "ci/Dockerfile.simulator"},
+		{name: nodeImage, dockerfile: "ci/Dockerfile.node"},
+		{name: qkdNoneImage, dockerfile: "ci/Dockerfile.node", buildTags: "qkd_none"},
 	} {
-		cmd := exec.Command("docker", "build", "-q", "-f", img[1], "-t", img[0], ".")
+		args := []string{"build", "-q", "-f", img.dockerfile, "-t", img.name}
+		if img.buildTags != "" {
+			args = append(args, "--build-arg", "BUILD_TAGS="+img.buildTags)
+		}
+		args = append(args, ".")
+		cmd := exec.Command("docker", args...)
 		cmd.Dir = "../.."
 		if out, err := cmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "build %s: %v\n%s\n", img[0], err, out)
+			fmt.Fprintf(os.Stderr, "build %s: %v\n%s\n", img.name, err, out)
 			os.Exit(1)
 		}
 	}
@@ -207,8 +226,12 @@ func startLab(t *testing.T, m mode) *lab {
 	l.a.peer, l.b.peer = l.b, l.a
 
 	for _, n := range l.nodes() {
+		image := nodeImage
+		if m.qkdNone {
+			image = qkdNoneImage
+		}
 		n.ctr = l.start(t, ctx, testcontainers.ContainerRequest{
-			Image:          nodeImage,
+			Image:          image,
 			Networks:       []string{net.Name},
 			NetworkAliases: map[string][]string{net.Name: {n.name}},
 			Privileged:     true,
@@ -303,15 +326,19 @@ func (l *lab) startPeers(t *testing.T, extra string) {
 
 func (l *lab) startPeer(t *testing.T, n *node, transportPSK, extra string) {
 	t.Helper()
+	kmsEnv := fmt.Sprintf("KMS_URL=http://qkd-simulator:8080/api/v1/keys/%s", n.sae)
+	if l.mode.qkdNone {
+		kmsEnv = ""
+	}
 	n.exec(t, `nohup env \
 		LISTEN_ADDRESS=0.0.0.0:%s SERVER_ADDRESS=%s:%s ARNIKA_ID=%s \
 		INTERVAL=%s MODE=%s LOG_LEVEL=debug ARNIKA_PSK=%q \
-		KMS_URL=http://qkd-simulator:8080/api/v1/keys/%s \
+		%s \
 		WIREGUARD_INTERFACE=wg0 WIREGUARD_PEER_PUBLIC_KEY=%q \
 		%s \
 		arnika >> /tmp/arnika.log 2>&1 &`,
 		n.id, n.peer.name, n.peer.id, n.id,
-		interval, l.mode.name, transportPSK, n.sae, n.peer.pub, extra)
+		interval, l.mode.name, transportPSK, kmsEnv, n.peer.pub, extra)
 }
 
 func (n *node) running(t *testing.T) bool {
@@ -704,7 +731,11 @@ func (l *lab) wrongPSKCheck(t *testing.T) {
 
 func TestArnika(t *testing.T) {
 	for _, m := range modes {
-		t.Run(m.name, func(t *testing.T) {
+		name := m.name
+		if m.qkdNone {
+			name += "_qkd_none"
+		}
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			testMode(t, m)
 		})
@@ -798,9 +829,14 @@ func testMode(t *testing.T, m mode) {
 
 	l.phase(t, "a second peer on the interface", l.secondPeerCheck)
 
-	l.faultPhase(t, "the KMS hangs", func(t *testing.T) { l.sourceCheck(t, "qkd", "freeze") })
-	l.faultPhase(t, "the KMS is not running", func(t *testing.T) { l.sourceCheck(t, "qkd", "down") })
+	if !m.pqcOnly && !m.qkdNone {
+		l.faultPhase(t, "the KMS hangs", func(t *testing.T) { l.sourceCheck(t, "qkd", "freeze") })
+		l.faultPhase(t, "the KMS is not running", func(t *testing.T) { l.sourceCheck(t, "qkd", "down") })
+	}
 	l.faultPhase(t, "PQC cannot agree a key", func(t *testing.T) { l.sourceCheck(t, "pqc", "") })
+	if m.pqcOnly || m.qkdNone {
+		l.phase(t, "no KMS requests", l.noKMSRequestsCheck)
+	}
 
 	l.faultPhase(t, "a PSK written behind their backs", l.desyncCheck)
 	l.faultPhase(t, "a peer with the wrong ARNIKA_PSK", l.wrongPSKCheck)
@@ -819,6 +855,32 @@ func testMode(t *testing.T, m mode) {
 			n.count(t, "agreed a fresh PQC key"),
 			n.count(t, "PSK configured on WireGuard interface"))
 		l.trouble(t, n)
+	}
+}
+
+func (l *lab) noKMSRequestsCheck(t *testing.T) {
+	t.Helper()
+	if requests := l.kmsLogged(t, "[REQ] method="); requests != 0 {
+		t.Errorf("%s caused %d KMS HTTP request(s), want none", l.mode.name, requests)
+	} else {
+		l.ok("KMS received no HTTP requests")
+	}
+	if l.mode.qkdNone {
+		for _, n := range l.nodes() {
+			if count := n.count(t, "NOT COMPILED IN (build tag qkd_none)"); count == "0" {
+				t.Errorf("%s did not report that the qkd_none binary has no QKD reader", n.name)
+			}
+		}
+	}
+	for _, n := range l.nodes() {
+		for _, message := range []string{
+			"requesting a new QKD key",
+			"requesting the QKD key for the peer's key_id",
+		} {
+			if count := n.count(t, message); count != "0" {
+				t.Errorf("%s logged %s KMS-request attempts for %q", n.name, count, message)
+			}
+		}
 	}
 }
 

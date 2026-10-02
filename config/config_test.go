@@ -87,7 +87,7 @@ func TestParse(t *testing.T) {
 	t.Setenv("KMS_URL", "https://example.com")
 	t.Setenv("WIREGUARD_INTERFACE", "wg0")
 	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
-	t.Setenv("MODE", "AtLeastQkdRequired")
+	t.Setenv("MODE", "PqcOnly")
 	t.Setenv("ARNIKA_PSK", testArnikaPSK)
 
 	expectedConfig := &Config{
@@ -111,7 +111,7 @@ func TestParse(t *testing.T) {
 		PQCRoundInterval:       time.Second * 10,
 		PQCMaxKeyAge:           time.Second * 20,
 		PQCRoundTimeout:        time.Millisecond * 2500,
-		Mode:                   "AtLeastQkdRequired",
+		Mode:                   "PqcOnly",
 		RateLimit:              0,
 		RateWindow:             time.Minute,
 		MaxClockSkew:           time.Minute,
@@ -214,6 +214,24 @@ func TestIsQKDRequired(t *testing.T) {
 
 }
 
+func TestIsPQCOnly(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{
+		{mode: "PqcOnly", want: true},
+		{mode: "AtLeastPqcRequired", want: false},
+	} {
+		c := &Config{Mode: tc.mode}
+		if got := c.IsPQCOnly(); got != tc.want {
+			t.Errorf("IsPQCOnly for Mode=%s = %t, want %t", tc.mode, got, tc.want)
+		}
+		if tc.mode == "PqcOnly" && !c.IsPQCRequired() {
+			t.Error("PqcOnly must require PQC")
+		}
+	}
+}
+
 func TestIsPrimary(t *testing.T) {
 	psk := []byte("shared-secret-key")
 	nodeA := &Config{ArnikaID: "9999", ArnikaPSK: psk}
@@ -252,6 +270,11 @@ func TestValidateKeySources(t *testing.T) {
 		{"qkd_none, both required (the MODE default)", Config{Mode: "QkdAndPqcRequired", PQCEnabled: true}, false, true},
 		{"qkd_none, either mode", Config{Mode: "EitherQkdOrPqcRequired", PQCEnabled: true}, false, true},
 		{"qkd_none, pqc disabled", Config{Mode: "AtLeastPqcRequired"}, false, true},
+		{"PqcOnly without a KMS reader or URL", Config{Mode: "PqcOnly", PQCEnabled: true}, false, false},
+		{"PqcOnly with a compiled KMS reader and no URL", Config{Mode: "PqcOnly", PQCEnabled: true}, true, false},
+		{"PqcOnly ignores a configured KMS URL", Config{KMSURL: "https://kms.example", Mode: "PqcOnly", PQCEnabled: true}, true, false},
+		{"PqcOnly ignores a configured KMS URL without a KMS reader", Config{KMSURL: "https://kms.example", Mode: "PqcOnly", PQCEnabled: true}, false, false},
+		{"PqcOnly requires PQC", Config{Mode: "PqcOnly"}, true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

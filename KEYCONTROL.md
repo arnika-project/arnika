@@ -510,7 +510,7 @@ that is not named keeps its default:
 | | `wireguard_netlink_netns` | | Same, inside a network namespace (`linux` only) |
 | | `wireguard_mikrotik` | | MikroTik RouterOS REST API |
 | QKD reader | `qkd_kms` | ✅ | KMS client, ETSI GS QKD 014 |
-| | `qkd_none` | | No QKD reader: PQC-only, 40 % smaller, requires `MODE=AtLeastPqcRequired` and no `KMS_URL` |
+| | `qkd_none` | | No QKD reader: 40 % smaller; requires `MODE=AtLeastPqcRequired` or `PqcOnly`; `PqcOnly` ignores `KMS_URL` |
 
 The PQC reader has one backend and therefore no tag; `PQC_ENABLED` switches it
 at runtime. Two tags from one family fail the build with a redeclared factory.
