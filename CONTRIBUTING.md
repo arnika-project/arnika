@@ -42,6 +42,7 @@ repository stays public, forever.
 - **One change per pull request.** A single fix, adapter, or feature reviews faster and safer.
 - **Explain what changed and why**, and reference the related issue.
 - **Add or update tests.** The KMS mock in [tools/](tools/) helps for key-reader work.
+- **Run end-to-end tests when relevant.** `make test-e2e` builds the KMS simulator plus standard and `qkd_none` Arnika images, then runs a two-peer Docker lab across the key modes, checking key agreement and rotation, tunnel traffic, and failure handling. Use it for changes to the integrated key-exchange, transport, or deployment path; Docker is required.
 - **Document new adapters** in `docs/<module-name>.md`, per [KEYCONTROL.md](KEYCONTROL.md).
 - **Keep CI green.** Formatting, `go vet`, linting, and tests all run on every pull request.
 - **Expect questions**, especially on anything touching cryptography or key handling.
@@ -55,6 +56,18 @@ Arnika builds with Go 1.26+ and the `runtimesecret` experiment enabled, so run G
 GOEXPERIMENT=runtimesecret go test ./...
 GOEXPERIMENT=runtimesecret go vet ./...
 ```
+
+## Before Every Commit
+
+Before every commit, run these commands in order:
+
+```sh
+make fmt
+make lint
+```
+
+`make fmt` formats all Go files, including build-tagged files and nested modules. Review and
+include any resulting changes before committing. Both commands are required for every commit.
 
 ## AI-Assisted Contributions
 

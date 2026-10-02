@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-# Use the host's wg if present; otherwise borrow the one already inside the
-# node image, so CI does not have to spend ~70 s on `apt-get install
-# wireguard-tools` just to generate two key pairs. Same binary either way.
 WG_IMAGE="${WG_IMAGE:-arnika-node:ci}"
 if command -v wg > /dev/null 2>&1 ; then
     wg_cmd() { wg "$@" ; }
@@ -17,19 +14,15 @@ else
     wg_cmd() { docker run --rm -i "$WG_IMAGE" wg "$@" ; }
 fi
 
-# Generate WireGuard keys for node-a
 mkdir -p ci/node-a
 wg_cmd genkey | tee ci/node-a/node-a.key | wg_cmd pubkey > ci/node-a/node-a.pub
 
-# Generate WireGuard keys for node-b
 mkdir -p ci/node-b
 wg_cmd genkey | tee ci/node-b/node-b.key | wg_cmd pubkey > ci/node-b/node-b.pub
 
-# Copy public keys to opposite nodes for peer configuration
 cp ci/node-a/node-a.pub ci/node-b/node-a.pub
 cp ci/node-b/node-b.pub ci/node-a/node-b.pub
 
-# Set proper permissions
 chmod 600 ci/node-a/node-a.key ci/node-b/node-b.key
 chmod 644 ci/node-a/*.pub ci/node-b/*.pub
 chmod +x ci/node-a/start.sh ci/node-b/start.sh

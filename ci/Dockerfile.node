@@ -1,10 +1,7 @@
-# Dockerfile for Arnika test nodes
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 
-# Dependencies first, in their own layer: sources change on every commit,
-# go.mod/go.sum rarely do, so the module download stays cached.
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -13,7 +10,8 @@ COPY . .
 ENV CGO_ENABLED=0
 ENV GOEXPERIMENT=runtimesecret
 
-RUN go build -o /arnika .
+ARG BUILD_TAGS=""
+RUN go build -tags="${BUILD_TAGS}" -o /arnika .
 
 FROM alpine:latest
 

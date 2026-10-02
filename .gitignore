@@ -14,3 +14,7 @@ ci/node-b/node-a.pub
 tools/kms
 tools/mock
 /security
+.agents/
+agent/
+.claude/
+.idea/
