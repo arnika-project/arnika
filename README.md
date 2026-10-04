@@ -8,12 +8,9 @@
     <h1> Arnika - Quantum secure VPN</h1>
 </div>
 
-> [!NOTE]
-> Meet us at the [QCI Days 2026 28.09.- 30.9.2026](https://qci-days.eu/) in Padua , Italy
->
-
 > [!IMPORTANT]
-> The new version `v2.x`, is already available on the main branch, but the documentation may lag behind.
+> A candidate for `v2.x` is already available on the `main` branch, but the documentation may lag behind.
+> A candidate with a native PQC key provider is currently available for testing on the `feat/pqc-hpke` branch.
 > For classic Arnika, use the `v1.x` branch.
 
 **Arnika** is a compact, **lightweight external extension for Wireguard VPN**, engineered to incorporate symmetric keys as Pre-Shared Keys (**PSK**) into Wireguard. This integration ensures the establishment of a quantum-secure VPN (safeguarding against compromise of session keys).
