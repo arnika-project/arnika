@@ -1,4 +1,5 @@
-package repositories
+// Package wgnetlink writes the WireGuard PSK through netlink, optionally inside a network namespace.
+package wgnetlink
 
 import (
 	"fmt"
@@ -7,44 +8,29 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-type WireguardNetlinkRepository struct {
+type Repository struct {
 	InterfaceName string
 	PeerPublicKey string
 	conn          *wgctrl.Client
 }
 
-func NewWireguardNetlinkRepository(interfaceName, peerPublicKey string) (*WireguardNetlinkRepository, error) {
+func NewRepository(interfaceName, peerPublicKey string) (*Repository, error) {
 	client, err := wgctrl.New()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WireGuard client: %w", err)
 	}
-	return &WireguardNetlinkRepository{
+	return &Repository{
 		InterfaceName: interfaceName,
 		PeerPublicKey: peerPublicKey,
 		conn:          client,
 	}, nil
 }
 
-func (r *WireguardNetlinkRepository) InvalidateTunnel() error {
-	psk, err := wgtypes.GenerateKey()
-	if err != nil {
-		return err
-	}
-	return r.SetPSK(psk.String())
-}
-
-func (r *WireguardNetlinkRepository) SetPSK(psk string) error {
-	// Verify the specified interface exists
+func (r *Repository) SetPSK(psk []byte) error {
 	peers, err := r.conn.Device(r.InterfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to get device %s: %w", r.InterfaceName, err)
 	}
-	// verify that the peer public key exists.
-	//
-	// Scan for a match and report absence only after the whole list. The
-	// previous form returned on the first NON-match, so the check passed
-	// only when the interface had exactly one peer: a node with two
-	// neighbours failed on whichever peer was iterated first.
 	found := false
 	for _, peer := range peers.Peers {
 		if peer.PublicKey.String() == r.PeerPublicKey {
@@ -55,7 +41,7 @@ func (r *WireguardNetlinkRepository) SetPSK(psk string) error {
 	if !found {
 		return fmt.Errorf("peer with public key %s not found on interface %s", r.PeerPublicKey, r.InterfaceName)
 	}
-	validPSK, err := wgtypes.ParseKey(psk)
+	validPSK, err := wgtypes.NewKey(psk)
 	if err != nil {
 		return err
 	}
@@ -71,6 +57,6 @@ func (r *WireguardNetlinkRepository) SetPSK(psk string) error {
 	return r.conn.ConfigureDevice(r.InterfaceName, wgtypes.Config{Peers: []wgtypes.PeerConfig{peer}})
 }
 
-func (r *WireguardNetlinkRepository) Close() error {
+func (r *Repository) Close() error {
 	return r.conn.Close()
 }

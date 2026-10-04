@@ -1,64 +1,86 @@
+// Arnika rotates a WireGuard pre-shared key derived from a QKD key and a post-quantum key agreement with the peer.
 package main
 
 import (
-	"encoding/base64"
+	"context"
 	"flag"
 	"fmt"
-	"log"
+	"github.com/arnika-project/arnika/auth"
+	"log/slog"
+	"strconv"
 
 	"os"
 
+	"runtime"
 	"runtime/secret"
+	"sync/atomic"
 	"time"
 
 	"github.com/arnika-project/arnika/config"
+	"github.com/arnika-project/arnika/hardening"
 	"github.com/arnika-project/arnika/kdf"
+	"github.com/arnika-project/arnika/repositories/pqchpke"
 	"github.com/arnika-project/arnika/services"
+	"github.com/arnika-project/arnika/transport"
 )
 
 var (
-	// allows to set version on build.
 	Version string
-	// allows to overwrite app name on build.
 	APPName string
-	// Prefix variables initialized after config is parsed
-	PRIMARYLOGPREFIX string
-	BACKUPLOGPREFIX  string
-	ARNIKALOGPREFIX  string
 )
 
-func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logPrefix string) {
-	var psk []byte
+// shouldSetPSKOnQKDFailure is false exactly when runPQCSetPSKLoop takes over the rotation instead.
+func shouldSetPSKOnQKDFailure(cfg *config.Config) bool {
+	return cfg.IsQKDRequired() || !cfg.UsePQC()
+}
+
+func shouldRunQKD(cfg *config.Config) bool {
+	return qkdCompiled && !cfg.IsPQCOnly()
+}
+
+var lastQKDPSKAt atomic.Int64
+
+func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) bool {
+	psk := buildPSK(keyWriter, pqc, qkd, cfg, logger)
+	return psk != nil && writePSK(keyWriter, psk, qkd != nil, cfg, logger)
+}
+
+// buildPSK invalidates the tunnel and returns nil when no valid PSK can be built, so a failed rotation never keeps the old key.
+func buildPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, qkd []byte, cfg *config.Config, logger *slog.Logger) (psk []byte) {
+	if cfg.IsPQCOnly() {
+		qkd = nil
+	}
 	if qkd != nil {
 		psk = make([]byte, len(qkd))
 		copy(psk, qkd)
 	}
-	msg := ""
+	var failure string
+	var failureAttrs []any
 	defer func() {
-		clear(psk)
-		if msg != "" {
-			log.Println(msg)
-			log.Printf("[ERROR] %s [STOP] configure random PSK to invalidate WireGuard session", logPrefix)
-			if err := keyWriter.InvalidateTunnel(); err != nil {
-				log.Printf("[ERROR] %s failed to configure random PSK: %v", logPrefix, err)
-			}
+		if failure == "" {
+			return
 		}
+		clear(psk)
+		psk = nil
+		invalidate(keyWriter, logger, failure, failureAttrs...)
 	}()
 	if len(qkd) == 0 {
 		if cfg.IsQKDRequired() {
-			msg = fmt.Sprintf("[ERROR] %s mode set to %s but no QKD key received", logPrefix, cfg.Mode)
+			failure, failureAttrs = "no QKD key received", []any{"mode", cfg.Mode}
 			return
 		}
-		log.Printf("[WARNING] %s failed to retrieve QKD key, switching to PQC key since mode is set to %s", logPrefix, cfg.Mode)
+		if qkdCompiled && !cfg.IsPQCOnly() {
+			logger.Warn("no QKD key, falling back to the PQC key", "mode", cfg.Mode)
+		}
 	}
 	if cfg.UsePQC() {
 		pqcKey, err := pqc.GetNewKey()
 		if err != nil {
 			if cfg.IsPQCRequired() {
-				msg = fmt.Sprintf("[ERROR] %s failed to retrieve PQC key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
+				failure, failureAttrs = "failed to retrieve the PQC key", []any{"err", err, "mode", cfg.Mode}
 				return
 			}
-			log.Printf("[WARNING] %s failed to retrieve PQC key, switching to QKD key since mode is set to %s", logPrefix, cfg.Mode)
+			logger.Warn("no PQC key, falling back to the QKD key", "err", err, "mode", cfg.Mode)
 		} else {
 			defer pqcKey.Zero()
 			var derivedKey []byte
@@ -66,29 +88,70 @@ func setPSK(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService
 				derivedKey, err = kdf.DeriveKey(psk, pqcKey.Key)
 			})
 			if err != nil {
-				msg = fmt.Sprintf("[ERROR] %s failed to derive key: %v. Abort since mode is set to %s", logPrefix, err, cfg.Mode)
+				failure, failureAttrs = "failed to derive the PSK", []any{"err", err, "mode", cfg.Mode}
 				return
 			}
 			clear(psk)
 			psk = derivedKey
-			log.Printf("[INFO] %s [OK] HKDF derivation completed for QKD+PQC key", logPrefix)
+			if qkd == nil {
+				logger.Info("HKDF derivation completed for the PQC-only key")
+			} else {
+				logger.Info("HKDF derivation completed for the QKD+PQC key")
+			}
 		}
 	}
 	if len(psk) == 0 {
-		msg = fmt.Sprintf("[ERROR] %s no PSK available", logPrefix)
+		failure = "no key material available for a PSK"
 		return
 	}
-	// Encode to base64 for WireGuard interface (requires string)
-	pskStr := base64.StdEncoding.EncodeToString(psk)
-	if err := keyWriter.SetPSK(pskStr); err != nil {
-		msg = fmt.Sprintf("[ERROR] %s failed to configure PSK on WireGuard interface: %v", logPrefix, err)
-		return
+	return psk
+}
+
+func writePSK(keyWriter *services.KeyWriterService, psk []byte, fromQKD bool, cfg *config.Config, logger *slog.Logger) bool {
+	defer clear(psk)
+	if err := keyWriter.SetPSK(psk); err != nil {
+		invalidate(keyWriter, logger, "failed to configure the PSK on the WireGuard interface", "err", err)
+		return false
 	}
-	log.Printf("[INFO] %s [OK] PSK configured on WireGuard interface: %s for peer: %s", logPrefix, cfg.WireGuardInterface, cfg.WireguardPeerPublicKey)
+	if fromQKD {
+		lastQKDPSKAt.Store(time.Now().UnixNano())
+	}
+	logger.Info("PSK configured on WireGuard interface", // message counted by ci/local-darwin/run.sh and ci/e2e
+		"iface", cfg.WireGuardInterface, "peer", cfg.WireguardPeerPublicKey)
+	return true
+}
+
+func invalidate(keyWriter *services.KeyWriterService, logger *slog.Logger, reason string, attrs ...any) {
+	logger.Error(reason, attrs...)
+	logger.Error("configuring a random PSK to invalidate the WireGuard session")
+	if err := keyWriter.InvalidateTunnel(); err != nil {
+		logger.Error("failed to configure the random PSK", "err", err)
+	}
+}
+
+// nextPQCSetPSKAt falls between two rounds on the scheduler's RoundSeconds grid, so both peers read the same round's key.
+func nextPQCSetPSKAt(now time.Time, roundInterval, roundTimeout time.Duration) time.Time {
+	secs := pqchpke.RoundSeconds(roundInterval)
+	boundary := time.Unix((now.Unix()/secs+1)*secs, 0)
+	quiet := time.Duration(secs)*time.Second - roundTimeout
+	if quiet <= 0 {
+		return boundary
+	}
+	return boundary.Add(quiet / 2)
+}
+
+func runPQCSetPSKLoop(keyWriter *services.KeyWriterService, pqc *services.KeyReaderService, cfg *config.Config, logger *slog.Logger, due func() bool) {
+	for {
+		time.Sleep(time.Until(nextPQCSetPSKAt(time.Now(), cfg.PQCRoundInterval, cfg.PQCRoundTimeout)))
+		if due != nil && !due() {
+			continue
+		}
+		setPSK(keyWriter, pqc, nil, cfg, logger)
+	}
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	logLevelWarning := setUpLogging()
 	versionLong := flag.Bool("version", false, "print version and exit")
 	versionShort := flag.Bool("v", false, "alias for version")
 	help := flag.Bool("help", false, "print usage and exit")
@@ -100,99 +163,188 @@ func main() {
 		flag.Usage()
 		os.Exit(0)
 	}
+
+	if logLevelWarning != "" {
+		slog.Warn(logLevelWarning)
+	}
+	for _, err := range hardening.Process() { // before config.Parse, so ARNIKA_PSK never sits in a dumpable, ptraceable or swappable process
+		slog.Warn("process hardening incomplete", "err", err)
+	}
+	var secretErasure bool
+	secret.Do(func() { secretErasure = secret.Enabled() })
+	if !secretErasure {
+		slog.Warn("runtime/secret erasure is inert on this platform: key material is not wiped from registers, stack or freed heap",
+			"goos", runtime.GOOS, "goarch", runtime.GOARCH)
+	}
+
 	cfg, err := config.Parse()
 	if err != nil {
-		log.Fatalf("[ERROR] failed to parse config: %v", err)
+		fatal("failed to parse the configuration", "err", err)
 	}
+	if err := cfg.ValidateKeySources(qkdCompiled); err != nil {
+		fatal(err.Error())
+	}
+	if err := os.Unsetenv("ARNIKA_PSK"); err != nil {
+		slog.Warn("failed to drop ARNIKA_PSK from the environment", "err", err)
+	}
+	limit, budget, warning := transport.EffectiveRateLimit(cfg)
+	if warning != "" {
+		slog.Warn(warning)
+	}
+	cfg.RateLimit = limit
+	arnikaID, _ := strconv.Atoi(cfg.ArnikaID)
+	setLogIdentity(arnikaID)
+	arnikaLog := slog.Default()
+	primaryLog := arnikaLog.With("role", "primary")
+	backupLog := arnikaLog.With("role", "backup")
+	arnikaLog.Info("per-IP rate limit",
+		"limit", cfg.RateLimit, "window", cfg.RateWindow, "calculated_budget", budget)
 	cfg.PrintStartupConfig()
-	var colorStart, colorEnd string
-	arnikaIDInt := 0
-	if _, err := fmt.Sscanf(cfg.ArnikaID, "%d", &arnikaIDInt); err != nil {
-		log.Printf("[WARN] failed to parse ArnikaID %q as integer: %v", cfg.ArnikaID, err)
-	}
-	if arnikaIDInt%2 == 0 {
-		colorStart = "\033[35m"
-	} else {
-		colorStart = "\033[36m"
-	}
-	colorEnd = "\033[0m"
-	PRIMARYLOGPREFIX = fmt.Sprintf("%sPRIMARY[%s]%s", colorStart, cfg.ArnikaID, colorEnd)
-	BACKUPLOGPREFIX = fmt.Sprintf("%sBACKUP[%s]%s", colorStart, cfg.ArnikaID, colorEnd)
-	ARNIKALOGPREFIX = fmt.Sprintf("ARNIKA[%s]", cfg.ArnikaID)
 	interval := cfg.Interval
 	done := make(chan bool)
-	skip := make(chan bool, 1)
-	result := make(chan string)
-	qkd := getQKDService(cfg)
-	pqc := getPQCService(cfg)
+	var peerSentKeyID atomic.Bool
+	result := make(chan transport.KeyIDRequest, transport.QKDQueueDepth)
 	keyWriter, err := getKeyWriterService(cfg)
 	if err != nil {
-		log.Panicf("[ERROR] [STOP] Failed to create WireGuard repository: %v", err)
+		fatal("failed to create the WireGuard key writer", "err", err)
 	}
-	go udpServer(cfg.ListenAddress, []byte(cfg.ArnikaPSK), result, done, cfg.RateLimit, cfg.RateWindow, cfg.MaxClockSkew)
+	dirOut, dirIn := auth.DirectionFor(arnikaID)
+	var pqc *services.KeyReaderService
+	var pqcHandle transport.PQCHandler
+	if cfg.UsePQC() {
+		pqcService, pqcRun, handle, err := getPQCService(cfg, arnikaLog, dirOut, dirIn)
+		if err != nil {
+			fatal("failed to create the PQC key reader", "err", err)
+		}
+		pqc, pqcHandle = pqcService, handle
+		pqcCtx, cancelPQC := context.WithCancel(context.Background())
+		defer cancelPQC()
+		go pqcRun(pqcCtx)
+	}
+
 	go func() {
-		for {
-			r := <-result
-			select {
-			case skip <- true:
-			default:
-			}
-			log.Printf("[INFO] %s [REQ] request QKD key for key_id %s from %s\n", BACKUPLOGPREFIX, r, cfg.KMSURL)
-			key, err := qkd.GetKeyByID(&r)
-			if err != nil {
-				log.Printf("[ERROR] %s failed to retrieve QKD key for key_id %s from %s, %v", BACKUPLOGPREFIX, r, cfg.KMSURL, err)
-				continue
-			}
-			setPSK(keyWriter, pqc, key.Key, cfg, BACKUPLOGPREFIX)
+		if err := transport.Serve(transport.ServerConfig{
+			Address:      cfg.ListenAddress,
+			PSK:          cfg.ArnikaPSK,
+			DirOut:       dirOut,
+			DirIn:        dirIn,
+			KeyIDs:       result,
+			Done:         done,
+			PQC:          pqcHandle,
+			RateLimit:    cfg.RateLimit,
+			RateWindow:   cfg.RateWindow,
+			MaxClockSkew: cfg.MaxClockSkew,
+			Log:          arnikaLog,
+		}); err != nil {
+			fatal("UDP server stopped", "err", err)
 		}
 	}()
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		var intervalCounter uint64
-		for {
-			ticker.Reset(interval)
-			if !cfg.IsPrimary(intervalCounter) {
-				select {
-				case <-skip:
-				default:
-					log.Printf("[INFO] %s [REQ] BACKUP for interval %d, waiting for key_id from peer\n", BACKUPLOGPREFIX, intervalCounter)
+	if shouldRunQKD(cfg) {
+		if cfg.UsePQC() && !cfg.IsQKDRequired() {
+			lastQKDPSKAt.Store(time.Now().UnixNano())
+			go runPQCSetPSKLoop(keyWriter, pqc, cfg, arnikaLog, func() bool {
+				if time.Since(time.Unix(0, lastQKDPSKAt.Load())) < 2*interval { // not one: a single lost key often hits only one peer and would split their PSKs
+					return false
 				}
-			} else {
-				select {
-				case <-skip:
-				default:
+				arnikaLog.Warn("no QKD key, installing a PQC-only PSK",
+					"no_key_for", 2*interval, "mode", cfg.Mode)
+				return true
+			})
+		}
+		qkd := getQKDService(cfg)
+		go transport.RunKeyIDWorker(done, result, func(r string) bool {
+			peerSentKeyID.Store(true)
+			backupLog.Info("requesting the QKD key for the peer's key_id", "key_id", r, "kms", cfg.KMSURL)
+			key, err := qkd.GetKeyByID(r)
+			if err != nil {
+				backupLog.Error("failed to retrieve the QKD key for the peer's key_id", "key_id", r, "kms", cfg.KMSURL, "err", err)
+				if shouldSetPSKOnQKDFailure(cfg) {
+					setPSK(keyWriter, pqc, nil, cfg, backupLog)
 				}
-				log.Printf("[INFO] %s [REQ] request QKD key from %s\n", PRIMARYLOGPREFIX, cfg.KMSURL)
-				key, err := qkd.GetNewKey()
-				if err != nil {
-					log.Printf("[ERROR] %s failed to retrieve QKD key from %s, %v", PRIMARYLOGPREFIX, cfg.KMSURL, err)
-					ticker.Reset(cfg.KMSRetryInterval)
+				return false
+			}
+			return setPSK(keyWriter, pqc, key.Key, cfg, backupLog)
+		})
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			var intervalCounter uint64
+			for {
+				ticker.Reset(interval)
+				intervalEnd := time.Now().Add(interval)
+				backup := !cfg.IsPrimary(intervalCounter)
+				if backup {
+					backupLog.Info("waiting for a key_id from the peer", "interval", intervalCounter)
 				} else {
-					// Wait until the next full second (e.g., 12:34:57.000)
-					now := time.Now()
-					nextTick := now.Truncate(time.Second).Add(time.Second)
-					log.Printf("[INFO] %s [REQ] PRIMARY for interval %d\n", PRIMARYLOGPREFIX, intervalCounter)
-					time.Sleep(nextTick.Sub(now))
-					select {
-					case <-skip:
-					default:
-						if !key.IsManaged() && key.ID == nil {
-							log.Printf("[ERROR] %s received empty key_id from KMS, skipping this interval", PRIMARYLOGPREFIX)
-							continue
+					peerSentKeyID.Store(false)
+					primaryLog.Info("requesting a new QKD key", "kms", cfg.KMSURL)
+					key, err := qkd.GetNewKey()
+					if err != nil {
+						primaryLog.Error("failed to retrieve a QKD key", "kms", cfg.KMSURL, "err", err)
+						ticker.Reset(cfg.KMSRetryInterval)
+						if shouldSetPSKOnQKDFailure(cfg) {
+							setPSK(keyWriter, pqc, nil, cfg, primaryLog)
 						}
-						log.Printf("[INFO] %s [SND] send key_id %s to %s\n", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress)
-						err = udpClient(cfg.ServerAddress, []byte(cfg.ArnikaPSK), *key.ID, cfg.ArnikaPeerTimeout, cfg.MaxClockSkew)
-						if err != nil {
-							log.Printf("[ERROR] %s failed to send key_id %s to %s: %v", PRIMARYLOGPREFIX, *key.ID, cfg.ServerAddress, err)
+					} else {
+						now := time.Now()
+						nextTick := now.Truncate(time.Second).Add(time.Second)
+						primaryLog.Info("serving this interval", "interval", intervalCounter)
+						time.Sleep(nextTick.Sub(now))
+						peerIsPrimaryToo := peerSentKeyID.Swap(false)
+						if !peerIsPrimaryToo {
+							if key.ID == "" {
+								primaryLog.Error("the KMS returned an empty key_id, skipping this interval")
+								if shouldSetPSKOnQKDFailure(cfg) {
+									setPSK(keyWriter, pqc, nil, cfg, primaryLog)
+								}
+							} else {
+								psk := buildPSK(keyWriter, pqc, key.Key, cfg, primaryLog)
+								primaryLog.Info("sending the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress)
+								err = transport.SendKeyID(transport.ClientConfig{
+									Address:      cfg.ServerAddress,
+									PSK:          cfg.ArnikaPSK,
+									DirOut:       dirOut,
+									DirIn:        dirIn,
+									KeyID:        key.ID,
+									Timeout:      cfg.ArnikaPeerTimeout,
+									Deadline:     intervalEnd,
+									MaxClockSkew: cfg.MaxClockSkew,
+									Log:          primaryLog,
+								})
+								switch {
+								case err != nil:
+									primaryLog.Error("the peer did not confirm the key_id", "key_id", key.ID, "peer", cfg.ServerAddress, "err", err)
+									if psk != nil {
+										clear(psk)
+										if shouldSetPSKOnQKDFailure(cfg) {
+											setPSK(keyWriter, pqc, nil, cfg, primaryLog)
+										}
+									}
+								case psk != nil:
+									writePSK(keyWriter, psk, true, cfg, primaryLog)
+								}
+							}
 						}
-						setPSK(keyWriter, pqc, key.Key, cfg, PRIMARYLOGPREFIX)
+					}
+				}
+				intervalCounter++
+				<-ticker.C
+				sawKeyID := peerSentKeyID.Swap(false) // outside the if: a late key_id in a PRIMARY interval must not leak into the next BACKUP one
+				if backup && !sawKeyID {
+					if shouldSetPSKOnQKDFailure(cfg) {
+						backupLog.Error("no key_id from the peer", "interval", intervalCounter-1)
+						setPSK(keyWriter, pqc, nil, cfg, backupLog)
 					}
 				}
 			}
-			intervalCounter++
-			<-ticker.C
-		}
-	}()
+		}()
+	} else {
+		go transport.RunKeyIDWorker(done, result, func(r string) bool {
+			arnikaLog.Warn("received a key_id from the peer, but QKD is disabled", "key_id", r, "mode", cfg.Mode)
+			return false
+		})
+		go runPQCSetPSKLoop(keyWriter, pqc, cfg, arnikaLog, nil)
+	}
 	<-done
+	cfg.ZeroSecrets()
 }

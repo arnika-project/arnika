@@ -1,4 +1,3 @@
-# Dockerfile for Arnika test nodes with network namespace support
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /build

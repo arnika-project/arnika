@@ -11,16 +11,10 @@ import (
 	"time"
 
 	"github.com/arnika-project/arnika/config"
-	"github.com/arnika-project/arnika/repositories"
+	"github.com/arnika-project/arnika/repositories/wgmikrotik"
 	"github.com/arnika-project/arnika/services"
 )
 
-// getKeyWriterService wires the MikroTik RouterOS REST key writer. It is the
-// wireguard_mikrotik counterpart of the netlink implementation in
-// wireguardnetlink.go; exactly one of the two is compiled per binary, selected
-// by build tag. MikroTik-specific transport configuration is read here (behind
-// the build tag) so the shared config.Config stays transport-agnostic, while
-// the WireGuard interface and peer public key are reused from the shared config.
 func getKeyWriterService(cfg *config.Config) (*services.KeyWriterService, error) {
 	baseURL := os.Getenv("MIKROTIK_URL")
 	if baseURL == "" {
@@ -44,10 +38,7 @@ func getKeyWriterService(cfg *config.Config) (*services.KeyWriterService, error)
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	switch {
 	case os.Getenv("MIKROTIK_TLS_INSECURE") == "true":
-		// Explicit opt-in: skip certificate verification. Intended for lab use
-		// with RouterOS self-signed certificates only. Never use in production;
-		// prefer MIKROTIK_CA_CERTIFICATE to pin the router's CA instead.
-		tlsCfg.InsecureSkipVerify = true
+		tlsCfg.InsecureSkipVerify = true // lab only; MIKROTIK_CA_CERTIFICATE pins a self-signed router CA instead
 	case os.Getenv("MIKROTIK_CA_CERTIFICATE") != "":
 		caCert, err := os.ReadFile(os.Getenv("MIKROTIK_CA_CERTIFICATE"))
 		if err != nil {
@@ -68,7 +59,7 @@ func getKeyWriterService(cfg *config.Config) (*services.KeyWriterService, error)
 		},
 	}
 
-	repo := repositories.NewWireguardMikrotikRepository(
+	repo := wgmikrotik.NewRepository(
 		baseURL,
 		username,
 		password,

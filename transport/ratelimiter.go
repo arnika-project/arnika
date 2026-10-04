@@ -1,11 +1,10 @@
-package main
+package transport
 
 import (
 	"sync"
 	"time"
 )
 
-// rateLimiter implements a simple per-IP rate limiter.
 type rateLimiter struct {
 	mu       sync.Mutex
 	requests map[string][]time.Time
@@ -70,4 +69,19 @@ func (rl *rateLimiter) cleanup() {
 			rl.requests[ip] = valid
 		}
 	}
+}
+
+// logThrottle is not safe for concurrent use; its only user is the single-goroutine UDP read loop.
+type logThrottle struct {
+	interval time.Duration
+	next     time.Time
+}
+
+func (t *logThrottle) allow() bool {
+	now := time.Now()
+	if now.Before(t.next) {
+		return false
+	}
+	t.next = now.Add(t.interval)
+	return true
 }

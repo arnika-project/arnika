@@ -3,18 +3,11 @@ set -e
 
 echo "====== Arnika CI Integration Test - Key Verification ======"
 
-# Function to extract PSK from WireGuard interface
 get_psk() {
     local node=$1
     docker exec clab-arnika-ci-test-${node} wg show wg0 preshared-keys | awk '{print $2}'
 }
 
-# Poll until both nodes report the same non-empty PSK, instead of sleeping for
-# the worst case. The rotation interval is 5 s, so a healthy pair converges in
-# well under 15 s; polling also covers the case where the two sequential
-# docker-exec calls straddle a rotation boundary (a single mismatched snapshot
-# is not a real failure). On timeout we fall through to the checks below, which
-# report exactly what was wrong - the assertions are unchanged.
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-90}"
 POLL_INTERVAL=2
 DEADLINE=$((SECONDS + VERIFY_TIMEOUT))
@@ -60,11 +53,9 @@ if [ "$PSK_A" = "$PSK_B" ]; then
     echo "✅ SUCCESS: Both nodes have the same PSK!"
     echo "PSK: ${PSK_A}"
 
-    # Additional checks
     echo ""
     echo "====== Additional Checks ======"
 
-    # Check if nodes can ping each other over WireGuard
     echo "Testing connectivity between nodes..."
     if docker exec clab-arnika-ci-test-node-a ping -c 3 -W 2 172.16.0.2 > /dev/null 2>&1; then
         echo "✅ Node-A can ping Node-B through WireGuard tunnel"
@@ -72,15 +63,34 @@ if [ "$PSK_A" = "$PSK_B" ]; then
         echo "⚠️  WARNING: Node-A cannot ping Node-B (may need more time)"
     fi
 
-    # Check Arnika logs
     echo ""
-    echo "Node-A Arnika logs (last 10 lines):"
-    docker exec clab-arnika-ci-test-node-a tail -n 10 /tmp/arnika.log || echo "No logs available"
+    echo "====== Transport Health ======"
+    FAILURES=0
+    for node in node-a node-b ; do
+        for pattern in "rate limited" "QKD queue full" "key stale" ; do
+            HITS=$(docker exec "clab-arnika-ci-test-${node}" grep -c "$pattern" /tmp/arnika.log 2>/dev/null || true)
+            HITS=${HITS:-0}
+            if [ "$HITS" -gt 0 ] ; then
+                echo "❌ FAILED: ${node} logged \"${pattern}\" ${HITS} time(s)"
+                docker exec "clab-arnika-ci-test-${node}" grep -m5 "$pattern" /tmp/arnika.log || true
+                FAILURES=$((FAILURES + 1))
+            else
+                echo "✅ ${node}: no \"${pattern}\""
+            fi
+        done
+    done
 
     echo ""
-    echo "Node-B Arnika logs (last 10 lines):"
-    docker exec clab-arnika-ci-test-node-b tail -n 10 /tmp/arnika.log || echo "No logs available"
+    echo "Node-A Arnika logs (last 40 lines):"
+    docker exec clab-arnika-ci-test-node-a tail -n 40 /tmp/arnika.log || echo "No logs available"
 
+    echo ""
+    echo "Node-B Arnika logs (last 40 lines):"
+    docker exec clab-arnika-ci-test-node-b tail -n 40 /tmp/arnika.log || echo "No logs available"
+
+    if [ "$FAILURES" -gt 0 ] ; then
+        exit 1
+    fi
     exit 0
 else
     echo "❌ FAILED: PSKs do not match!"
