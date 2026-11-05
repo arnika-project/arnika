@@ -205,6 +205,9 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse INTERVAL: %w", err)
 	}
+	if interval <= 0 {
+		return nil, fmt.Errorf("[ERROR] INTERVAL must be positive, got %s", interval)
+	}
 	config.Interval = interval
 	config.WireGuardInterface, err = getEnv("WIREGUARD_INTERFACE")
 	if err != nil {
@@ -261,6 +264,9 @@ func Parse() (*Config, error) {
 	config.KMSRetryInterval, err = time.ParseDuration(getEnvOrDefault("KMS_RETRY_INTERVAL", (config.Interval / 2).String()))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_RETRY_INTERVAL: %w", err)
+	}
+	if config.KMSRetryInterval <= 0 {
+		return nil, fmt.Errorf("[ERROR] KMS_RETRY_INTERVAL must be positive, got %s", config.KMSRetryInterval)
 	}
 	if !config.UsePQC() && config.IsPQCRequired() {
 		return nil, fmt.Errorf("[ERROR] PQC_ENABLED is false but MODE is %s, which requires a PQC key", config.Mode)

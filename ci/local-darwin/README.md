@@ -483,7 +483,7 @@ all — it keeps the PSK it already had, `InvalidateTunnel` never runs, and
 
 It makes no difference *how* QKD is gone: a timed-out fetch and a refused one
 both return an error from `GetNewKey`, and that error goes to the same
-`ticker.Reset(KMSRetryInterval)`. So the frozen and the stopped phases fail
+the same in-interval retry after `KMS_RETRY_INTERVAL`. So the frozen and the stopped phases fail
 identically, in every mode:
 
 | Tests | Symptom |

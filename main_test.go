@@ -139,3 +139,24 @@ func TestBuildPSKInvalidatesAtOnceWhenARequiredPQCKeyIsMissing(t *testing.T) {
 		t.Fatalf("writes = %d, want the one random key that invalidates the tunnel", w.writes)
 	}
 }
+
+func TestIntervalAtGivesBothPeersTheSameBoundaryWhateverTheirStartTime(t *testing.T) {
+	interval := 30 * time.Second
+	n1, end1 := intervalAt(time.Unix(1_800_000_001, 0), interval, ^uint64(0))
+	n2, end2 := intervalAt(time.Unix(1_800_000_029, 999), interval, ^uint64(0))
+	if n1 != n2 || !end1.Equal(end2) || !end1.Equal(time.Unix(1_800_000_030, 0)) {
+		t.Fatalf("got (%d, %v) and (%d, %v)", n1, end1, n2, end2)
+	}
+	if n3, _ := intervalAt(end1, interval, n1); n3 != n1+1 {
+		t.Fatalf("boundary belongs to the next interval: got %d, want %d", n3, n1+1)
+	}
+}
+
+func TestIntervalAtSkipsTheServedIntervalWhenTheSleepWakesBeforeTheClockBoundary(t *testing.T) {
+	interval := 30 * time.Second
+	n, end := intervalAt(time.Unix(1_800_000_001, 0), interval, ^uint64(0))
+	n2, end2 := intervalAt(end.Add(-time.Millisecond), interval, n)
+	if n2 != n+1 || !end2.Equal(end.Add(interval)) {
+		t.Fatalf("got (%d, %v), want (%d, %v)", n2, end2, n+1, end.Add(interval))
+	}
+}

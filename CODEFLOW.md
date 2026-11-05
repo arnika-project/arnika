@@ -58,7 +58,7 @@ sequenceDiagram
 - **Where:** `config/config.go` (`IsPrimary()` method)
 - **What:** Both nodes deterministically calculate their role (PRIMARY or BACKUP) for the current interval as `HMAC-SHA256(ARNIKA_PSK, intervalNumber)` XOR `ARNIKA_ID`, taking the lowest bit.
 - **Why:** Ensures only one node acts as PRIMARY per interval, preventing race conditions.
-- **Requires:** the same `ARNIKA_PSK` and the same `INTERVAL` on both peers, and `ARNIKA_ID` values of **different parity** — only the lowest bit of the ID enters the calculation, so two even or two odd IDs give both nodes the same role in every interval.
+- **Requires:** the same `ARNIKA_PSK` and the same `INTERVAL` on both peers, clocks in sync to well under a second, because `intervalNumber` and the interval boundaries come from the wall clock (`intervalAt`) so the two peers cannot drift apart, and `ARNIKA_ID` values of **different parity** — only the lowest bit of the ID enters the calculation, so two even or two odd IDs give both nodes the same role in every interval.
 
 ### 2. **PRIMARY Requests Key from KMS**
 

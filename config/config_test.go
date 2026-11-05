@@ -402,4 +402,16 @@ func TestParse_RateLimit(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("non-positive INTERVAL and KMS_RETRY_INTERVAL are fatal instead of spinning the rotation loop", func(t *testing.T) {
+		for _, name := range []string{"INTERVAL", "KMS_RETRY_INTERVAL"} {
+			for _, v := range []string{"0s", "-30s"} {
+				setValidEnv(t)
+				t.Setenv(name, v)
+				if _, err := Parse(); err == nil {
+					t.Fatalf("expected Parse to reject %s=%q", name, v)
+				}
+			}
+		}
+	})
 }

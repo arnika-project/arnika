@@ -5,16 +5,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/arnika-project/arnika/auth"
 	"log/slog"
-	"strconv"
-
 	"os"
-
 	"runtime"
 	"runtime/secret"
+	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/arnika-project/arnika/auth"
 
 	"github.com/arnika-project/arnika/config"
 	"github.com/arnika-project/arnika/hardening"
@@ -127,6 +126,15 @@ func invalidate(keyWriter *services.KeyWriterService, logger *slog.Logger, reaso
 	if err := keyWriter.InvalidateTunnel(); err != nil {
 		logger.Error("failed to configure the random PSK", "err", err)
 	}
+}
+
+// intervalAt numbers intervals by clock so both peers share boundaries and counters without drift, and skips served, which the clock names again when the monotonic sleep wakes early.
+func intervalAt(now time.Time, interval time.Duration, served uint64) (uint64, time.Time) {
+	n := uint64(now.UnixNano() / int64(interval))
+	if n == served {
+		n++
+	}
+	return n, time.Unix(0, int64(n+1)*int64(interval))
 }
 
 // nextPQCSetPSKAt falls between two rounds on the scheduler's RoundSeconds grid, so both peers read the same round's key.
@@ -266,12 +274,10 @@ func main() {
 			return setPSK(keyWriter, pqc, key.Key, cfg, backupLog)
 		})
 		go func() {
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			var intervalCounter uint64
+			served := ^uint64(0)
 			for {
-				ticker.Reset(interval)
-				intervalEnd := time.Now().Add(interval)
+				intervalCounter, intervalEnd := intervalAt(time.Now(), interval, served)
+				served = intervalCounter
 				backup := !cfg.IsPrimary(intervalCounter)
 				if backup {
 					backupLog.Info("waiting for a key_id from the peer", "interval", intervalCounter)
@@ -279,13 +285,19 @@ func main() {
 					peerSentKeyID.Store(false)
 					primaryLog.Info("requesting a new QKD key", "kms", cfg.KMSURL)
 					key, err := qkd.GetNewKey()
-					if err != nil {
+					for err != nil {
 						primaryLog.Error("failed to retrieve a QKD key", "kms", cfg.KMSURL, "err", err)
-						ticker.Reset(cfg.KMSRetryInterval)
 						if shouldSetPSKOnQKDFailure(cfg) {
 							setPSK(keyWriter, pqc, nil, cfg, primaryLog)
 						}
-					} else {
+						if time.Until(intervalEnd) <= cfg.KMSRetryInterval {
+							break
+						}
+						time.Sleep(cfg.KMSRetryInterval)
+						primaryLog.Info("requesting a new QKD key", "kms", cfg.KMSURL)
+						key, err = qkd.GetNewKey()
+					}
+					if err == nil {
 						now := time.Now()
 						nextTick := now.Truncate(time.Second).Add(time.Second)
 						primaryLog.Info("serving this interval", "interval", intervalCounter)
@@ -327,12 +339,11 @@ func main() {
 						}
 					}
 				}
-				intervalCounter++
-				<-ticker.C
+				time.Sleep(time.Until(intervalEnd))
 				sawKeyID := peerSentKeyID.Swap(false) // outside the if: a late key_id in a PRIMARY interval must not leak into the next BACKUP one
 				if backup && !sawKeyID {
 					if shouldSetPSKOnQKDFailure(cfg) {
-						backupLog.Error("no key_id from the peer", "interval", intervalCounter-1)
+						backupLog.Error("no key_id from the peer", "interval", intervalCounter)
 						setPSK(keyWriter, pqc, nil, cfg, backupLog)
 					}
 				}

@@ -429,7 +429,7 @@ start without them.
 | `ARNIKA_PSK` | ✅ | — | Shared secret authenticating and encrypting the peer channel, minimum 32 bytes. **Must be identical on both peers** — see the warning below |
 | `ARNIKA_ID` | ➖ | port from `LISTEN_ADDRESS` | Identifier (max 5 digits) used in logs and in PRIMARY/BACKUP election. The two peers' values **must differ in parity** — one odd, one even |
 | `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | Wait before the first resend of the key ID, doubled for each further resend. The PRIMARY waits for the peer's ACK, which confirms the peer installed the key, until the end of the current `INTERVAL` |
-| `INTERVAL` | ➖ | `10s` | Interval between key rotations. **Must be the same on both peers**; align with the WireGuard rekey interval (`120s`) |
+| `INTERVAL` | ➖ | `10s` | Interval between key rotations, aligned to the wall clock (multiples of `INTERVAL` since the Unix epoch), so peer clocks must agree to well under a second. **Must be the same on both peers**; align with the WireGuard rekey interval (`120s`) |
 | `RATE_LIMIT` | ➖ | calculated | Max accepted packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
 | `RATE_WINDOW` | ➖ | `1m` | Window for the per-IP rate limit |
 | `MAX_CLOCK_SKEW` | ➖ | `1m` | Accepted timestamp deviation (replay protection). Requires clocks in sync between peers |
@@ -450,7 +450,7 @@ start without them.
 | `KMS_HTTP_TIMEOUT` | ➖ | `10s` | HTTP timeout for KMS requests |
 | `KMS_BACKOFF_MAX_RETRIES` | ➖ | `5` | Retry attempts per failed KMS request |
 | `KMS_BACKOFF_BASE_DELAY` | ➖ | `100ms` | First backoff delay; grows exponentially per retry |
-| `KMS_RETRY_INTERVAL` | ➖ | `INTERVAL / 2` | Wait before the next rotation attempt after all retries failed |
+| `KMS_RETRY_INTERVAL` | ➖ | `INTERVAL / 2` | Wait before the PRIMARY asks the KMS again after a failed request, within the same `INTERVAL` |
 | `CERTIFICATE` | ➖* | _(none)_ | Client certificate presented to the **KMS** |
 | `PRIVATE_KEY` | ➖* | _(none)_ | Private key for `CERTIFICATE` |
 | `CA_CERTIFICATE` | ➖* | _(none)_ | CA bundle used to verify the **KMS** certificate |
