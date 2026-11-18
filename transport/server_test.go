@@ -509,31 +509,80 @@ func TestLogThrottle(t *testing.T) {
 	}
 }
 
-func TestReplayedPacketIsDropped(t *testing.T) {
-	p := startTestServerQueue(t, nil, 4)
-	enc, err := auth.Encrypt(p.psk, []byte("captured"))
+func (p *testPeer) dataAt(keyID string, ts int64) []byte {
+	p.t.Helper()
+	enc, err := auth.Encrypt(p.psk, []byte(keyID))
 	if err != nil {
-		t.Fatalf("encrypt: %v", err)
+		p.t.Fatalf("encrypt: %v", err)
 	}
-	raw := (&auth.Packet{Type: auth.PacketData, Timestamp: time.Now().Unix(), Payload: enc}).Marshal(p.psk, p.peerOut)
-	for range 2 {
-		if _, err := p.conn.Write(raw); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-	p.send(auth.PacketData, []byte("captured"))
+	return (&auth.Packet{Type: auth.PacketData, Timestamp: ts, Payload: enc}).Marshal(p.psk, p.peerOut)
+}
 
-	for i := range 2 {
+func (p *testPeer) write(conn net.Conn, raw []byte) {
+	p.t.Helper()
+	if _, err := conn.Write(raw); err != nil {
+		p.t.Fatalf("write: %v", err)
+	}
+}
+
+func (p *testPeer) wantKeyIDs(want ...string) {
+	p.t.Helper()
+	for _, w := range want {
 		select {
-		case <-p.result:
+		case got := <-p.result:
+			if got.KeyID != w {
+				p.t.Fatalf("delivered %q, want %q", got.KeyID, w)
+			}
 		case <-time.After(time.Second):
-			t.Fatalf("delivery %d missing: a fresh packet was taken for a replay", i+1)
+			p.t.Fatalf("%q was not delivered", w)
 		}
 	}
 	select {
 	case got := <-p.result:
-		t.Fatalf("replayed packet delivered: %q", got.KeyID)
+		p.t.Fatalf("unexpected delivery: %q", got.KeyID)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestReplayOfAnOlderKeyIDIsDropped(t *testing.T) {
+	p := startTestServerQueue(t, nil, 4)
+	now := time.Now().Unix()
+	captured := p.dataAt("old", now)
+	p.write(p.conn, captured)
+	p.write(p.conn, p.dataAt("new", now+1))
+	p.write(p.conn, captured) // the exact bytes, and a withheld resend of "old" would carry the same timestamp
+	p.wantKeyIDs("old", "new")
+}
+
+func TestKeyIDSentBeforeTheServerStartedIsDropped(t *testing.T) {
+	p := startTestServerQueue(t, nil, 4)
+	p.write(p.conn, p.dataAt("captured-before-restart", time.Now().Unix()-5))
+	p.send(auth.PacketData, []byte("fresh"))
+	p.wantKeyIDs("fresh")
+}
+
+func TestARacedCopyDoesNotTakeTheSendersAck(t *testing.T) {
+	p := startTestServerQueue(t, nil, 4)
+	done := make(chan bool)
+	defer close(done)
+	var installs atomic.Int64
+	go RunKeyIDWorker(done, p.result, func(string) bool { installs.Add(1); return true })
+
+	racer, err := net.Dial("udp", p.conn.RemoteAddr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = racer.Close() })
+	raw := p.dataAt("the-key-id", time.Now().Unix())
+	p.write(racer, raw) // an observer's copy wins the race
+	time.Sleep(50 * time.Millisecond)
+	p.write(p.conn, raw)
+
+	if got, ok := p.ackWithin(time.Second); !ok || got != "the-key-id" {
+		t.Fatalf("ACK = %q, %v; the real sender must get its ACK", got, ok)
+	}
+	if got := installs.Load(); got != 1 {
+		t.Fatalf("installs = %d, want 1", got)
 	}
 }
 
@@ -594,5 +643,38 @@ func TestAwaitAckSurvivesAnICMPError(t *testing.T) {
 	c := ClientConfig{PSK: psk, DirOut: out, DirIn: in, KeyID: "the-key-id", MaxClockSkew: time.Minute}
 	if !awaitAck(conn, c, time.Now().Add(time.Second)) {
 		t.Fatal("awaitAck gave up on an ICMP error although the ACK had arrived")
+	}
+}
+
+func TestWriteConnectedSurvivesAPendingICMPError(t *testing.T) {
+	raddr, err := net.ResolveUDPAddr("udp", freeUDPPort(t))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := conn.Write([]byte{0}); err != nil { // nothing listens yet, so this draws the ICMP error
+		t.Fatalf("write: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	peer, err := net.ListenUDP("udp", raddr)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+
+	if err := WriteConnected(conn, []byte("frame")); err != nil {
+		t.Fatalf("WriteConnected = %v; a spoofable ICMP error must not fail an authenticated send", err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("deadline: %v", err)
+	}
+	buf := make([]byte, 16)
+	n, err := peer.Read(buf)
+	if err != nil || string(buf[:n]) != "frame" {
+		t.Fatalf("peer read %q, %v; want the frame", buf[:n], err)
 	}
 }
