@@ -125,7 +125,7 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 * The PRIMARY installs a QKD key only after the peer confirms it installed the same key, so both ends switch within one packet of each other and a failed lookup on one side never leaves the other on a key it does not share
 * symmetric-PSK based (_quantum secure_) mutual authentication of Arnika peers - (HMAC-SHA256 + AES-256-GCM authenticated UDP protocol), with per-direction key separation so a reflected packet fails at its own sender
 * Arnika listening port is undetectable and unscannable, like wireguard
-* Per-IP UDP rate limiting against flood/DoS attempts
+* Per-IP rate limiting of authenticated UDP packets plus a replay cache; spoofed junk fails the HMAC check and cannot spend a peer's budget
 * Memory hardening — key material is explicitly zeroed after use (`runtime/secret`)
 * KMS request retry with exponential backoff for resilience
 
@@ -430,7 +430,7 @@ start without them.
 | `ARNIKA_ID` | ➖ | port from `LISTEN_ADDRESS` | Identifier (max 5 digits) used in logs and in PRIMARY/BACKUP election. The two peers' values **must differ in parity** — one odd, one even |
 | `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | Wait before the first resend of the key ID, doubled for each further resend. The PRIMARY waits for the peer's ACK, which confirms the peer installed the key, until the end of the current `INTERVAL` |
 | `INTERVAL` | ➖ | `10s` | Interval between key rotations, aligned to the wall clock (multiples of `INTERVAL` since the Unix epoch), so peer clocks must agree to well under a second. **Must be the same on both peers**; align with the WireGuard rekey interval (`120s`) |
-| `RATE_LIMIT` | ➖ | calculated | Max accepted packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
+| `RATE_LIMIT` | ➖ | calculated | Max authenticated packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
 | `RATE_WINDOW` | ➖ | `1m` | Window for the per-IP rate limit |
 | `MAX_CLOCK_SKEW` | ➖ | `1m` | Accepted timestamp deviation (replay protection). Requires clocks in sync between peers |
 | `LOG_LEVEL` | ➖ | `info` | `debug`, `info`, `warn` or `error`. Read before the rest of the configuration, because process hardening logs first. `debug` includes one line per rejected datagram, which flood traffic can drive: raise it only while diagnosing |

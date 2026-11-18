@@ -43,6 +43,11 @@ func startTestServer(t *testing.T, handle PQCHandler) *testPeer {
 
 func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *testPeer {
 	t.Helper()
+	return startTestServerLimit(t, handle, queueDepth, 10000)
+}
+
+func startTestServerLimit(t *testing.T, handle PQCHandler, queueDepth, rateLimit int) *testPeer {
+	t.Helper()
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
 	peerOut, peerIn := auth.DirectionFor(9999)
 	srvOut, srvIn := peerIn, peerOut
@@ -54,7 +59,7 @@ func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *test
 		_ = Serve(ServerConfig{
 			Address: addr, PSK: psk, DirOut: srvOut, DirIn: srvIn,
 			KeyIDs: result, Done: done, PQC: handle,
-			RateLimit: 10000, RateWindow: time.Minute, MaxClockSkew: time.Minute,
+			RateLimit: rateLimit, RateWindow: time.Minute, MaxClockSkew: time.Minute,
 			Log: slog.New(slog.DiscardHandler),
 		})
 	}()
@@ -501,5 +506,94 @@ func TestLogThrottle(t *testing.T) {
 		if !zero.allow() {
 			t.Fatal("the zero value must allow every call")
 		}
+	}
+}
+
+func TestReplayedPacketIsDropped(t *testing.T) {
+	p := startTestServerQueue(t, nil, 4)
+	enc, err := auth.Encrypt(p.psk, []byte("captured"))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	raw := (&auth.Packet{Type: auth.PacketData, Timestamp: time.Now().Unix(), Payload: enc}).Marshal(p.psk, p.peerOut)
+	for range 2 {
+		if _, err := p.conn.Write(raw); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	p.send(auth.PacketData, []byte("captured")) // a legitimate resend re-encrypts, so it is not a replay
+
+	for i := range 2 {
+		select {
+		case <-p.result:
+		case <-time.After(time.Second):
+			t.Fatalf("delivery %d missing: a fresh packet was taken for a replay", i+1)
+		}
+	}
+	select {
+	case got := <-p.result:
+		t.Fatalf("replayed packet delivered: %q", got.KeyID)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestUnauthenticatedJunkDoesNotSpendThePeersBudget(t *testing.T) {
+	p := startTestServerLimit(t, nil, 1, 3)
+	for range 20 {
+		if _, err := p.conn.Write([]byte{0}); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	p.send(auth.PacketData, []byte("the-key-id"))
+	select {
+	case got := <-p.result:
+		if got.KeyID != "the-key-id" {
+			t.Fatalf("result = %q, want %q", got.KeyID, "the-key-id")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authenticated packet dropped after junk from the same IP")
+	}
+}
+
+// refusedThenReplied leaves an ICMP port-unreachable error pending on conn and then queues reply from the address conn is connected to.
+func refusedThenReplied(t *testing.T, conn *net.UDPConn, reply []byte) {
+	t.Helper()
+	if _, err := conn.Write([]byte{0}); err != nil { // nothing listens yet, so this draws the ICMP error
+		t.Fatalf("write: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	peer, err := net.ListenUDP("udp", conn.RemoteAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	if _, err := peer.WriteToUDP(reply, conn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestAwaitAckSurvivesAnICMPError(t *testing.T) {
+	psk := []byte("test-psk-at-least-32-bytes-long!!")
+	out, in := auth.DirectionFor(1)
+	raddr, err := net.ResolveUDPAddr("udp", freeUDPPort(t))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	enc, err := auth.Encrypt(psk, []byte("the-key-id"))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	refusedThenReplied(t, conn, (&auth.Packet{Type: auth.PacketAck, Timestamp: time.Now().Unix(), Payload: enc}).Marshal(psk, in))
+
+	c := ClientConfig{PSK: psk, DirOut: out, DirIn: in, KeyID: "the-key-id", MaxClockSkew: time.Minute}
+	if !awaitAck(conn, c, time.Now().Add(time.Second)) {
+		t.Fatal("awaitAck gave up on an ICMP error although the ACK had arrived")
 	}
 }

@@ -182,3 +182,51 @@ func freeUDPPort(t *testing.T) string {
 	}
 	return fmt.Sprintf("127.0.0.1:%d", port)
 }
+
+func TestPQCRecvSurvivesAnICMPError(t *testing.T) {
+	psk := []byte("test-psk-at-least-32-bytes-long!!")
+	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	peerAddr := peer.LocalAddr().(*net.UDPAddr)
+	dirOut, dirIn := auth.DirectionFor(2)
+	send, recv, err := pqcDial(&config.Config{ServerAddress: peerAddr.String(), ArnikaPSK: psk, MaxClockSkew: time.Minute}, dirOut, dirIn)
+	if err != nil {
+		t.Fatalf("pqcDial: %v", err)
+	}
+
+	if err := send([]byte("hello")); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	buf := make([]byte, 2048)
+	_, initiator, err := peer.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	_ = peer.Close()
+	if err := send([]byte("refused")); err != nil { // nothing listens now, so this draws the ICMP error
+		t.Fatalf("send: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	peer, err = net.ListenUDP("udp", peerAddr)
+	if err != nil {
+		t.Fatalf("relisten: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	enc, err := auth.Encrypt(psk, []byte("reply"))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	reply := (&auth.Packet{Type: auth.PacketPQC, Timestamp: time.Now().Unix(), Payload: enc}).Marshal(psk, dirIn)
+	if _, err := peer.WriteToUDP(reply, initiator); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	frame, err := recv(time.Now().Add(time.Second))
+	if err != nil || string(frame) != "reply" {
+		t.Fatalf("recv = %q, %v; want the authenticated reply despite the ICMP error", frame, err)
+	}
+}
