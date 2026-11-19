@@ -26,9 +26,6 @@ const authFailWarnEvery = 10 * time.Second
 // neither spend the peer's per-IP budget nor add limiter entries.
 const replayBucket = "replay"
 
-// maxAckCopies caps the senders of copies remembered while a key_id installs; fresh datagrams come only from the PSK holder.
-const maxAckCopies = 8
-
 // PQCHandler must not block: it runs on the UDP read loop that also carries the QKD key ids.
 type PQCHandler func(frame []byte, reply func(frame []byte) error) error
 
@@ -139,6 +136,12 @@ func Serve(c ServerConfig) error {
 			continue
 		}
 
+		// Only DATA and PQC are addressed to this listener; a peer's ACK verifies here too, so it must not spend the budget.
+		if pkt.Type != auth.PacketData && pkt.Type != auth.PacketPQC {
+			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "unknown type")
+			continue
+		}
+
 		// Every legitimate send re-encrypts under a fresh GCM nonce, so a repeated tag is a copy of a datagram already
 		// processed: a replay, or the original after a raced copy. Copies only ever get an answer, never a second run.
 		tag := [32]byte(pkt.Signature)
@@ -172,6 +175,10 @@ func Serve(c ServerConfig) error {
 			}
 
 			keyID := string(decrypted)
+			if keyID == "" { // honest peers never send one, and lastAcks is still nil for it
+				backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "empty key_id")
+				continue
+			}
 			// A newer key_id is first sent on a later whole second than any send of the one before it (main.go waits for
 			// the next tick), so an older timestamp on a different key_id is a replay. Only a new key_id takes a queue
 			// slot; every sender of the current one, a raced copy or the real sender, is ACKed once it is installed.
@@ -216,10 +223,6 @@ func Serve(c ServerConfig) error {
 			if err := c.PQC(decrypted, reply); err != nil {
 				backupLog.Warn("PQC frame not accepted", "peer", remoteAddr, "err", err)
 			}
-
-		default:
-			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "unknown type")
-			continue
 		}
 	}
 }
@@ -236,6 +239,9 @@ func SendKeyID(c ClientConfig) error {
 	}
 	if c.Deadline.IsZero() {
 		return fmt.Errorf("c.Deadline is unset")
+	}
+	if !time.Now().Before(c.Deadline) { // the peer would install a key_id this side has already given up on
+		return fmt.Errorf("c.Deadline %s has passed", c.Deadline.Format(time.TimeOnly))
 	}
 
 	raddr, err := net.ResolveUDPAddr("udp", c.Address)
@@ -320,7 +326,7 @@ type ackSet struct {
 	send      func(to *net.UDPAddr)
 	installed bool
 	fresh     []*net.UDPAddr // senders of fresh datagrams, which only the PSK holder can produce
-	copies    []*net.UDPAddr // senders of copies, capped because a spoofer picks them
+	copies    []*net.UDPAddr // senders of copies; uncapped, since the replay bucket bounds them and a cap lets racers crowd out the sender
 }
 
 func (a *ackSet) add(to *net.UDPAddr, fresh bool) {
@@ -339,9 +345,7 @@ func (a *ackSet) add(to *net.UDPAddr, fresh bool) {
 			return
 		}
 	}
-	if fresh || len(a.copies) < maxAckCopies {
-		*list = append(*list, to)
-	}
+	*list = append(*list, to)
 }
 
 func (a *ackSet) ack() {
