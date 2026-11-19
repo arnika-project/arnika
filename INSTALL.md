@@ -571,8 +571,8 @@ Run on both Alice and Bob:
   # For KMS mode
   tmux new -d -s kms '/opt/kms/kms' \;
 
-  # Arnika
-  tmux new -d -s arnika 'env \$(cat /opt/arnika/arnika.env | xargs) /opt/arnika/arnika' \;
+  # Arnika: source the env file, so ARNIKA_PSK never appears in a process's command line
+  tmux new -d -s arnika 'set -a; . /opt/arnika/arnika.env; set +a; exec /opt/arnika/arnika' \;
 
   # WG watch
   tmux new -d -s wg 'wg-watch.sh' \;
