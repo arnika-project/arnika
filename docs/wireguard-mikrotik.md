@@ -28,17 +28,17 @@ follow, see [`KEYCONTROL.md`](../KEYCONTROL.md).
 ## At a Glance
 
 | | |
-|---|---|
+| --- | --- |
 | **Module name** | `wireguard-mikrotik` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | `wireguard_mikrotik` |
-| **Adapter** | [`repositories/wireguard-mikrotik.go`](../repositories/wireguard-mikrotik.go) |
-| **Tests** | [`repositories/wireguard-mikrotik_test.go`](../repositories/wireguard-mikrotik_test.go) |
-| **Wiring** | [`wireguardmikrotik.go`](../wireguardmikrotik.go) |
+| **Adapter** | [`repositories/wgmikrotik/mikrotik.go`](../repositories/wgmikrotik/mikrotik.go) |
+| **Tests** | [`repositories/wgmikrotik/mikrotik_test.go`](../repositories/wgmikrotik/mikrotik_test.go) |
+| **Wiring** | [`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go) |
 | **Target** | MikroTik RouterOS **v7+** with the WireGuard feature |
 | **Transport** | HTTPS to the RouterOS REST API (`/rest`), HTTP Basic auth |
 | **Dependencies** | Go standard library only |
-| **Replaces** | The default [netlink writer](../repositories/wireguard-netlink.go), which configures a *local* WireGuard interface |
+| **Replaces** | The default [netlink writer](../repositories/wgnetlink/netlink.go), which configures a *local* WireGuard interface |
 
 Use this module when the WireGuard tunnel terminates on a **MikroTik router**.
 The deployment documented here runs Arnika **on the router**, as a container
@@ -49,9 +49,9 @@ that reaches the router's own REST API — see
 
 ## How the Module Works
 
-Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK,
-base64-encodes it, and hands it to `KeyWriterService.SetPSK`. This module turns
-that call into two REST requests.
+Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK and
+passes its raw bytes to `KeyWriterService.SetPSK`. This adapter base64-encodes
+the bytes for the RouterOS REST API, which turns the call into two REST requests.
 
 ```mermaid
 sequenceDiagram
@@ -69,10 +69,10 @@ Two behaviours define what the router side must support:
 - **The peer is re-resolved on every rotation.** RouterOS internal ids (`*3`)
   are not stable across reboots or configuration changes, so the module never
   caches one.
-- **`InvalidateTunnel` is the fail-safe.** When no valid key material is
-  available, Arnika tears the tunnel down by writing a fresh random 32-byte PSK
-  through the same code path. The peer stays configured; the session stops
-  matching.
+- **`KeyWriterService.InvalidateTunnel` is the fail-safe.** When no valid key
+  material is available, the service generates a fresh random 32-byte PSK and
+  sends it through `SetPSK`. This adapter encodes and writes it through the same
+  REST path. The peer stays configured; the session stops matching.
 
 Arnika **only updates the `preshared-key` of an existing peer** — it never
 creates the interface or the peer.
@@ -84,9 +84,9 @@ creates the interface or the peer.
 Two files, following the layout in
 [`KEYCONTROL.md`](../KEYCONTROL.md#naming-and-file-layout-conventions).
 
-### The adapter — `repositories/wireguard-mikrotik.go`
+### The adapter — `repositories/wgmikrotik/mikrotik.go`
 
-Implements the `keyWriterRepository` contract (`SetPSK`, `InvalidateTunnel`).
+Implements the `keyWriterRepository` contract (`SetPSK` with raw key bytes).
 It carries **no build tag**, so it is compiled, vetted, linted and unit-tested
 on every ordinary `go test ./...` run even though the default binary ships the
 netlink writer.
@@ -108,7 +108,7 @@ Three design decisions shape it:
 Non-2xx responses become errors carrying the method, path, status and the first
 512 bytes of the RouterOS error body.
 
-### The wiring — `wireguardmikrotik.go`
+### The wiring — `wire_wireguard_mikrotik.go`
 
 Guarded by `//go:build wireguard_mikrotik`. It is the *only* place this
 backend's environment variables are read, which keeps the shared
@@ -118,8 +118,8 @@ backend's environment variables are read, which keeps the shared
 misconfiguration fails immediately rather than at the first rotation.
 
 Because this file defines `getKeyWriterService`, and
-[`wireguardnetlink.go`](../wireguardnetlink.go) defines the same symbol under
-`//go:build wireguard_netlink || !wireguard_mikrotik`, exactly one writer is
+[`wire_wireguard_netlink.go`](../wire_wireguard_netlink.go) defines the same symbol under
+`//go:build wireguard_netlink || (!wireguard_mikrotik && !wireguard_netlink_netns)`, exactly one writer is
 ever compiled — and asking for both tags is a compile error, not a silent
 choice.
 
@@ -136,7 +136,7 @@ RouterOS syntax.
 Placeholders:
 
 | Placeholder | Meaning | Example |
-|---|---|---|
+| --- | --- | --- |
 | `<ROUTER_IP>` | Address Arnika reaches the router on — must be in the certificate SAN | `100.102.202.1` |
 | `<PEER_PUBKEY>` | Public key of the **remote** WireGuard peer | `uUD5lB2Ze5oi…=` |
 | `<ARNIKA_SOURCE_IP>` | Address Arnika connects from — its container veth IP | `100.102.204.22` |
@@ -241,7 +241,7 @@ and write one property.
 > unrelated to the `api` *service* disabled in Step 3.
 
 | Policy | Why |
-|---|---|
+| --- | --- |
 | `rest-api` | Access to `/rest` at all |
 | `api` | Permission to execute the commands behind it |
 | `read` | The `peers/print` lookup |
@@ -291,11 +291,11 @@ MikroTik settings are read from the environment **only** in the
 `WIREGUARD_*` values — which here name an interface and peer **on the router**.
 
 | Env var | Required | Default | Description |
-|---|:---:|---|---|
+| --- | :---: | --- | --- |
 | `MIKROTIK_URL` | ✅ | — | Base URL, e.g. `https://100.102.202.1`. **No trailing `/rest`.** Must match the certificate SAN |
 | `MIKROTIK_USERNAME` | ✅ | — | The `arnika` user from [Step 5](#step-5--a-restricted-user-for-arnika) |
 | `MIKROTIK_PASSWORD` | ✅ | — | Password for that user |
-| `MIKROTIK_CA_CERTIFICATE` | ➖ | _(system roots)_ | PEM CA from [Step 4](#step-4--export-the-ca-for-arnika). **Effectively mandatory in a container** — a `FROM scratch` image has no system roots to fall back to |
+| `MIKROTIK_CA_CERTIFICATE` | ➖ | *(system roots)* | PEM CA from [Step 4](#step-4--export-the-ca-for-arnika). **Effectively mandatory in a container** — a `FROM scratch` image has no system roots to fall back to |
 | `MIKROTIK_TLS_INSECURE` | ➖ | `false` | Disables verification — **lab only** |
 | `MIKROTIK_HTTP_TIMEOUT` | ➖ | `10s` | Go duration string |
 | `WIREGUARD_INTERFACE` | ✅ | — | Interface name **on the router** |
@@ -307,7 +307,7 @@ is the enforced minimum either way.
 
 The usual Arnika settings (`KMS_URL`, `CERTIFICATE`, `PRIVATE_KEY`,
 `CA_CERTIFICATE`, `LISTEN_ADDRESS`, `SERVER_ADDRESS`, `ARNIKA_ID`, `INTERVAL`,
-`MODE`, `PQC_PSK_FILE`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
+`MODE`, `PQC_ENABLED`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
 [Part 4, Step 4](#step-4--environment-and-certificate-mount) shows a complete
 working set in RouterOS form.
 
@@ -353,19 +353,19 @@ GOOS=linux GOARCH=arm64 make build-mikrotik         # cross-compiled
 ### Verify the right writer was compiled in
 
 `go test ./...` and `golangci-lint` run against the **default (netlink)** build,
-so they do not cover [`wireguardmikrotik.go`](../wireguardmikrotik.go):
+so they do not cover [`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go):
 
 ```bash
 GOEXPERIMENT=runtimesecret go vet -tags wireguard_mikrotik ./...
 go version -m build/arnika-linux-arm64-mikrotik | grep "build\s\+-tags"
-# build	-tags=wireguard_mikrotik
+# build -tags=wireguard_mikrotik
 ```
 
 Requesting both writers is a deliberate compile error — this **must** fail:
 
 ```bash
 GOEXPERIMENT=runtimesecret go build -tags "wireguard_netlink wireguard_mikrotik" .
-# ./wireguardnetlink.go:11:6: getKeyWriterService redeclared in this block
+# ./wire_wireguard_netlink.go:11:6: getKeyWriterService redeclared in this block
 ```
 
 ---
@@ -407,8 +407,8 @@ Confirm the binary is really the MikroTik build, then build a
 **docker-archive**:
 
 ```sh
-strings -a arnika-linux-arm64-mikrotik | grep -oE "arnika/repositories\.[A-Za-z]+" | sort -u
-# expect NewWireguardMikrotikRepository — and NO WireguardNetlinkRepository
+strings -a arnika-linux-arm64-mikrotik | grep -oE "arnika/repositories/[a-z]+" | sort -u
+# expect arnika/repositories/wgmikrotik, and NO arnika/repositories/wgnetlink
 
 docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
     -t arnika:2.0.0a -o type=docker,dest=arnika.tar .
@@ -435,7 +435,7 @@ EOF
 ```
 
 | File | Purpose | Env var |
-|---|---|---|
+| --- | --- | --- |
 | `api-ca.crt` | Verifies **this router's** `www-ssl` certificate ([Step 4](#step-4--export-the-ca-for-arnika)) | `MIKROTIK_CA_CERTIFICATE` |
 | `kms-ca.crt` | Verifies the **KMS / QKD** endpoint | `CA_CERTIFICATE` |
 | `client.crt` / `client.key` | Arnika's client certificate for mTLS **to the KMS** | `CERTIFICATE` / `PRIVATE_KEY` |
@@ -503,7 +503,7 @@ Every certificate value is a path **inside** the container, under the
 When two Arnika instances form a pair, these differ per node:
 
 | Env var | Meaning |
-|---|---|
+| --- | --- |
 | `SERVER_ADDRESS` | The **peer** Arnika's `LISTEN_ADDRESS` |
 | `ARNIKA_ID` | Decides which side is PRIMARY for a given interval. Set it explicitly on both nodes, and give the two values **different parity** — one odd, one even. Only the lowest bit is used, so two odd or two even IDs make both nodes pick the same role in every interval |
 | `WIREGUARD_PEER_PUBLIC_KEY` | The **other** router's public key |
@@ -512,7 +512,7 @@ When two Arnika instances form a pair, these differ per node:
 And these must be **identical** on both nodes:
 
 | Env var | Meaning |
-|---|---|
+| --- | --- |
 | `ARNIKA_PSK` | Shared secret authenticating and encrypting the peer channel. Must be set — with it unset the channel keys derive from the empty string and provide no protection |
 | `INTERVAL` | Roles are elected per interval number, so differing intervals drift the two nodes apart |
 | `MODE` | Both sides must agree on which key sources are mandatory |
@@ -548,7 +548,7 @@ And these must be **identical** on both nodes:
 /log/print where topics~"container"
 ```
 
-```
+```text
 arnika: [INFO] PRIMARY[2] [OK] PSK configured on WireGuard interface: wg1 for peer: uUD5lB2Ze5oi…=
 ```
 
@@ -581,7 +581,7 @@ The endpoints this module uses, and the hand-run equivalents for debugging.
 ### Verb mapping
 
 | HTTP | RouterOS action | CLI equivalent |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | print (list/read) | `/path/print` |
 | `PUT` | **add (create)** | `/path/add` |
 | `PATCH` | set (update) | `/path/set` |
@@ -594,7 +594,7 @@ module uses only `POST …/print` and `PATCH …/<id>`.
 ### Which service serves REST
 
 | Service | Port | Serves REST? |
-|---|---|---|
+| --- | --- | --- |
 | `www` | 80 | Yes — plaintext, do not use |
 | `www-ssl` | 443 | **Yes — use this** |
 | `api` | 8728 | No — legacy binary API |
@@ -663,19 +663,21 @@ the Arnika log.
 The adapter carries no build tag, so its tests run in the ordinary suite:
 
 ```bash
-GOEXPERIMENT=runtimesecret go test ./repositories/ -run TestWireguardMikrotik -v
+GOEXPERIMENT=runtimesecret go test ./repositories/wgmikrotik/ -run TestWireguardMikrotik -v
 ```
 
-[`repositories/wireguard-mikrotik_test.go`](../repositories/wireguard-mikrotik_test.go)
+[`repositories/wgmikrotik/mikrotik_test.go`](../repositories/wgmikrotik/mikrotik_test.go)
 stands up an `httptest.Server` impersonating the RouterOS peers collection:
 
 | Test | What it pins down |
-|---|---|
+| --- | --- |
 | `…_SetPSK` | Basic auth is sent; the id is resolved with a server-side `.query` (exactly one `print`); a single `PATCH` targets the right `.id` with the right PSK |
 | `…_SetPSK_PeerNotFound` | A missing peer is an error, and **no** `PATCH` is attempted |
-| `…_InvalidateTunnel` | The written PSK is valid base64 of exactly 32 bytes, and differs between calls |
 
-The tagged wiring file is not covered — check it with
+`KeyWriterService.InvalidateTunnel` is tested separately in
+[`services/keywriter_test.go`](../services/keywriter_test.go), which verifies
+that each call writes a fresh random 32-byte PSK. The tagged wiring file is not
+covered — check it with
 `GOEXPERIMENT=runtimesecret go vet -tags wireguard_mikrotik ./...`.
 
 ---

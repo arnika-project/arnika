@@ -25,7 +25,8 @@ and **Bob** joined by a single WireGuard tunnel.
 - Internet connectivity
 - Pre-generated Wireguard keys for both hosts (private keys, public keys, and PSK)
 - A shared Arnika peer secret (`ARNIKA_PSK`) — one value used on **both** hosts, generated with
-  `openssl rand -base64 32`
+  `openssl rand -base64 32`. It is mandatory and must be at least 32 bytes: Arnika refuses to
+  start otherwise, and a chosen passphrase is not acceptable
 - (Optional) PQC keys for PQC mode
 - (Optional) KMS certificates for KMS mode
 - Build tools to compile Arnika from source: `git`, `make` and a **Go 1.26+** toolchain — see
@@ -116,6 +117,7 @@ Run on both Alice and Bob:
   ```
 
   **For Alice**:
+
   ```bash
   sudo tee /etc/wireguard/qcicat0.conf > /dev/null << EOF
   [Interface]
@@ -132,6 +134,7 @@ Run on both Alice and Bob:
   ```
 
   **For Bob**:
+
   ```bash
   sudo tee /etc/wireguard/qcicat0.conf > /dev/null << EOF
   [Interface]
@@ -165,10 +168,13 @@ Run on both Alice and Bob:
 > [!NOTE]
 > Only required for Post-Quantum Cryptography (PQC) mode.
 
-Refer to the installation guide of your chosen PQC key provider. Arnika needs nothing from it but
-the path to the key file it writes, configured as `PQC_PSK_FILE`. The file must be `0600` or
-stricter, and its parent directory must not be writable by the Arnika user.
+**No external PQC provider is required.** Arnika agrees the PQC key with its peer itself, using
+HPKE (RFC 9180) over the socket it already binds: no daemon to install, no key on disk, no extra
+port. It is **enabled by default** on both peers — see
+[`docs/pqc-hpke.md`](docs/pqc-hpke.md). Set `PQC_ENABLED="false"` to run QKD-only.
 
+Earlier releases read the key via file from an external PQC provider, configured with
+`PQC_PSK_FILE`. That mechanism has been removed; the variable is ignored.
 
 ## Build from Source
 
@@ -319,6 +325,7 @@ Run on both Alice and Bob:
 - Copy certificates for KMS (if using KMS mode):
 
   **For Alice**:
+
   ```bash
   sudo cp <CA_CERT_FILE> /opt/arnika/kms_certs/ca.crt
   sudo cp <ALICE_CERT_FILE> /opt/arnika/kms_certs/arnika-alice.crt
@@ -329,6 +336,7 @@ Run on both Alice and Bob:
   ```
 
   **For Bob**:
+
   ```bash
   sudo cp <CA_CERT_FILE> /opt/arnika/kms_certs/ca.crt
   sudo cp <BOB_CERT_FILE> /opt/arnika/kms_certs/arnika-bob.crt
@@ -341,6 +349,7 @@ Run on both Alice and Bob:
 - Create an environment file for Arnika:
 
   **For Alice**:
+
   ```bash
   sudo tee /opt/arnika/arnika.env > /dev/null << EOF
   INTERVAL="120s"
@@ -355,14 +364,16 @@ Run on both Alice and Bob:
   KMS_URL="https://<ALICE_KMS_SERVER>:7000/api/v1/keys/arnika-bob"
   WIREGUARD_INTERFACE="qcicat0"
   WIREGUARD_PEER_PUBLIC_KEY="<BOB_WIREGUARD_PUBLIC_KEY>"
-  # Uncomment if using PQC mode:
-  #PQC_PSK_FILE="/opt/pqc/key_out/pqc_psk"
+  # The PQC key agreement is on by default; uncomment to run QKD-only
+  # (must match on both peers):
+  #PQC_ENABLED="false"
   EOF
 
   sudo chmod 600 /opt/arnika/arnika.env
   ```
 
   **For Bob**:
+
   ```bash
   sudo tee /opt/arnika/arnika.env > /dev/null << EOF
   INTERVAL="120s"
@@ -377,8 +388,9 @@ Run on both Alice and Bob:
   KMS_URL="https://<BOB_KMS_SERVER>:7000/api/v1/keys/arnika-alice"
   WIREGUARD_INTERFACE="qcicat0"
   WIREGUARD_PEER_PUBLIC_KEY="<ALICE_WIREGUARD_PUBLIC_KEY>"
-  # Uncomment if using PQC mode:
-  #PQC_PSK_FILE="/opt/pqc/key_out/pqc_psk"
+  # The PQC key agreement is on by default; uncomment to run QKD-only
+  # (must match on both peers):
+  #PQC_ENABLED="false"
   EOF
 
   sudo chmod 600 /opt/arnika/arnika.env
@@ -398,6 +410,8 @@ Run on both Alice and Bob:
   > - **`INTERVAL` must be identical.** Roles are elected per interval number, so different
   >   interval lengths drift the two peers apart. Earlier releases suggested offsetting Bob's
   >   interval to avoid flapping; that is obsolete and now harmful.
+
+  <!-- -->
 
   > [!NOTE]
   > The `KMS_URL` above points at a real KMS. With the bundled simulator instead, use
@@ -458,6 +472,7 @@ Run on both Alice and Bob:
 - Create utility scripts:
 
   **KMS key request script** (for retrieving and managing keys from the KMS server):
+
   ```bash
   sudo tee /opt/arnika-tools/keyreq.sh > /dev/null << EOF
   #!/bin/bash
@@ -493,6 +508,7 @@ Run on both Alice and Bob:
   ```
 
   **Arnika service management script** (for starting/stopping all services):
+
   ```bash
   sudo tee /opt/arnika-tools/init_arnika.sh > /dev/null << EOF
   #!/bin/bash
@@ -525,6 +541,7 @@ Run on both Alice and Bob:
   ```
 
   **Wireguard show script** (displays the current Wireguard status):
+
   ```bash
   sudo tee /opt/arnika-tools/wg-show.sh > /dev/null << EOF
   #!/bin/bash
@@ -533,6 +550,7 @@ Run on both Alice and Bob:
   ```
 
   **Wireguard watch script** (continuously monitors Wireguard status):
+
   ```bash
   sudo tee /opt/arnika-tools/wg-watch.sh > /dev/null << EOF
   #!/bin/bash
@@ -541,6 +559,7 @@ Run on both Alice and Bob:
   ```
 
   **Tmux init script** (for starting all services in tmux sessions):
+
   ```bash
   sudo tee /opt/arnika-tools/init_tmux.sh > /dev/null << EOF
   #!/bin/sh
@@ -567,6 +586,7 @@ Run on both Alice and Bob:
   ```
 
   **Fping init script** (for monitoring connectivity):
+
   ```bash
   sudo tee /opt/arnika-tools/init_fping.sh > /dev/null << EOF
   #!/bin/bash
@@ -580,6 +600,7 @@ Run on both Alice and Bob:
   ```
 
   **Iperf init script** (for testing network performance):
+
   ```bash
   sudo tee /opt/arnika-tools/init_iperf.sh > /dev/null << EOF
   #!/bin/bash
@@ -593,6 +614,7 @@ Run on both Alice and Bob:
   ```
 
   **Tcpdump init script** (for capturing and analyzing packets):
+
   ```bash
   sudo tee /opt/arnika-tools/init_tcpdump.sh > /dev/null << EOF
   #!/bin/bash
@@ -690,20 +712,19 @@ tmux attach -t <session>   # kms, arnika, wg or ping
   journalctl -u arnika
   ```
 
-  > [!CAUTION]
-  > Arnika's startup banner prints `ARNIKA_PSK` in cleartext, so treat this journal as sensitive
-  > and redact it before sharing.
+  > [!NOTE]
+  > The startup banner redacts `ARNIKA_PSK`, printing only its length.
 
 - Verify that key rotation and role election work:
 
   ```bash
-  journalctl -u arnika -f | grep -E 'PRIMARY|BACKUP'
+  journalctl -u arnika -f | grep -E 'role=(primary|backup)'
   ```
 
-  Across consecutive intervals exactly **one** of the two hosts must log `PRIMARY` at a time, and
-  both must log `[OK] PSK configured on WireGuard interface`. If both hosts log `PRIMARY` for the
-  same interval, or neither does, check that `ARNIKA_PSK` is identical, `INTERVAL` is identical,
-  and the two `ARNIKA_ID` values differ in parity.
+  Across consecutive intervals exactly **one** of the two hosts must log `role=primary` at a time,
+  and both must log `msg="PSK configured on WireGuard interface"`. If both hosts log `role=primary`
+  for the same interval, or neither does, check that `ARNIKA_PSK` is identical, `INTERVAL` is
+  identical, and the two `ARNIKA_ID` values differ in parity.
 
 - Confirm WireGuard is actually receiving a PSK:
 
@@ -717,6 +738,7 @@ tmux attach -t <session>   # kms, arnika, wg or ping
 - Test connectivity between Alice and Bob:
 
   **On Alice**:
+
   ```bash
   # Ping Bob's IPv6 address
   ping fdac::2
@@ -726,6 +748,7 @@ tmux attach -t <session>   # kms, arnika, wg or ping
   ```
 
   **On Bob**:
+
   ```bash
   # Ping Alice's IPv6 address
   ping fdac::1
@@ -737,11 +760,13 @@ tmux attach -t <session>   # kms, arnika, wg or ping
 - Test network performance (optional):
 
   **On Alice**:
+
   ```bash
   init_iperf.sh
   ```
 
   **On Bob**:
+
   ```bash
   # Edit the script first to uncomment the client line
   init_iperf.sh

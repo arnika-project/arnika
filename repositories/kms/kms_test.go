@@ -1,4 +1,4 @@
-package repositories
+package kms
 
 import (
 	"errors"
@@ -10,28 +10,15 @@ import (
 	"time"
 )
 
-// newKMSTestRepo builds an HTTPKMSRepository against a test server without
-// going through NewHTTPKMSRepository, which calls log.Fatal on certificate
-// problems.
-//
-// Named for the repository it builds rather than `newTestRepo`, because
-// repositories/ now holds more than one kind: wireguard-mikrotik_test.go
-// declares its own helper of that name returning a
-// WireguardMikrotikRepository, and two cannot coexist in one package. Keeping
-// the type in the name leaves room for the next key writer.
-func newKMSTestRepo(baseURL string, maxRetries int) *HTTPKMSRepository {
-	return &HTTPKMSRepository{
+func newTestRepo(baseURL string, maxRetries int) *Repository {
+	return &Repository{
 		baseURL:          baseURL,
 		maxRetries:       maxRetries,
 		backoffBaseDelay: time.Millisecond,
 		conn:             &http.Client{Timeout: 5 * time.Second},
-		Managed:          true,
 	}
 }
 
-// A KMS that is reachable but cannot serve a key right now. ETSI GS QKD 014
-// leaves the status open, and an implementation that answers 503 when its key
-// pool is momentarily empty is behaving reasonably.
 func busyKMS(status int) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
@@ -45,16 +32,6 @@ func okKMS() *httptest.Server {
 	}))
 }
 
-// TestKMSRequestNonOKDoesNotReadClosedBody is the regression test.
-//
-// kmsRequest closed the response body inside the retry loop and read it after
-// the loop. A non-2xx is a successful HTTP transaction, so err was nil, the
-// nil-check did not return, and io.ReadAll ran against an already-closed body:
-//
-//	http: read on closed response body
-//
-// The caller sees that instead of "the KMS had no key", which in a QKD
-// deployment means the two ends silently end up on different key material.
 func TestKMSRequestNonOKDoesNotReadClosedBody(t *testing.T) {
 	for _, status := range []int{
 		http.StatusServiceUnavailable,
@@ -68,7 +45,7 @@ func TestKMSRequestNonOKDoesNotReadClosedBody(t *testing.T) {
 				srv := busyKMS(status)
 				defer srv.Close()
 
-				_, _, err := newKMSTestRepo(srv.URL, retries).kmsRequest("/enc_keys")
+				_, _, err := newTestRepo(srv.URL, retries).kmsRequest("/enc_keys")
 				if err == nil {
 					t.Fatal("expected an error when the KMS never returns 200")
 				}
@@ -80,14 +57,11 @@ func TestKMSRequestNonOKDoesNotReadClosedBody(t *testing.T) {
 	}
 }
 
-// The error must also say what went wrong. An exhausted retry loop used to be
-// indistinguishable from a parse failure, because the status was never turned
-// into an error of its own.
 func TestKMSRequestReportsAnExhaustedRetryLoop(t *testing.T) {
 	srv := busyKMS(http.StatusServiceUnavailable)
 	defer srv.Close()
 
-	_, _, err := newKMSTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
+	_, _, err := newTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -96,13 +70,11 @@ func TestKMSRequestReportsAnExhaustedRetryLoop(t *testing.T) {
 	}
 }
 
-// Not vacuous: the happy path must still work, or the two tests above would
-// pass on a function that always fails.
 func TestKMSRequestSucceedsOnOK(t *testing.T) {
 	srv := okKMS()
 	defer srv.Close()
 
-	id, key, err := newKMSTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
+	id, key, err := newTestRepo(srv.URL, 2).kmsRequest("/enc_keys")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,9 +86,6 @@ func TestKMSRequestSucceedsOnOK(t *testing.T) {
 	}
 }
 
-// A KMS that fails and then recovers must be retried, not abandoned -- the fix
-// clears res between attempts, so this checks the clearing did not break the
-// retry it exists to make safe.
 func TestKMSRequestRetriesUntilTheKMSRecovers(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +99,7 @@ func TestKMSRequestRetriesUntilTheKMSRecovers(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, _, err := newKMSTestRepo(srv.URL, 3).kmsRequest("/enc_keys")
+	id, _, err := newTestRepo(srv.URL, 3).kmsRequest("/enc_keys")
 	if err != nil {
 		t.Fatalf("expected recovery on the third attempt, got: %v", err)
 	}
@@ -142,42 +111,29 @@ func TestKMSRequestRetriesUntilTheKMSRecovers(t *testing.T) {
 	}
 }
 
-// A transport-level failure (nothing listening) must still surface as itself.
 func TestKMSRequestReportsATransportError(t *testing.T) {
 	srv := okKMS()
 	url := srv.URL
-	srv.Close() // nothing is listening now
+	srv.Close()
 
-	_, _, err := newKMSTestRepo(url, 0).kmsRequest("/enc_keys")
+	_, _, err := newTestRepo(url, 0).kmsRequest("/enc_keys")
 	if err == nil {
 		t.Fatal("expected a transport error")
 	}
-	// errors.Is, not a substring. The point of the assertion is that a
-	// transport failure is NOT the exhausted-retry case, and asking that
-	// question of the sentinel says so directly -- where matching on wording
-	// only holds until someone rephrases the message.
-	if errors.Is(err, ErrKMSUnavailable) {
+	if errors.Is(err, ErrUnavailable) {
 		t.Errorf("a transport error was reported as a status problem: %v", err)
 	}
 }
 
-// TestKMSRequestKeepsTheObservedStatus is the follow-up requested in review on
-// PR #44: an exhausted retry loop must say WHICH status it kept seeing.
-//
-// 503 means the key pool is momentarily empty and the next interval will
-// recover. 401, 403 and 404 mean the tunnel is coasting on a stale PSK with no
-// fresh QKD material coming, and no amount of waiting fixes it. Reporting them
-// identically leaves an operator nothing to alert on -- which SECURITY.md asks
-// them to do.
 func TestKMSRequestKeepsTheObservedStatus(t *testing.T) {
 	for _, code := range []int{
-		http.StatusServiceUnavailable, // transient: wait
-		http.StatusUnauthorized,       // permanent: certificate or SAE user
-		http.StatusForbidden,          // permanent
-		http.StatusNotFound,           // permanent: wrong SAE path in KMS_URL
+		http.StatusServiceUnavailable,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
 	} {
 		srv := busyKMS(code)
-		_, _, err := newKMSTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
+		_, _, err := newTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
 		srv.Close()
 
 		if err == nil {
@@ -190,22 +146,17 @@ func TestKMSRequestKeepsTheObservedStatus(t *testing.T) {
 	}
 }
 
-// The sentinel is the point of the change: callers must be able to branch
-// without matching strings. main.go's ticker.Reset(KMSRetryInterval) is right
-// for a 503 and wrong for a 401, and today it fires on both.
 func TestExhaustedRetriesAreIdentifiableWithoutStringMatching(t *testing.T) {
 	srv := busyKMS(http.StatusServiceUnavailable)
 	defer srv.Close()
 
-	_, _, err := newKMSTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
-	if !errors.Is(err, ErrKMSUnavailable) {
-		t.Errorf("errors.Is(err, ErrKMSUnavailable) is false, so a caller can "+
+	_, _, err := newTestRepo(srv.URL, 1).kmsRequest("/enc_keys")
+	if !errors.Is(err, ErrUnavailable) {
+		t.Errorf("errors.Is(err, ErrUnavailable) is false, so a caller can "+
 			"only tell by reading the message: %v", err)
 	}
 }
 
-// Neither the response body nor the request path may reach the message. The
-// path carries key_ID in the query string on dec_keys.
 func TestTheErrorLeaksNeitherBodyNorPath(t *testing.T) {
 	const secretBody = "SENSITIVE-BODY-CONTENT"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -214,7 +165,7 @@ func TestTheErrorLeaksNeitherBodyNorPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := newKMSTestRepo(srv.URL, 0).kmsRequest("/dec_keys?key_ID=SECRET-KEY-ID")
+	_, _, err := newTestRepo(srv.URL, 0).kmsRequest("/dec_keys?key_ID=SECRET-KEY-ID")
 	if err == nil {
 		t.Fatal("expected an error")
 	}

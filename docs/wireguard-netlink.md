@@ -28,18 +28,18 @@ follow, see [`KEYCONTROL.md`](../KEYCONTROL.md).
 ## At a Glance
 
 | | |
-|---|---|
+| --- | --- |
 | **Module name** | `wireguard-netlink` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | _(default)_ — or `wireguard_netlink` explicitly |
-| **Adapter** | [`repositories/wireguard-netlink.go`](../repositories/wireguard-netlink.go) |
+| **Adapter** | [`repositories/wgnetlink/netlink.go`](../repositories/wgnetlink/netlink.go) |
 | **Tests** | _none_ — see [Testing the Module](#testing-the-module) |
-| **Wiring** | [`wireguardnetlink.go`](../wireguardnetlink.go) |
+| **Wiring** | [`wire_wireguard_netlink.go`](../wire_wireguard_netlink.go) |
 | **Target** | A **local** WireGuard interface on the same host as Arnika |
 | **Transport** | `wgctrl` over netlink (no network I/O) |
 | **Dependencies** | `golang.zx2c4.com/wireguard/wgctrl` |
 | **Privileges** | `CAP_NET_ADMIN` — it reconfigures a network device |
-| **Alternative** | [`wireguard-mikrotik`](wireguard-mikrotik.md), which writes to a *remote* MikroTik router over REST |
+| **Alternative** | [`wireguard-mikrotik`](wireguard-mikrotik.md), which writes to a _remote_ MikroTik router over REST |
 
 Use this module when the WireGuard tunnel terminates **on the same host** that
 runs Arnika — the classic deployment described in
@@ -49,14 +49,13 @@ runs Arnika — the classic deployment described in
 
 ## How the Module Works
 
-Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK,
-base64-encodes it, and hands it to `KeyWriterService.SetPSK`. This module turns
-that call into a local netlink transaction — no sockets, no remote party, no
-TLS.
+Arnika's core (`setPSK` in [`main.go`](../main.go)) derives a 32-byte PSK and
+passes its raw bytes to `KeyWriterService.SetPSK`. This module turns that call
+into a local netlink transaction — no sockets, no remote party, no TLS.
 
 ```mermaid
 flowchart LR
-    A["Arnika<br/>KeyWriterService"] -->|SetPSK base64| R["WireguardNetlink<br/>Repository"]
+    A["Arnika<br/>KeyWriterService"] -->|SetPSK raw 32-byte PSK| R["WireguardNetlink<br/>Repository"]
     R -->|"Device(iface)"| K["kernel<br/>wireguard module"]
     R -->|"ConfigureDevice<br/>UpdateOnly=true"| K
     K --> W["wg peer<br/>preshared-key"]
@@ -68,8 +67,8 @@ Each `SetPSK` call:
    proves the interface exists.
 2. Scans the device's peers for the configured public key, reporting absence
    only after the whole list has been checked.
-3. Parses both the PSK and the peer public key into `wgtypes.Key` values,
-   which enforces "32 bytes, base64".
+3. Validates the raw PSK as a 32-byte `wgtypes.Key` and parses the configured
+   peer public key from its base64 representation.
 4. Calls `ConfigureDevice` with a single `PeerConfig` carrying
    **`UpdateOnly: true`** and the new `PresharedKey`.
 
@@ -77,9 +76,10 @@ Each `SetPSK` call:
 existing peer only** and never create one. A peer that is not already
 configured is silently left alone rather than added.
 
-`InvalidateTunnel` — the fail-safe used when no valid key material is available
-— generates a fresh key with `wgtypes.GenerateKey()` and installs it through
-the same path, so the session stops matching and traffic stops.
+When no valid key material is available, `KeyWriterService.InvalidateTunnel`
+generates a fresh random 32-byte PSK and sends it through `SetPSK`. The adapter
+installs it through the same path, so the session stops matching and traffic
+stops.
 
 ---
 
@@ -88,14 +88,14 @@ the same path, so the session stops matching and traffic stops.
 Two files, following the layout in
 [`KEYCONTROL.md`](../KEYCONTROL.md#naming-and-file-layout-conventions).
 
-### The adapter — `repositories/wireguard-netlink.go`
+### The adapter — `repositories/wgnetlink/netlink.go`
 
-Implements the `keyWriterRepository` contract (`SetPSK`, `InvalidateTunnel`).
+Implements the `keyWriterRepository` contract (`SetPSK` with raw key bytes).
 It carries **no build tag**, so it compiles and lints on every build regardless
 of which writer the binary ships.
 
 ```go
-type WireguardNetlinkRepository struct {
+type Repository struct {
     InterfaceName string
     PeerPublicKey string
     conn          *wgctrl.Client
@@ -105,35 +105,36 @@ type WireguardNetlinkRepository struct {
 Two points distinguish it from the MikroTik adapter:
 
 1. **The client is created in the constructor, not injected.**
-   `NewWireguardNetlinkRepository` calls `wgctrl.New()` itself and returns an
+   `NewRepository` calls `wgctrl.New()` itself and returns an
    error if the netlink connection cannot be opened. There is no transport to
    configure — no TLS, no timeouts, no credentials — so there is nothing for a
    caller to supply. This is also why the constructor returns `(repo, error)`
    while the MikroTik one cannot fail.
-2. **Key material is handled as `wgtypes.Key`.** `wgtypes.ParseKey` rejects
-   anything that is not 32 bytes of valid base64, so malformed PSKs fail before
-   reaching the kernel.
+2. **Key material is handled as `wgtypes.Key`.** `wgtypes.NewKey` rejects raw
+   PSKs that are not exactly 32 bytes, while `wgtypes.ParseKey` parses the
+   configured peer public key from base64.
 
-### The wiring — `wireguardnetlink.go`
+### The wiring — `wire_wireguard_netlink.go`
 
 ```go
-//go:build wireguard_netlink || !wireguard_mikrotik
+//go:build wireguard_netlink || (!wireguard_mikrotik && !wireguard_netlink_netns)
 ```
 
 That constraint is what makes netlink the **default**: the file is included
-unless `wireguard_mikrotik` is requested, and also when `wireguard_netlink` is
-named explicitly. The wiring itself is minimal — it reads nothing from the
-environment beyond the shared config, because this module has no
-backend-specific settings.
+unless another writer tag (`wireguard_mikrotik`, `wireguard_netlink_netns`) is
+requested, and also when `wireguard_netlink` is named explicitly. The wiring
+itself is minimal: it reads nothing from the environment beyond the shared
+config, because this module has no backend-specific settings.
 
-Because both this file and
-[`wireguardmikrotik.go`](../wireguardmikrotik.go) define
-`getKeyWriterService`, asking for both tags at once is a compile error rather
-than a silent choice.
+Because this file,
+[`wire_wireguard_mikrotik.go`](../wire_wireguard_mikrotik.go) and
+[`wire_wireguard_netlink_netns.go`](../wire_wireguard_netlink_netns.go) all define
+`getKeyWriterService`, asking for two writer tags at once is a compile error
+rather than a silent choice.
 
-> When adding a third writer, its tag must be added to the negated clause here
-> — `!wireguard_mikrotik && !wireguard_yours` — or the default will collide
-> with it. See [`KEYCONTROL.md`](../KEYCONTROL.md#adding-a-new-key-writer).
+> When adding another writer, its tag must be added to the negated clause here,
+> `(!wireguard_mikrotik && !wireguard_netlink_netns && !wireguard_yours)`, or the
+> default will collide with it. See [`KEYCONTROL.md`](../KEYCONTROL.md#adding-a-new-key-writer).
 
 ---
 
@@ -206,7 +207,7 @@ This module has **no settings of its own**. It uses only the shared WireGuard
 values, which here name a local interface and peer:
 
 | Env var | Required | Description |
-|---|:---:|---|
+| --- | :---: | --- |
 | `WIREGUARD_INTERFACE` | ✅ | Name of the local WireGuard interface, e.g. `qcicat0` |
 | `WIREGUARD_PEER_PUBLIC_KEY` | ✅ | `public key` of the peer whose PSK is rotated |
 
@@ -216,7 +217,7 @@ every build — there is no netlink-specific block to configure, and no
 
 The usual Arnika settings (`KMS_URL`, `CERTIFICATE`, `PRIVATE_KEY`,
 `CA_CERTIFICATE`, `LISTEN_ADDRESS`, `SERVER_ADDRESS`, `ARNIKA_ID`, `INTERVAL`,
-`MODE`, `PQC_PSK_FILE`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
+`MODE`, `PQC_ENABLED`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
 
 ---
 
@@ -316,7 +317,7 @@ the environment file and any KMS certificates remain readable.
 journalctl -u arnika -f
 ```
 
-```
+```text
 [INFO] PRIMARY[9999] [OK] PSK configured on WireGuard interface: qcicat0 for peer: uUD5lB2Ze5oi…=
 ```
 
@@ -343,7 +344,7 @@ rotation landing on only one end stops traffic, which is exactly what
 ## Testing the Module
 
 **This module has no unit tests.** There is no
-`repositories/wireguard-netlink_test.go` — unlike the MikroTik adapter, which
+`repositories/wgnetlink/netlink_test.go` — unlike the MikroTik adapter, which
 is covered by an `httptest`-driven suite.
 
 The gap is structural rather than accidental: `wgctrl.New()` is called inside
