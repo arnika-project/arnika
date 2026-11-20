@@ -80,7 +80,7 @@ func Serve(c ServerConfig) error {
 	authFailWarn := logThrottle{interval: authFailWarnEvery}
 	started := time.Now().Unix() // nothing captured before a restart is accepted after it
 	var lastKeyID string
-	var lastKeyTs int64 // newest authenticated DATA timestamp; the peer's clock, so a local clock step cannot lower it
+	var lastKeyTS int64 // newest authenticated DATA timestamp; the peer's clock, so a local clock step cannot lower it
 
 	go func() {
 		<-quit
@@ -149,13 +149,13 @@ func Serve(c ServerConfig) error {
 			// the next tick), so an older timestamp on a different key_id is a replay. A copy of the current key_id passes
 			// on purpose: the worker only re-ACKs it, to that copy's sender, so a raced copy cannot take the real sender's ACK.
 			if keyID != lastKeyID {
-				if pkt.Timestamp < lastKeyTs {
+				if pkt.Timestamp < lastKeyTS {
 					backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "stale key_id")
 					continue
 				}
 				lastKeyID = keyID
 			}
-			lastKeyTs = max(lastKeyTs, pkt.Timestamp)
+			lastKeyTS = max(lastKeyTS, pkt.Timestamp)
 
 			select { // never block: a KMS outage in the worker would stall every PQC frame on this loop
 			case c.KeyIDs <- KeyIDRequest{KeyID: keyID, Ack: func() {
