@@ -568,7 +568,7 @@ func TestRacedCopiesDoNotTakeTheSendersAck(t *testing.T) {
 	var installs atomic.Int64
 	go RunKeyIDWorker(done, p.result, func(string) bool {
 		installs.Add(1)
-		time.Sleep(500 * time.Millisecond) // a slow KMS fetch: copies arrive while the install runs
+		time.Sleep(500 * time.Millisecond)
 		return true
 	})
 
@@ -578,7 +578,7 @@ func TestRacedCopiesDoNotTakeTheSendersAck(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = racer.Close() })
 	raw := p.dataAt("the-key-id", time.Now().Unix())
-	for range QKDQueueDepth + 1 { // enough copies to fill the queue, had each taken a slot
+	for range QKDQueueDepth + 1 {
 		p.write(racer, raw)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -595,7 +595,7 @@ func TestRacedCopiesDoNotTakeTheSendersAck(t *testing.T) {
 func TestCopiesDoNotSpendThePeersBudget(t *testing.T) {
 	p := startTestServerLimit(t, nil, 4, 3)
 	raw := p.dataAt("key-1", time.Now().Unix())
-	for range 10 { // the original, then copies from the peer's own IP
+	for range 10 {
 		p.write(p.conn, raw)
 	}
 	p.send(auth.PacketData, []byte("key-2"))
@@ -613,7 +613,7 @@ func TestCopiesOfAPQCFrameReachTheHandlerOnce(t *testing.T) {
 	for range 5 {
 		p.write(p.conn, raw)
 	}
-	p.send(auth.PacketPQC, []byte("retry")) // a retry re-encrypts, so it is not a copy
+	p.send(auth.PacketPQC, []byte("retry"))
 	time.Sleep(300 * time.Millisecond)
 	if got := handled.Load(); got != 2 {
 		t.Fatalf("handler calls = %d, want 2: copies must not reset reassembly or force a second encapsulation", got)

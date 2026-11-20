@@ -25,7 +25,7 @@ sequenceDiagram
     KA-->>P: 3. key_id + key
     Note over P: the PSK is built here, before the send, and held uninstalled<br/>a failure on this side takes the 5a decision at once — buildPSK, step 11
     P->>B: 4. DATA(key_id), signed + AES-256-GCM encrypted
-    B->>B: 5. HMAC → timestamp → rate limit → decrypt → stale key_id check
+    B->>B: 5. HMAC → timestamp → copy check → rate limit → decrypt → stale key_id check
     Note over P,B: 5a. every path on which the QKD key does not arrive is handed to MODE:<br/>invalidate where QKD is required, else leave the PSK to the PQC timer
     B->>B: 6. enqueue on the bounded QKD queue (8 slots), no ACK yet<br/>a full queue drops the key_id unanswered and the PRIMARY resends
     B->>KB: 7. GetKeyByID(key_id)
@@ -44,7 +44,7 @@ sequenceDiagram
     end
     opt ACK lost, PRIMARY resends
         P->>B: 4. DATA(same key_id) after ARNIKA_PEER_TIMEOUT, then after twice that<br/>at most udpClientMaxAttempts = 3 sends per interval
-        B-->>P: 10. ACK again from the stored outcome<br/>no second KMS request, deduplicated by key_id
+        B-->>P: 10. ACK to every sender of the current key_id once it is installed<br/>no second KMS request, only a new key_id is enqueued
     end
     Note over P,B: a BACKUP interval that ends with no key_id at all takes the 5a path too
 ```
@@ -81,7 +81,7 @@ sequenceDiagram
 ### 5. **BACKUP Verifies DATA, Decrypts Key**
 
 - **Where:** `transport/server.go` (`Serve`'s read loop), `auth/auth.go` (`UnmarshalPacket`, `Verify`, `Decrypt`)
-- **What:** BACKUP verifies the HMAC signature, checks the timestamp, charges the per-IP rate limit, decrypts the payload, then drops a replayed older key_id.
+- **What:** BACKUP verifies the HMAC signature, checks the timestamp, recognises a copy of a datagram it already processed, charges the rate limit, decrypts the payload, then drops a replayed older key_id.
 - **Why:** Layered security: decryption only after authentication passes, and the rate limit only after it too, because the source IP is forgeable and spoofed junk must not spend the peer's budget.
 
 ### 5a. **A Failing Key Source Reaches `MODE`**
@@ -93,7 +93,7 @@ sequenceDiagram
 ### 6. **BACKUP Enqueues the Key ID**
 
 - **Where:** `transport/server.go` (`transport.QKDQueueDepth`), `main.go` (`result` channel)
-- **What:** The read loop hands the decrypted key ID to a bounded queue with a non-blocking send, together with the reply that later carries the ACK. A full queue drops the identifier unanswered, logs a throttled warning without key material, and lets the sender resend it.
+- **What:** The read loop hands a new decrypted key ID to a bounded queue with a non-blocking send, together with the reply that later carries the ACK. A full queue drops the identifier unanswered, logs a throttled warning without key material, and lets the sender resend it.
 - **Why:** The worker below performs the KMS request and the key-writer operation synchronously. A blocking hand-off stalled the read loop for the length of a KMS outage, and with it every PQC frame arriving on the same socket - far longer than `PQC_ROUND_TIMEOUT`. The queue is bounded because unbounded buffering would only accumulate identifiers whose keys are superseded by the time they are served.
 
 ### 7. **Worker Requests Key from KMS**
@@ -117,7 +117,7 @@ sequenceDiagram
 ### 10. **BACKUP Sends ACK Packet**
 
 - **Where:** `transport/server.go` (`transport.RunKeyIDWorker`, `KeyIDRequest.Ack`)
-- **What:** The worker sends the ACK **only after** the PSK from step 9 is configured. The ACK carries the key ID, encrypted like the DATA packet. A failed KMS request or PSK write sends no ACK. A resent key ID that the worker served last is answered from that outcome: acknowledged again if it was installed, ignored if it failed, never a second KMS request.
+- **What:** The worker sends the ACK **only after** the PSK from step 9 is configured. The ACK carries the key ID, encrypted like the DATA packet. A failed KMS request or PSK write sends no ACK. Only a new key ID is enqueued. Every sender of the current key ID, the PRIMARY's resend or a raced copy, is answered from that outcome: acknowledged once it is installed, ignored if it failed, never a second KMS request.
 - **Why:** The PRIMARY installs its own PSK only on the ACK, so the two ends switch within one packet of each other instead of the BACKUP's whole KMS request apart. That matters for key writers without their own session handshake, and it keeps a failed lookup on the BACKUP from leaving the PRIMARY on a key the BACKUP does not have. The key ID in the ACK keeps a stale or replayed ACK from confirming a different key.
 
 ### 11. **PRIMARY Verifies ACK and Sets New Key**
@@ -132,9 +132,9 @@ sequenceDiagram
 
 - **HMAC-SHA256:** Used for all packet signatures (`Sign`, `Verify`), keyed by `ARNIKA_PSK` with domain separation (`deriveHMACKey`). The domain is the sender's direction: `auth.DirectionFor` gives the even-`ARNIKA_ID` peer `DirEven` to sign with and `DirOdd` to verify against, and the odd peer the reverse. The two directions are therefore keyed differently, so a peer cannot be made to accept its own packet reflected back at it, and swapping the two surfaces as an authentication failure rather than as silent acceptance.
 - **AES-256-GCM:** Used for encrypting key material (`Encrypt`, `Decrypt`), keyed by `ARNIKA_PSK` (`deriveKey`).
-- **Rate Limiting:** Per-IP sliding window charged only after the HMAC and timestamp checks, `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `transport/budget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, assuming the maximum inbound role allocation for one peer rather than an even split. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers. Unauthenticated traffic costs one HMAC check and never reaches the limiter, so a spoofed source IP cannot spend the peer's budget; authentication failures are logged at most once per 10s.
+- **Rate Limiting:** Per-IP sliding window charged only after the HMAC and timestamp checks; copies of an already-processed datagram share one separate budget, `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `transport/budget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, assuming the maximum inbound role allocation for one peer rather than an even split. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers. Unauthenticated traffic costs one HMAC check and never reaches the limiter, so a spoofed source IP cannot spend the peer's budget; authentication failures are logged at most once per 10s.
 - **Timestamp Validation:** Replay protection over a ±`MAX_CLOCK_SKEW` window, default ±1m.
-- **Key_id Replay:** the listener drops a packet stamped before it started, and a key_id that differs from the newest one but carries an older timestamp, since the PRIMARY sends a newer key_id on a later whole second. A copy of the newest key_id passes on purpose: the worker only re-ACKs it to that copy's sender. Senders retry a failed write (`WriteConnected`), because a spoofed ICMP error left pending on the connected socket fails the next write.
+- **Key_id Replay:** the listener drops a packet stamped before it started, and a key_id that differs from the newest one but carries an older timestamp, since the PRIMARY sends a newer key_id on a later whole second. Every legitimate send re-encrypts under a fresh GCM nonce, so a repeated HMAC tag is a copy: it is answered but never processed twice. A sender of the current key_id, the real one or a raced copy, gets an ACK once it is installed; a copy of a PQC frame is dropped before the handler. Senders retry a failed write (`WriteConnected`), because a spoofed ICMP error left pending on the connected socket fails the next write.
 - **Startup validation:** `cfg.ValidateKeySources(qkdCompiled)` runs directly after `Parse`, before any key is due, and rejects a configuration the compiled-in readers cannot serve: `KMS_URL` missing while a QKD reader is active, `KMS_URL` set in a `qkd_none` build outside `PqcOnly`, or a `MODE`/`PQC_ENABLED` pair naming key material this binary cannot produce. `PqcOnly` disables QKD regardless of build tag. Readers are chosen by build tag ([`KEYCONTROL.md`](KEYCONTROL.md)), so without this a mismatch would surface as an invalidated tunnel every single interval instead of one error at startup.
 - **Zeroization:** All sensitive key material is handled inside `runtime/secret.Do` blocks to minimize memory exposure. This requires `GOEXPERIMENT=runtimesecret` at build time. `secret.Do` erases registers, stack and unreachable heap allocations **only on `linux/amd64` and `linux/arm64`**; on every other platform it just calls its function. `main()` probes this at startup (`secret.Enabled()` from inside a `Do` block, since it reports the nesting depth) and logs a warning when the erasure is inert, so a build for an unsupported `GOARCH` cannot silently look hardened. The WireGuard PSK additionally never becomes a Go string on the netlink path: the key writer port takes `[]byte` precisely so that the buffer stays clearable, for the same reason `ARNIKA_PSK` is held as `[]byte` on `config.Config`.
 - **Process hardening:** `hardening.Process()` (`hardening/hardening_linux.go`) runs before the configuration is read, so `ARNIKA_PSK` never exists in an exposed process. It sets `PR_SET_DUMPABLE=0` (no core dump; `/proc/<pid>/{mem,environ,maps}` become root-owned and `ptrace` attach needs `CAP_SYS_PTRACE`), `RLIMIT_CORE=0` (a piped `kernel.core_pattern` ignores the dumpable flag), and `mlockall(MCL_CURRENT|MCL_FUTURE)` to keep key material out of swap. Each step is best effort and failures are logged, not fatal: a container without `CAP_IPC_LOCK` must still rekey its tunnel. `mlockall` needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`, since the limit is charged against locked address space and Go reserves ~1.2 GB of arena; a refused lock is safe because `MCL_FUTURE` only takes effect once `mlockall` succeeds.
