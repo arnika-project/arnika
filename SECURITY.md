@@ -236,8 +236,8 @@ AES-256-GCM, using two keys derived from that secret with domain separation (`au
 - **Supporting controls on the same channel**: per-IP rate limiting of authenticated packets
   (`RATE_LIMIT`, `RATE_WINDOW`, calculated by default), timestamp replay protection
   (`MAX_CLOCK_SKEW`, default `1m`), which also drops a key_id older than the newest one accepted or
-  than the process start. Lowering
-  `MAX_CLOCK_SKEW` reduces the replay window but requires closer clock synchronisation between
+  than the process start, and answers a copy of a processed datagram without processing it again.
+  Lowering `MAX_CLOCK_SKEW` reduces the replay window but requires closer clock synchronisation between
   peers.
 
 Mutual TLS is **not** available on this channel. `CERTIFICATE`, `PRIVATE_KEY` and

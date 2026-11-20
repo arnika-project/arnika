@@ -442,8 +442,9 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
   `TestPQCReplayedPubKeyDoesNotDisplaceTheRoundInFlight` pins this.
 - **Denial of service:** nothing reaches `crypto/hpke` before HMAC verification
   and AEAD decryption succeed, so an unauthenticated packet costs one
-  HMAC-SHA256. Frames go only to the pinned peer address, never to an observed
-  source, so there is no reflection primitive.
+  HMAC-SHA256. A reply goes to the source of the frame that drew it, and a copy
+  of an already-processed frame is dropped, so a replay draws no reply and a
+  spoofed source gets at most one reply per genuine frame.
 - **Unscannable, not unfingerprintable.** Every authentication failure is a bare
   drop, so a scanner gets nothing. But the envelope's type byte and Unix
   timestamp are authenticated rather than encrypted, so passive DPI can still

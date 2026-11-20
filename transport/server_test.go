@@ -561,12 +561,16 @@ func TestKeyIDSentBeforeTheServerStartedIsDropped(t *testing.T) {
 	p.wantKeyIDs("fresh")
 }
 
-func TestARacedCopyDoesNotTakeTheSendersAck(t *testing.T) {
-	p := startTestServerQueue(t, nil, 4)
+func TestRacedCopiesDoNotTakeTheSendersAck(t *testing.T) {
+	p := startTestServerQueue(t, nil, QKDQueueDepth)
 	done := make(chan bool)
 	defer close(done)
 	var installs atomic.Int64
-	go RunKeyIDWorker(done, p.result, func(string) bool { installs.Add(1); return true })
+	go RunKeyIDWorker(done, p.result, func(string) bool {
+		installs.Add(1)
+		time.Sleep(500 * time.Millisecond)
+		return true
+	})
 
 	racer, err := net.Dial("udp", p.conn.RemoteAddr().String())
 	if err != nil {
@@ -574,15 +578,45 @@ func TestARacedCopyDoesNotTakeTheSendersAck(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = racer.Close() })
 	raw := p.dataAt("the-key-id", time.Now().Unix())
-	p.write(racer, raw)
+	for range QKDQueueDepth + 1 {
+		p.write(racer, raw)
+	}
 	time.Sleep(50 * time.Millisecond)
 	p.write(p.conn, raw)
 
-	if got, ok := p.ackWithin(time.Second); !ok || got != "the-key-id" {
+	if got, ok := p.ackWithin(2 * time.Second); !ok || got != "the-key-id" {
 		t.Fatalf("ACK = %q, %v; the real sender must get its ACK", got, ok)
 	}
 	if got := installs.Load(); got != 1 {
 		t.Fatalf("installs = %d, want 1", got)
+	}
+}
+
+func TestCopiesDoNotSpendThePeersBudget(t *testing.T) {
+	p := startTestServerLimit(t, nil, 4, 3)
+	raw := p.dataAt("key-1", time.Now().Unix())
+	for range 10 {
+		p.write(p.conn, raw)
+	}
+	p.send(auth.PacketData, []byte("key-2"))
+	p.wantKeyIDs("key-1", "key-2")
+}
+
+func TestCopiesOfAPQCFrameReachTheHandlerOnce(t *testing.T) {
+	var handled atomic.Int64
+	p := startTestServer(t, func([]byte, func([]byte) error) error { handled.Add(1); return nil })
+	enc, err := auth.Encrypt(p.psk, []byte("frame"))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	raw := (&auth.Packet{Type: auth.PacketPQC, Timestamp: time.Now().Unix(), Payload: enc}).Marshal(p.psk, p.peerOut)
+	for range 5 {
+		p.write(p.conn, raw)
+	}
+	p.send(auth.PacketPQC, []byte("retry"))
+	time.Sleep(300 * time.Millisecond)
+	if got := handled.Load(); got != 2 {
+		t.Fatalf("handler calls = %d, want 2: copies must not reset reassembly or force a second encapsulation", got)
 	}
 }
 
