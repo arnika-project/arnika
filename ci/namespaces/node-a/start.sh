@@ -32,9 +32,7 @@ done
 
 echo "Starting Arnika on node-a (MASTER) with netns support..."
 
-LISTEN_ADDRESS=10.0.0.1:9998 \
 SERVER_ADDRESS=10.0.0.2:9998 \
-ARNIKA_ID=9998 \
 INTERVAL=5s \
 KMS_URL="http://192.168.100.1:8080/api/v1/keys/CONSB" \
 WIREGUARD_INTERFACE=wg0 \

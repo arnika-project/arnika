@@ -13,6 +13,6 @@ const qkdCompiled = true
 
 func getQKDService(cfg *config.Config) *services.KeyReaderService {
 	kmsAuth := kms.NewClientCertificateAuth(cfg.Certificate, cfg.PrivateKey, cfg.CACertificate)
-	kmsRepo := kms.NewRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, kmsAuth)
+	kmsRepo := kms.NewRepository(cfg.KMSURL, cfg.KMSHTTPTimeout, cfg.KMSBackoffMaxRetries, cfg.KMSBackoffBaseDelay, cfg.Interval, kmsAuth)
 	return services.NewKeyReaderService(kmsRepo)
 }

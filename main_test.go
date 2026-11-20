@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arnika-project/arnika/config"
+	"github.com/arnika-project/arnika/kdf"
 	"github.com/arnika-project/arnika/services"
 )
 
@@ -101,7 +102,7 @@ func (r fakePQCReader) GetNewKey() (string, []byte, error) {
 func TestBuildPSKLeavesTheWriteToTheCaller(t *testing.T) {
 	w := &countingWriter{}
 	cfg := &config.Config{Mode: "QkdAndPqcRequired", PQCEnabled: true}
-	psk := buildPSK(services.NewKeyWriterService(w), services.NewKeyReaderService(fakePQCReader{}),
+	psk, _ := buildPSK(services.NewKeyWriterService(w), latestPQC(services.NewKeyReaderService(fakePQCReader{})),
 		bytes.Repeat([]byte{1}, 32), cfg, slog.New(slog.DiscardHandler))
 	if len(psk) == 0 {
 		t.Fatal("no PSK built from a QKD and a PQC key")
@@ -117,8 +118,8 @@ func TestBuildPSKIgnoresQKDInPqcOnlyMode(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	qkd := bytes.Repeat([]byte{1}, 32)
 
-	got := buildPSK(keyWriter, pqc, qkd, &config.Config{Mode: "PqcOnly", PQCEnabled: true}, logger)
-	want := buildPSK(keyWriter, pqc, nil, &config.Config{Mode: "AtLeastPqcRequired", PQCEnabled: true}, logger)
+	got, _ := buildPSK(keyWriter, latestPQC(pqc), qkd, &config.Config{Mode: "PqcOnly", PQCEnabled: true}, logger)
+	want, _ := buildPSK(keyWriter, latestPQC(pqc), nil, &config.Config{Mode: "AtLeastPqcRequired", PQCEnabled: true}, logger)
 	defer clear(got)
 	defer clear(want)
 
@@ -130,13 +131,61 @@ func TestBuildPSKIgnoresQKDInPqcOnlyMode(t *testing.T) {
 func TestBuildPSKInvalidatesAtOnceWhenARequiredPQCKeyIsMissing(t *testing.T) {
 	w := &countingWriter{}
 	cfg := &config.Config{Mode: "AtLeastPqcRequired", PQCEnabled: true}
-	psk := buildPSK(services.NewKeyWriterService(w), services.NewKeyReaderService(fakePQCReader{err: errors.New("no round agreed")}),
+	psk, _ := buildPSK(services.NewKeyWriterService(w), latestPQC(services.NewKeyReaderService(fakePQCReader{err: errors.New("no round agreed")})),
 		bytes.Repeat([]byte{1}, 32), cfg, slog.New(slog.DiscardHandler))
 	if psk != nil {
 		t.Fatal("a PSK was built without the required PQC key")
 	}
 	if w.writes != 1 {
 		t.Fatalf("writes = %d, want the one random key that invalidates the tunnel", w.writes)
+	}
+}
+
+type roundsPQCReader map[string][]byte
+
+func (r roundsPQCReader) GetNewKey() (string, []byte, error) {
+	return "8", r["8"], nil
+}
+
+func (r roundsPQCReader) GetKeyByID(id string) ([]byte, error) {
+	if k, ok := r[id]; ok {
+		return k, nil
+	}
+	return nil, errors.New("round not held")
+}
+
+func TestPrimaryDerivesFromTheRoundTheBackupUsedEvenAfterANewerOneLanded(t *testing.T) {
+	pqc := services.NewKeyReaderService(roundsPQCReader{"7": bytes.Repeat([]byte{7}, 32), "8": bytes.Repeat([]byte{8}, 32)})
+	keyWriter := services.NewKeyWriterService(&countingWriter{})
+	cfg := &config.Config{Mode: "QkdAndPqcRequired", PQCEnabled: true}
+	logger := slog.New(slog.DiscardHandler)
+	qkd := bytes.Repeat([]byte{1}, 32)
+
+	backup, err := kdf.DeriveKey(qkd, bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	primary, round := buildPSK(keyWriter, roundPQC(pqc, "7"), qkd, cfg, logger)
+	if round != "7" || !bytes.Equal(primary, backup) {
+		t.Fatalf("primary used round %q; its PSK must match the backup's round 7", round)
+	}
+	if _, latest := buildPSK(keyWriter, latestPQC(pqc), qkd, cfg, logger); latest != "8" {
+		t.Fatalf("latest round = %q, want 8", latest)
+	}
+}
+
+func TestPrimaryFallsBackToQKDOnlyWhenTheBackupUsedNoPQCKey(t *testing.T) {
+	pqc := services.NewKeyReaderService(roundsPQCReader{"8": bytes.Repeat([]byte{8}, 32)})
+	w := &countingWriter{}
+	qkd := bytes.Repeat([]byte{1}, 32)
+	logger := slog.New(slog.DiscardHandler)
+
+	psk, round := buildPSK(services.NewKeyWriterService(w), roundPQC(pqc, ""), qkd, &config.Config{Mode: "AtLeastQkdRequired", PQCEnabled: true}, logger)
+	if round != "" || !bytes.Equal(psk, qkd) {
+		t.Fatalf("round %q: the primary must mirror the backup's QKD-only PSK", round)
+	}
+	if psk, _ := buildPSK(services.NewKeyWriterService(w), roundPQC(pqc, ""), qkd, &config.Config{Mode: "QkdAndPqcRequired", PQCEnabled: true}, logger); psk != nil {
+		t.Fatal("a PSK was built without the PQC key the mode requires")
 	}
 }
 

@@ -263,8 +263,8 @@ any byte count.
 The `qkdCompiled` constant is what lets the linker drop the code: `main.go`
 guards the whole key_id flow with `if qkdCompiled`, a compile-time constant, so
 in a `qkd_none` binary neither the flow nor the KMS client is emitted. Without
-a QKD reader there is no `key_id` message and no PRIMARY/BACKUP alternation:
-the PSK is set once per PQC round, in the middle of the part of the round
+a QKD reader there is no `key_id` message, and the PRIMARY only initiates the
+PQC rounds: the PSK is set once per PQC round, in the middle of the part of the round
 in which the scheduler never publishes (`nextPQCSetPSKAt`). Both peers derive
 that instant from the wall clock alone, so this only keeps them on the same
 key if the peers' clocks are synchronized (e.g. via NTP, see

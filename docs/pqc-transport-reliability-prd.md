@@ -70,8 +70,8 @@ initiator's ephemeral source port. Rate limiting applies only to inbound reads,
 so these outbound replies do not consume the listening-socket budget.
 
 At a five-second QKD and PQC interval, up to twelve scheduled events of each
-type can occur during a one-minute window. Roles are deterministic but not
-guaranteed to alternate evenly. Startup traffic and protocol retries add
+type can occur during a one-minute window, and all of them reach the backup,
+which is the only peer that listens. Startup traffic and protocol retries add
 further packets, so the static default of 30 packets per minute can reject
 legitimate traffic.
 
@@ -167,8 +167,8 @@ when wall time reaches the previous round again or when the process restarts.
    - the number of frames in each inbound protocol message;
    - the QKD and PQC retry limits; and
    - the immediate PQC startup round.
-2. The calculation MUST use the maximum legitimate inbound role allocation for
-   one peer, not an assumed 50/50 role distribution.
+2. The calculation MUST count every scheduled event as inbound traffic for the
+   backup, which receives all of them.
 3. The calculation MUST use the scheduler's effective cadence, including its
    whole-second floor for PQC rounds.
 4. The derived default MUST admit a complete legitimate retry sequence without

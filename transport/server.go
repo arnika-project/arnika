@@ -2,14 +2,11 @@
 package transport
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
-	"os/signal"
+	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/arnika-project/arnika/auth"
@@ -32,7 +29,7 @@ type PQCHandler func(frame []byte, reply func(frame []byte) error) error
 // KeyIDRequest is one key id from the peer; call Ack only once its PSK is installed.
 type KeyIDRequest struct {
 	KeyID string
-	Ack   func()
+	Ack   func(pqcRound string)
 }
 
 type ServerConfig struct {
@@ -41,11 +38,12 @@ type ServerConfig struct {
 	DirOut       auth.Direction
 	DirIn        auth.Direction
 	KeyIDs       chan<- KeyIDRequest
-	Done         chan bool // closed by Serve on SIGTERM or SIGINT
+	Done         <-chan bool // closing it stops Serve
 	PQC          PQCHandler
 	RateLimit    int
 	RateWindow   time.Duration
 	MaxClockSkew time.Duration
+	Interval     time.Duration // DATA stamped before the current wall-clock interval is dropped; zero skips the check
 
 	Log *slog.Logger
 }
@@ -64,12 +62,7 @@ type ClientConfig struct {
 }
 
 func Serve(c ServerConfig) error {
-	backupLog := c.Log.With("role", "backup")
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit,
-		syscall.SIGTERM,
-		syscall.SIGINT,
-	)
+	logger := c.Log
 	addr, err := net.ResolveUDPAddr("udp", c.Address)
 	if err != nil {
 		return fmt.Errorf("failed to resolve the UDP listen c.Address %s: %w", c.Address, err)
@@ -78,7 +71,7 @@ func Serve(c ServerConfig) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on UDP %s: %w", c.Address, err)
 	}
-	c.Log.Info("UDP server started", "c.Address", c.Address)
+	c.Log.Info("UDP server started", "address", c.Address)
 
 	limiter := newRateLimiter(c.RateLimit, c.RateWindow)
 	queueFullWarn := logThrottle{interval: qkdQueueWarnEvery}
@@ -90,9 +83,7 @@ func Serve(c ServerConfig) error {
 	seen := map[[32]byte]int64{} // HMAC tag -> timestamp of datagrams already processed; only the peer can add one
 
 	go func() {
-		<-quit
-		c.Log.Info("UDP server shutdown triggered", "c.Address", c.Address)
-		close(c.Done)
+		<-c.Done
 		_ = conn.Close()
 	}()
 
@@ -126,19 +117,19 @@ func Serve(c ServerConfig) error {
 		pkt, err := auth.UnmarshalPacket(c.PSK, buf[:n], c.DirIn)
 		if err != nil {
 			if authFailWarn.allow() {
-				backupLog.Warn("packet rejected", "peer", remoteAddr, "reason", "authentication")
+				logger.Warn("packet rejected", "peer", remoteAddr, "reason", "authentication")
 			}
 			continue
 		}
 
 		if !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) || pkt.Timestamp < started {
-			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "timestamp")
+			logger.Debug("packet rejected", "peer", remoteAddr, "reason", "timestamp")
 			continue
 		}
 
-		// Only DATA and PQC are addressed to this listener; a peer's ACK verifies here too, so it must not spend the budget.
+		// Only DATA and PQC are addressed to this listener, so nothing else may spend the budget.
 		if pkt.Type != auth.PacketData && pkt.Type != auth.PacketPQC {
-			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "unknown type")
+			logger.Debug("packet rejected", "peer", remoteAddr, "reason", "unknown type")
 			continue
 		}
 
@@ -161,22 +152,26 @@ func Serve(c ServerConfig) error {
 
 		// Charged after authentication: the source IP is forgeable, so neither junk nor copies may spend the peer's budget.
 		if !limiter.Allow(bucket) {
-			backupLog.Debug("rate limited", "peer", remoteAddr)
+			logger.Debug("rate limited", "peer", remoteAddr)
 			continue
 		}
 
 		switch pkt.Type {
 		case auth.PacketData:
+			if c.Interval > 0 && pkt.Timestamp < time.Now().UnixNano()/int64(c.Interval)*int64(c.Interval)/int64(time.Second) {
+				logger.Debug("packet rejected", "peer", remoteAddr, "reason", "earlier interval") // a capture replayed after a restart, even from a peer whose clock leads
+				continue
+			}
 			decrypted, err := auth.Decrypt(c.PSK, pkt.Payload)
 			if err != nil {
-				backupLog.Error("packet rejected, ARNIKA_PSK mismatch or the message is corrupted",
+				logger.Error("packet rejected, ARNIKA_PSK mismatch or the message is corrupted",
 					"peer", remoteAddr, "reason", "decryption")
 				continue
 			}
 
 			keyID := string(decrypted)
 			if keyID == "" { // honest peers never send one, and lastAcks is still nil for it
-				backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "empty key_id")
+				logger.Debug("packet rejected", "peer", remoteAddr, "reason", "empty key_id")
 				continue
 			}
 			// A newer key_id is first sent on a later whole second than any send of the one before it (main.go waits for
@@ -184,44 +179,44 @@ func Serve(c ServerConfig) error {
 			// slot; every sender of the current one, a raced copy or the real sender, is ACKed once it is installed.
 			if keyID != lastKeyID {
 				if pkt.Timestamp < lastKeyTS {
-					backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "stale key_id")
+					logger.Debug("packet rejected", "peer", remoteAddr, "reason", "stale key_id")
 					continue
 				}
-				acks := &ackSet{send: func(to *net.UDPAddr) { _ = send(auth.PacketAck, []byte(keyID), to) }}
+				acks := &ackSet{keyID: keyID, send: func(to *net.UDPAddr, payload []byte) { _ = send(auth.PacketAck, payload, to) }}
 				select { // never block: a KMS outage in the worker would stall every PQC frame on this loop
 				case c.KeyIDs <- KeyIDRequest{KeyID: keyID, Ack: acks.ack}:
 				default:
 					if queueFullWarn.allow() {
-						backupLog.Warn("QKD queue full, key_id dropped; the sender will retry",
+						logger.Warn("QKD queue full, key_id dropped; the sender will retry",
 							"slots", cap(c.KeyIDs), "peer", remoteAddr)
 					}
 					continue // lastKeyID stays, so the retry queues it
 				}
 				lastKeyID, lastAcks = keyID, acks
-				backupLog.Info("received a key_id from the peer", "key_id", keyID, "peer", remoteAddr)
+				logger.Info("received a key_id from the peer", "key_id", keyID, "peer", remoteAddr)
 			}
 			lastKeyTS = max(lastKeyTS, pkt.Timestamp)
 			lastAcks.add(remoteAddr, !dup)
 
 		case auth.PacketPQC:
 			if c.PQC == nil {
-				backupLog.Debug("PQC frame dropped, no PQC key reader wired", "peer", remoteAddr)
+				logger.Debug("PQC frame dropped, no PQC key reader wired", "peer", remoteAddr)
 				continue
 			}
 			if dup { // a copy must not reset reassembly or force a second encapsulation; the initiator's retry is fresh
-				backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "copy of a PQC frame")
+				logger.Debug("packet rejected", "peer", remoteAddr, "reason", "copy of a PQC frame")
 				continue
 			}
 			decrypted, err := auth.Decrypt(c.PSK, pkt.Payload)
 			if err != nil {
-				backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "decryption")
+				logger.Debug("packet rejected", "peer", remoteAddr, "reason", "decryption")
 				continue
 			}
 			reply := func(frame []byte) error {
 				return send(auth.PacketPQC, frame, remoteAddr)
 			}
 			if err := c.PQC(decrypted, reply); err != nil {
-				backupLog.Warn("PQC frame not accepted", "peer", remoteAddr, "err", err)
+				logger.Warn("PQC frame not accepted", "peer", remoteAddr, "err", err)
 			}
 		}
 	}
@@ -229,93 +224,101 @@ func Serve(c ServerConfig) error {
 
 const udpClientMaxAttempts = 3
 
-// SendKeyID returns once the peer has installed a PSK built from KeyID, resending after Timeout, 2*Timeout, ... until Deadline.
-func SendKeyID(c ClientConfig) error {
+// natKeepalive bounds the gap between two sends of one key_id, so a NAT in front of the primary keeps the mapping the ACK returns through.
+var natKeepalive = 15 * time.Second
+
+// keyIDSendsPerInterval bounds the DATA packets SendKeyID sends within one interval.
+func keyIDSendsPerInterval(interval time.Duration) int {
+	return udpClientMaxAttempts + int(interval/natKeepalive)
+}
+
+// SendKeyID returns the PQC round the peer derived its PSK from once it has installed a PSK built from KeyID, resending after Timeout, 2*Timeout, ..., then every natKeepalive until Deadline.
+func SendKeyID(c ClientConfig) (pqcRound string, err error) {
 	if c.Address == "" {
-		return fmt.Errorf("c.Address is empty")
+		return "", fmt.Errorf("c.Address is empty")
 	}
 	if c.KeyID == "" {
-		return fmt.Errorf("c.KeyID is empty")
+		return "", fmt.Errorf("c.KeyID is empty")
 	}
 	if c.Deadline.IsZero() {
-		return fmt.Errorf("c.Deadline is unset")
+		return "", fmt.Errorf("c.Deadline is unset")
 	}
 	if !time.Now().Before(c.Deadline) { // the peer would install a key_id this side has already given up on
-		return fmt.Errorf("c.Deadline %s has passed", c.Deadline.Format(time.TimeOnly))
+		return "", fmt.Errorf("c.Deadline %s has passed", c.Deadline.Format(time.TimeOnly))
 	}
 
 	raddr, err := net.ResolveUDPAddr("udp", c.Address)
 	if err != nil {
-		return fmt.Errorf("failed to resolve c.Address: %w", err)
+		return "", fmt.Errorf("failed to resolve c.Address: %w", err)
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
+	conn, err := net.ListenUDP("udp", nil) // unconnected: no spoofable ICMP errors, and the ACK to our source address passes a NAT
 	if err != nil {
-		return fmt.Errorf("failed to dial UDP: %w", err)
+		return "", fmt.Errorf("failed to open a UDP socket: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	wait := c.Timeout
-	for attempt := 1; attempt <= udpClientMaxAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		encrypted, err := auth.Encrypt(c.PSK, []byte(c.KeyID))
 		if err != nil {
-			return fmt.Errorf("failed to encrypt key_id: %w", err)
+			return "", fmt.Errorf("failed to encrypt key_id: %w", err)
 		}
 		dataPkt := &auth.Packet{
 			Type:      auth.PacketData,
 			Timestamp: time.Now().Unix(),
 			Payload:   encrypted,
 		}
-		if err := WriteConnected(conn, dataPkt.Marshal(c.PSK, c.DirOut)); err != nil {
-			return fmt.Errorf("failed to write DATA packet: %w", err)
+		if _, err := conn.WriteToUDP(dataPkt.Marshal(c.PSK, c.DirOut), raddr); err != nil {
+			return "", fmt.Errorf("failed to write DATA packet: %w", err)
 		}
 
-		until := time.Now().Add(wait)
-		if attempt == udpClientMaxAttempts || until.After(c.Deadline) {
+		if attempt >= udpClientMaxAttempts {
+			wait = natKeepalive
+		}
+		until := time.Now().Add(min(wait, natKeepalive))
+		if until.After(c.Deadline) {
 			until = c.Deadline
 		}
-		if awaitAck(conn, c, until) {
-			return nil
+		if round, ok := awaitAck(conn, c, until); ok {
+			return round, nil
 		}
 		if !time.Now().Before(c.Deadline) {
 			break
 		}
-		c.Log.Debug("no ACK yet, resending the key_id", "attempt", attempt, "of", udpClientMaxAttempts)
+		c.Log.Debug("no ACK yet, resending the key_id", "attempt", attempt)
 		wait *= 2
 	}
-	return fmt.Errorf("no ACK by %s", c.Deadline.Format(time.TimeOnly))
+	return "", fmt.Errorf("no ACK by %s", c.Deadline.Format(time.TimeOnly))
 }
 
-// WriteConnected writes b to a connected UDP socket. A failed write consumes a pending ICMP error, which anyone can
-// spoof, so the write is retried; a real local error recurs and is returned. The authenticated reply decides the exchange.
-func WriteConnected(conn *net.UDPConn, b []byte) (err error) {
-	for range 3 {
-		if _, err = conn.Write(b); err == nil || errors.Is(err, net.ErrClosed) {
-			return err
-		}
+// ackPayload names the key_id and the PQC round the backup derived its PSK from, empty when it used none.
+func ackPayload(keyID, pqcRound string) []byte {
+	if pqcRound == "" {
+		return []byte(keyID)
 	}
-	return err
+	return []byte(keyID + "\x00" + pqcRound)
 }
 
-func awaitAck(conn *net.UDPConn, c ClientConfig, until time.Time) bool {
+func awaitAck(conn *net.UDPConn, c ClientConfig, until time.Time) (pqcRound string, ok bool) {
 	if err := conn.SetReadDeadline(until); err != nil {
-		return false
+		return "", false
 	}
 	buf := make([]byte, 1024)
 	for {
-		n, err := conn.Read(buf)
+		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, net.ErrClosed) {
-				return false
-			}
-			continue // an unauthenticated ICMP error (ECONNREFUSED) must not end the wait for the authenticated ACK
+			return "", false
 		}
 		pkt, err := auth.UnmarshalPacket(c.PSK, buf[:n], c.DirIn)
 		if err != nil || pkt.Type != auth.PacketAck || !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) {
 			continue
 		}
-		keyID, err := auth.Decrypt(c.PSK, pkt.Payload)
-		if err == nil && string(keyID) == c.KeyID {
-			return true
+		payload, err := auth.Decrypt(c.PSK, pkt.Payload)
+		if err != nil {
+			continue
+		}
+		if keyID, round, _ := strings.Cut(string(payload), "\x00"); keyID == c.KeyID {
+			return round, true
 		}
 	}
 }
@@ -323,7 +326,9 @@ func awaitAck(conn *net.UDPConn, c ClientConfig, until time.Time) bool {
 // ackSet answers every sender of one key_id: those seen before the install when it lands, later ones at once.
 type ackSet struct {
 	mu        sync.Mutex
-	send      func(to *net.UDPAddr)
+	keyID     string
+	send      func(to *net.UDPAddr, payload []byte)
+	payload   []byte
 	installed bool
 	fresh     []*net.UDPAddr // senders of fresh datagrams, which only the PSK holder can produce
 	copies    []*net.UDPAddr // senders of copies; uncapped, since the replay bucket bounds them and a cap lets racers crowd out the sender
@@ -333,7 +338,7 @@ func (a *ackSet) add(to *net.UDPAddr, fresh bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.installed {
-		a.send(to)
+		a.send(to, a.payload)
 		return
 	}
 	list := &a.copies
@@ -348,22 +353,22 @@ func (a *ackSet) add(to *net.UDPAddr, fresh bool) {
 	*list = append(*list, to)
 }
 
-func (a *ackSet) ack() {
+func (a *ackSet) ack(pqcRound string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.installed {
 		return
 	}
-	a.installed = true
+	a.installed, a.payload = true, ackPayload(a.keyID, pqcRound)
 	for _, to := range append(a.fresh, a.copies...) {
-		a.send(to)
+		a.send(to, a.payload)
 	}
 	a.fresh, a.copies = nil, nil
 }
 
 // RunKeyIDWorker must be the queue's only consumer, so PSKs are installed in the order the peer sent the key ids.
-func RunKeyIDWorker(done <-chan bool, queue <-chan KeyIDRequest, install func(keyID string) bool) {
-	var last string
+func RunKeyIDWorker(done <-chan bool, queue <-chan KeyIDRequest, install func(keyID string) (pqcRound string, ok bool)) {
+	var last, round string
 	var installed bool
 	for {
 		select {
@@ -371,10 +376,11 @@ func RunKeyIDWorker(done <-chan bool, queue <-chan KeyIDRequest, install func(ke
 			return
 		case req := <-queue:
 			if req.KeyID != last {
-				last, installed = req.KeyID, install(req.KeyID)
+				last = req.KeyID
+				round, installed = install(req.KeyID)
 			}
 			if installed {
-				req.Ack()
+				req.Ack(round)
 			}
 		}
 	}

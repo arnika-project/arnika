@@ -273,8 +273,9 @@ type Repository struct {
 
 	log *slog.Logger
 
-	keyMu  sync.RWMutex // also orders zeroing the superseded key against readers, which an atomic.Pointer cannot
-	latest *pqcResult
+	keyMu    sync.RWMutex // also orders zeroing the superseded key against readers, which an atomic.Pointer cannot
+	latest   *pqcResult
+	previous *pqcResult // the round latest replaced, so a peer that derived from it a moment ago can still be matched
 
 	respMu sync.Mutex
 	resp   pqcResponderState
@@ -374,13 +375,36 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 }
 
 func (r *Repository) GetNewKey() ([]byte, error) {
+	_, key, err := r.Latest()
+	return key, err
+}
+
+// Latest returns the newest fresh key and the round it was agreed in.
+func (r *Repository) Latest() (round uint32, key []byte, err error) {
 	r.keyMu.RLock()
 	defer r.keyMu.RUnlock()
 
-	v := r.latest
-	if v == nil {
-		return nil, fmt.Errorf("pqc-hpke: no key agreed yet")
+	if r.latest == nil {
+		return 0, nil, fmt.Errorf("pqc-hpke: no key agreed yet")
 	}
+	key, err = r.fresh(r.latest)
+	return r.latest.round, key, err
+}
+
+// KeyForRound returns the fresh key agreed in round, if it is the latest or the one before it.
+func (r *Repository) KeyForRound(round uint32) ([]byte, error) {
+	r.keyMu.RLock()
+	defer r.keyMu.RUnlock()
+
+	for _, v := range []*pqcResult{r.latest, r.previous} {
+		if v != nil && v.round == round {
+			return r.fresh(v)
+		}
+	}
+	return nil, fmt.Errorf("pqc-hpke: round %d is not held", round)
+}
+
+func (r *Repository) fresh(v *pqcResult) ([]byte, error) {
 	if age := time.Since(v.at); age > r.maxAge {
 		return nil, fmt.Errorf("pqc-hpke: key stale (age %s, max %s)",
 			age.Truncate(time.Second), r.maxAge)
@@ -414,8 +438,16 @@ func (r *Repository) publish(round uint32, key []byte) error {
 			"round", round, "published_round", prev.round, "age", age.Truncate(time.Second), "max_age", r.maxAge)
 	}
 	r.latest = &pqcResult{key: k, round: round, at: time.Now()}
+	if r.previous != nil {
+		clear(r.previous.key)
+	}
+	r.previous = nil
 	if prev != nil {
-		clear(prev.key)
+		if round > prev.round {
+			r.previous = prev
+		} else {
+			clear(prev.key)
+		}
 	}
 	return nil
 }
@@ -542,7 +574,7 @@ func (r *Repository) readMessage(ctx context.Context, round uint32, kind pqcKind
 	}
 }
 
-// sendMessage retries failed writes, since a peer still binding its listener shows up as ICMP port-unreachable.
+// sendMessage retries a failed local write; the initiator's unconnected socket never reports the peer's ICMP errors.
 func (r *Repository) sendMessage(ctx context.Context, round uint32, kind pqcKind, msg []byte) error {
 	frames, err := splitMessage(round, kind, msg)
 	if err != nil {
@@ -646,11 +678,10 @@ func (r *Repository) respondTag(round uint32, peerTag []byte) error {
 	if !r.resp.live || r.resp.round != round {
 		return fmt.Errorf("pqc-hpke: confirmation for round %d with no round in flight", round)
 	}
-	defer r.clearResponder()
-
-	if !pqcVerifyConfirm(r.resp.key, round, pqcRoleInitiator, peerTag) {
+	if !pqcVerifyConfirm(r.resp.key, round, pqcRoleInitiator, peerTag) { // the round stays open, so a bad tag cannot cancel the genuine one
 		return fmt.Errorf("pqc-hpke: key confirmation failed for round %d; nothing published", round)
 	}
+	defer r.clearResponder()
 	if err := r.publish(round, r.resp.key); err != nil {
 		return err
 	}

@@ -243,19 +243,23 @@ AES-256-GCM, using two keys derived from that secret with domain separation (`au
 Mutual TLS is **not** available on this channel. `CERTIFICATE`, `PRIVATE_KEY` and
 `CA_CERTIFICATE` do not apply to it — see the next section.
 
-### Role Election Integrity (`ARNIKA_ID`)
+### Fixed Roles (`SERVER_ADDRESS`, `LISTEN_ADDRESS`)
 
-Which peer requests a new key in a given interval is decided locally by
-`HMAC-SHA256(ARNIKA_PSK, intervalNumber)` XOR `ARNIKA_ID` (`config/config.go`, `IsPrimary`).
+The role is fixed by the configuration (`config/config.go`, `Parse`, `IsPrimary`): the peer given
+`SERVER_ADDRESS` is the PRIMARY, the peer given `LISTEN_ADDRESS` the BACKUP. Setting both or
+neither is a startup error.
 
-- **The two peers' `ARNIKA_ID` values MUST have different parity** — one odd, one even. Only the
-  lowest bit of `ARNIKA_ID` enters the decision, so two peers with different but same-parity IDs
-  (e.g. `100` and `102`) elect the _same_ role in every interval, and both or neither will rotate.
-- **`ARNIKA_ID` defaults to the port from `LISTEN_ADDRESS`.** If both peers listen on the same
-  port, they inherit the same ID and role election never separates them. Set it explicitly.
-- **Both peers MUST use the same `INTERVAL`.** The election is only guaranteed to produce opposite
-  roles for the same interval number; different interval lengths make the counters drift apart and
-  the roles independent.
+- **Exactly one peer MUST be the PRIMARY.** Two PRIMARYs have nobody to answer them and two
+  BACKUPs nobody to start an exchange; either way no ACK arrives and both ends invalidate the
+  tunnel every interval, so a misconfiguration fails closed.
+- **The PRIMARY opens no port.** It sends from an unconnected ephemeral socket and accepts only
+  replies that pass the same HMAC, direction, type and timestamp checks; a spoofed ICMP error
+  cannot fail a send or end its wait. Only the BACKUP's `LISTEN_ADDRESS` is reachable.
+- **The BACKUP answers to the source address of each authenticated packet**, which lets the
+  PRIMARY sit behind NAT. A copy of a captured packet is answered too but never processed twice
+  (see the replay handling in [`CODEFLOW.md`](CODEFLOW.md#security-mechanisms-in-code)).
+- **Both peers MUST use the same `INTERVAL`.** The PRIMARY rotates and the BACKUP expects a key ID
+  on wall-clock interval boundaries; different lengths make the two drift apart.
 
 ### KMS Client Certificates (`CERTIFICATE`, `PRIVATE_KEY`, `CA_CERTIFICATE`)
 
@@ -263,14 +267,12 @@ These three variables configure **client-certificate authentication towards the 
 (`repositories/kms/kms.go`, wired in `wire_qkd_kms.go`). They are used for the ETSI GS QKD 014 HTTPS
 connection and for nothing else — in particular they do not protect the inter-peer channel.
 
-They are **all-or-nothing**: if any one of them is empty, client-certificate authentication is
-silently disabled and the KMS connection falls back to server-only validation against the system
-root store (TLS 1.2 minimum). Where the KMS requires mutual TLS, configure all three, keep the
+They are **all-or-nothing**: with none of them set, the KMS connection uses server-only validation
+against the system root store (TLS 1.2 minimum); setting only some of them is a startup error, so a
+half-configured mutual TLS can no longer fall back silently. A `CA_CERTIFICATE` that holds no PEM
+certificate also aborts startup. Where the KMS requires mutual TLS, configure all three, keep the
 private key `0600` and owned by the Arnika user, and note that `CA_CERTIFICATE` then _replaces_
 the system roots for that connection.
-
-A deployment that believes it is using mutual TLS towards the KMS while one of the three variables
-is unset is a misconfiguration worth reporting.
 
 ### KMS Endpoint Security
 
@@ -314,9 +316,10 @@ What replaces it, and what to watch:
   there to cover an ML-KEM _implementation_ flaw exploited classically (the KyberSlash/Clangover
   scenario), and to satisfy the hybrid requirement in the German and EU positions. QKD, when
   present, is the only non-computational hedge.
-- **No new listener.** PQC frames ride the existing port as one additional packet type; outbound
-  frames go from a dialled socket to the pinned peer address, never to an observed source, so
-  there is no reflection primitive.
+- **No new listener.** PQC frames ride the BACKUP's existing port as one additional packet type.
+  The PRIMARY sends from an unconnected socket to its pinned `SERVER_ADDRESS`; the BACKUP replies
+  only to the source of an authenticated frame, and a copy of a processed frame draws no reply,
+  so there is no reflection primitive.
 - **`draft-ietf-hpke-pq` is not yet an RFC.** Pin the Go version and re-verify interoperability on
   upgrade.
 
@@ -360,7 +363,8 @@ _unfingerprintable_.
 - [ ] `KMS_URL` uses `https://` with a trusted, validated certificate
 - [ ] `ARNIKA_PSK` is set to at least 32 bytes of CSPRNG output, **identical on both peers**, and
   never left unset
-- [ ] `ARNIKA_ID` is set explicitly on both peers, with **different parity** (one odd, one even)
+- [ ] Exactly one peer sets `SERVER_ADDRESS` (the PRIMARY) and the other `LISTEN_ADDRESS` (the
+  BACKUP); only the BACKUP's UDP port is reachable
 - [ ] Both peers use the **same `INTERVAL`**
 - [ ] `CERTIFICATE`, `PRIVATE_KEY`, and `CA_CERTIFICATE` are configured where the **KMS** requires
   client-certificate authentication (these do not apply to the inter-peer channel)

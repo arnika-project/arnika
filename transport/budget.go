@@ -8,10 +8,7 @@ import (
 	"github.com/arnika-project/arnika/repositories/pqchpke"
 )
 
-const (
-	qkdInboundPerInterval = udpClientMaxAttempts
-	pqcInboundPerRound    = pqchpke.MessageFrames*pqchpke.MaxSendAttempts + 1 // +1 is the confirmation tag; replies are outbound and not rate limited
-)
+const pqcInboundPerRound = pqchpke.MessageFrames*pqchpke.MaxSendAttempts + 1 // +1 is the confirmation tag; replies are outbound and not rate limited
 
 // eventsIn is the most events spaced step apart inside a sliding window: n steps can straddle n+1 events.
 func eventsIn(window, step time.Duration) int {
@@ -21,9 +18,9 @@ func eventsIn(window, step time.Duration) int {
 	return int(window/step) + 1
 }
 
-// RateBudget assumes this node is inbound for every interval and round, since roles need not alternate, plus the round Run serves at startup.
+// RateBudget counts what the primary sends the backup per RATE_WINDOW: every key_id send of every interval, every PQC round, plus the round Run serves at startup.
 func RateBudget(cfg *config.Config) int {
-	n := eventsIn(cfg.RateWindow, cfg.Interval) * qkdInboundPerInterval
+	n := eventsIn(cfg.RateWindow, cfg.Interval) * keyIDSendsPerInterval(cfg.Interval)
 	if cfg.UsePQC() {
 		spacing := time.Duration(pqchpke.RoundSeconds(cfg.PQCRoundInterval)) * time.Second
 		n += (eventsIn(cfg.RateWindow, spacing) + 1) * pqcInboundPerRound
