@@ -235,7 +235,8 @@ AES-256-GCM, using two keys derived from that secret with domain separation (`au
 - **The startup banner redacts it**, printing `(set, N bytes)` rather than the value.
 - **Supporting controls on the same channel**: per-IP rate limiting of authenticated packets
   (`RATE_LIMIT`, `RATE_WINDOW`, calculated by default), timestamp replay protection
-  (`MAX_CLOCK_SKEW`, default `1m`) and a cache of recent HMAC tags that drops replayed packets. Lowering
+  (`MAX_CLOCK_SKEW`, default `1m`), which also drops a key_id older than the newest one accepted or
+  than the process start. Lowering
   `MAX_CLOCK_SKEW` reduces the replay window but requires closer clock synchronisation between
   peers.
 

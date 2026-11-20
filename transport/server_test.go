@@ -550,7 +550,7 @@ func TestReplayOfAnOlderKeyIDIsDropped(t *testing.T) {
 	captured := p.dataAt("old", now)
 	p.write(p.conn, captured)
 	p.write(p.conn, p.dataAt("new", now+1))
-	p.write(p.conn, captured) // the exact bytes, and a withheld resend of "old" would carry the same timestamp
+	p.write(p.conn, captured)
 	p.wantKeyIDs("old", "new")
 }
 
@@ -574,7 +574,7 @@ func TestARacedCopyDoesNotTakeTheSendersAck(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = racer.Close() })
 	raw := p.dataAt("the-key-id", time.Now().Unix())
-	p.write(racer, raw) // an observer's copy wins the race
+	p.write(racer, raw)
 	time.Sleep(50 * time.Millisecond)
 	p.write(p.conn, raw)
 
@@ -656,7 +656,7 @@ func TestWriteConnectedSurvivesAPendingICMPError(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := conn.Write([]byte{0}); err != nil { // nothing listens yet, so this draws the ICMP error
+	if _, err := conn.Write([]byte{0}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)

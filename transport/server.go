@@ -79,8 +79,8 @@ func Serve(c ServerConfig) error {
 	queueFullWarn := logThrottle{interval: qkdQueueWarnEvery}
 	authFailWarn := logThrottle{interval: authFailWarnEvery}
 	started := time.Now().Unix() // nothing captured before a restart is accepted after it
-	var lastKeyID string         // newest key_id from the peer
-	var lastKeyTs int64          // its newest authenticated timestamp; the peer's clock, so a local clock step cannot lower it
+	var lastKeyID string
+	var lastKeyTs int64 // newest authenticated DATA timestamp; the peer's clock, so a local clock step cannot lower it
 
 	go func() {
 		<-quit
