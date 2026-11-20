@@ -1415,3 +1415,76 @@ func TestPQCAbandonsResponderStateOutsideTheRoundWindow(t *testing.T) {
 		t.Fatal("the abandoned round's key was not zeroed")
 	}
 }
+
+func TestPQCKeyForRoundHoldsTheLatestAndThePreviousRoundOnly(t *testing.T) {
+	r := staleRepo(t, time.Minute)
+	for _, round := range []uint32{7, 8} {
+		if err := r.publish(round, bytes.Repeat([]byte{byte(round)}, pqcKeyLen)); err != nil {
+			t.Fatalf("publish %d: %v", round, err)
+		}
+	}
+	for _, round := range []uint32{7, 8} {
+		if key, err := r.KeyForRound(round); err != nil || !bytes.Equal(key, bytes.Repeat([]byte{byte(round)}, pqcKeyLen)) {
+			t.Fatalf("KeyForRound(%d) = %x, %v", round, key, err)
+		}
+	}
+	superseded := r.previous.key
+	if err := r.publish(9, bytes.Repeat([]byte{9}, pqcKeyLen)); err != nil {
+		t.Fatalf("publish 9: %v", err)
+	}
+	if _, err := r.KeyForRound(7); err == nil {
+		t.Fatal("round 7 is still held two rounds later")
+	}
+	if !bytes.Equal(superseded, make([]byte, pqcKeyLen)) {
+		t.Fatal("round 7's key was not zeroed when it fell out")
+	}
+	if round, _, err := r.Latest(); err != nil || round != 9 {
+		t.Fatalf("Latest = %d, %v; want round 9", round, err)
+	}
+}
+
+func TestPQCResponderStillPublishesOnTheGenuineTagAfterAForgedOne(t *testing.T) {
+	r := newPQCTestRepo(t, time.Second, 500*time.Millisecond, time.Minute)
+	priv, pub, err := pqcInitiatorStart()
+	if err != nil {
+		t.Fatalf("initiatorStart: %v", err)
+	}
+	round := currentRound(time.Second)
+	var join pqcJoiner
+	var encAndTag []byte
+	reply := func(raw []byte) error {
+		f, err := decodeFrame(raw)
+		if err != nil {
+			return err
+		}
+		if msg, complete := join.add(f); complete {
+			encAndTag = msg
+		}
+		return nil
+	}
+	for _, f := range mustSplit(t, round, pqcKindPubKey, pub) {
+		if err := r.HandleFrame(f, reply); err != nil {
+			t.Fatalf("HandleFrame(pubKey): %v", err)
+		}
+	}
+	for _, f := range mustSplit(t, round, pqcKindTag, make([]byte, pqcConfirmTagLen)) {
+		_ = r.HandleFrame(f, reply)
+	}
+
+	key, err := pqcInitiatorFinish(priv, encAndTag[:len(encAndTag)-pqcConfirmTagLen], round)
+	if err != nil {
+		t.Fatalf("initiatorFinish: %v", err)
+	}
+	tag, err := pqcConfirmTag(key, round, pqcRoleInitiator)
+	if err != nil {
+		t.Fatalf("confirmTag: %v", err)
+	}
+	for _, f := range mustSplit(t, round, pqcKindTag, tag) {
+		if err := r.HandleFrame(f, reply); err != nil {
+			t.Fatalf("HandleFrame(genuine tag): %v", err)
+		}
+	}
+	if got, err := r.GetNewKey(); err != nil || !bytes.Equal(got, key) {
+		t.Fatalf("GetNewKey = %x, %v; the genuine tag after a forged one must still publish", got, err)
+	}
+}

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -9,11 +10,11 @@ func TestSignAndVerify(t *testing.T) {
 	psk := []byte("test-psk-secret-key")
 	data := []byte("hello world")
 
-	sig := Sign(psk, data, DirEven)
+	sig := Sign(psk, data, DirPrimary)
 	if len(sig) != 32 {
 		t.Fatalf("expected 32-byte signature, got %d", len(sig))
 	}
-	if !Verify(psk, data, sig, DirEven) {
+	if !Verify(psk, data, sig, DirPrimary) {
 		t.Fatal("signature verification failed for valid data")
 	}
 }
@@ -23,8 +24,8 @@ func TestVerifyRejectsWrongPSK(t *testing.T) {
 	psk2 := []byte("wrong-psk")
 	data := []byte("hello world")
 
-	sig := Sign(psk1, data, DirEven)
-	if Verify(psk2, data, sig, DirEven) {
+	sig := Sign(psk1, data, DirPrimary)
+	if Verify(psk2, data, sig, DirPrimary) {
 		t.Fatal("signature verification should fail with wrong PSK")
 	}
 }
@@ -33,9 +34,9 @@ func TestVerifyRejectsTamperedData(t *testing.T) {
 	psk := []byte("test-psk")
 	data := []byte("original data")
 
-	sig := Sign(psk, data, DirEven)
+	sig := Sign(psk, data, DirPrimary)
 	tampered := []byte("tampered data")
-	if Verify(psk, tampered, sig, DirEven) {
+	if Verify(psk, tampered, sig, DirPrimary) {
 		t.Fatal("signature verification should fail with tampered data")
 	}
 }
@@ -44,8 +45,8 @@ func TestVerifyRejectsTruncatedSignature(t *testing.T) {
 	psk := []byte("test-psk")
 	data := []byte("data")
 
-	sig := Sign(psk, data, DirEven)
-	if Verify(psk, data, sig[:16], DirEven) {
+	sig := Sign(psk, data, DirPrimary)
+	if Verify(psk, data, sig[:16], DirPrimary) {
 		t.Fatal("signature verification should fail with truncated signature")
 	}
 }
@@ -121,8 +122,8 @@ func TestPacketMarshalUnmarshal(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := tt.pkt.Marshal(psk, DirEven)
-			parsed, err := UnmarshalPacket(psk, data, DirEven)
+			data := tt.pkt.Marshal(psk, DirPrimary)
+			parsed, err := UnmarshalPacket(psk, data, DirPrimary)
 			if err != nil {
 				t.Fatalf("unmarshal failed: %v", err)
 			}
@@ -144,9 +145,9 @@ func TestUnmarshalRejectsWrongPSK(t *testing.T) {
 	psk2 := []byte("wrong-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix()}
-	data := pkt.Marshal(psk1, DirEven)
+	data := pkt.Marshal(psk1, DirPrimary)
 
-	_, err := UnmarshalPacket(psk2, data, DirEven)
+	_, err := UnmarshalPacket(psk2, data, DirPrimary)
 	if err == nil {
 		t.Fatal("unmarshal should fail with wrong PSK")
 	}
@@ -159,12 +160,12 @@ func TestUnmarshalRejectsTamperedData(t *testing.T) {
 	psk := []byte("test-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("original-data")}
-	data := pkt.Marshal(psk, DirEven)
+	data := pkt.Marshal(psk, DirPrimary)
 
 	if len(data) > 20 {
 		data[20] ^= 0xFF
 	}
-	_, err := UnmarshalPacket(psk, data, DirEven)
+	_, err := UnmarshalPacket(psk, data, DirPrimary)
 	if err == nil {
 		t.Fatal("unmarshal should fail with tampered data")
 	}
@@ -173,7 +174,7 @@ func TestUnmarshalRejectsTamperedData(t *testing.T) {
 func TestUnmarshalRejectsTruncated(t *testing.T) {
 	psk := []byte("test-psk")
 
-	_, err := UnmarshalPacket(psk, []byte{1, 2, 3}, DirEven)
+	_, err := UnmarshalPacket(psk, []byte{1, 2, 3}, DirPrimary)
 	if err == nil {
 		t.Fatal("unmarshal should fail with truncated data")
 	}
@@ -182,13 +183,13 @@ func TestUnmarshalRejectsTruncated(t *testing.T) {
 func TestDomainSeparation(t *testing.T) {
 	psk := []byte("same-psk")
 	aesKey := deriveKey(psk)
-	hmacKey := deriveHMACKey(psk, DirEven)
+	hmacKey := deriveHMACKey(psk, DirPrimary)
 
 	if string(aesKey) == string(hmacKey) {
 		t.Fatal("AES key and HMAC key must be different (domain separation)")
 	}
 
-	if string(deriveHMACKey(psk, DirEven)) == string(deriveHMACKey(psk, DirOdd)) {
+	if string(deriveHMACKey(psk, DirPrimary)) == string(deriveHMACKey(psk, DirBackup)) {
 		t.Fatal("the two directions must derive different HMAC keys")
 	}
 }
@@ -198,9 +199,9 @@ func TestReplayDetectable(t *testing.T) {
 	oldTime := time.Now().Add(-10 * time.Minute).Unix()
 
 	pkt := Packet{Type: PacketData, Timestamp: oldTime, Payload: []byte("old-data")}
-	data := pkt.Marshal(psk, DirEven)
+	data := pkt.Marshal(psk, DirPrimary)
 
-	parsed, err := UnmarshalPacket(psk, data, DirEven)
+	parsed, err := UnmarshalPacket(psk, data, DirPrimary)
 	if err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
@@ -216,11 +217,11 @@ func TestSignatureBindsToPacketType(t *testing.T) {
 	psk := []byte("type-confusion-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("payload")}
-	data := pkt.Marshal(psk, DirEven)
+	data := pkt.Marshal(psk, DirPrimary)
 
 	data[0] = byte(PacketAck)
 
-	_, err := UnmarshalPacket(psk, data, DirEven)
+	_, err := UnmarshalPacket(psk, data, DirPrimary)
 	if err == nil {
 		t.Fatal("changing packet type must invalidate signature")
 	}
@@ -230,11 +231,11 @@ func TestSignatureBindsToTimestamp(t *testing.T) {
 	psk := []byte("ts-tamper-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("data")}
-	data := pkt.Marshal(psk, DirEven)
+	data := pkt.Marshal(psk, DirPrimary)
 
 	data[5] ^= 0x01
 
-	_, err := UnmarshalPacket(psk, data, DirEven)
+	_, err := UnmarshalPacket(psk, data, DirPrimary)
 	if err == nil {
 		t.Fatal("modifying timestamp must invalidate signature")
 	}
@@ -262,11 +263,11 @@ func TestBitFlipInPayload(t *testing.T) {
 	payload := []byte("encrypted-key-material")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: payload}
-	data := pkt.Marshal(psk, DirEven)
+	data := pkt.Marshal(psk, DirPrimary)
 
 	data[15] ^= 0x02
 
-	_, err := UnmarshalPacket(psk, data, DirEven)
+	_, err := UnmarshalPacket(psk, data, DirPrimary)
 	if err == nil {
 		t.Fatal("single bit flip in payload must invalidate signature")
 	}
@@ -276,11 +277,11 @@ func TestBitFlipInSignature(t *testing.T) {
 	psk := []byte("sigflip-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("data")}
-	data := pkt.Marshal(psk, DirEven)
+	data := pkt.Marshal(psk, DirPrimary)
 
 	data[len(data)-1] ^= 0x01
 
-	_, err := UnmarshalPacket(psk, data, DirEven)
+	_, err := UnmarshalPacket(psk, data, DirPrimary)
 	if err == nil {
 		t.Fatal("corrupted signature must be rejected")
 	}
@@ -290,12 +291,12 @@ func TestUnmarshalRejectsInvalidLengthFields(t *testing.T) {
 	psk := []byte("length-psk")
 
 	pkt := Packet{Type: PacketData, Timestamp: time.Now().Unix(), Payload: []byte("x")}
-	data := pkt.Marshal(psk, DirEven)
+	data := pkt.Marshal(psk, DirPrimary)
 
 	data[9] = 0xFF
 	data[10] = 0xFF
 
-	_, err := UnmarshalPacket(psk, data, DirEven)
+	_, err := UnmarshalPacket(psk, data, DirPrimary)
 	if err == nil {
 		t.Fatal("oversized payload_len must be rejected")
 	}
@@ -305,8 +306,8 @@ func TestEmptyPSKStillProducesDeterministicKeys(t *testing.T) {
 	psk := []byte{}
 	k1 := deriveKey(psk)
 	k2 := deriveKey(psk)
-	h1 := deriveHMACKey(psk, DirEven)
-	h2 := deriveHMACKey(psk, DirEven)
+	h1 := deriveHMACKey(psk, DirPrimary)
+	h2 := deriveHMACKey(psk, DirPrimary)
 
 	if string(k1) != string(k2) {
 		t.Fatal("deriveKey must be deterministic")
@@ -319,12 +320,12 @@ func TestEmptyPSKStillProducesDeterministicKeys(t *testing.T) {
 	}
 }
 
-func TestDirectionForParity(t *testing.T) {
-	outA, inA := DirectionFor(9999)
-	outB, inB := DirectionFor(9998)
+func TestDirectionForRole(t *testing.T) {
+	outA, inA := DirectionFor(false)
+	outB, inB := DirectionFor(true)
 
 	if outA == outB {
-		t.Fatalf("peers with different ID parity must sign with different labels, both got %q", outA)
+		t.Fatalf("primary and backup must sign with different labels, both got %q", outA)
 	}
 	if outA != inB || outB != inA {
 		t.Fatalf("labels must pair up: A out=%q in=%q, B out=%q in=%q", outA, inA, outB, inB)
@@ -333,7 +334,7 @@ func TestDirectionForParity(t *testing.T) {
 
 func TestReflectedPacketFailsAtSender(t *testing.T) {
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
-	outA, inA := DirectionFor(9999)
+	outA, inA := DirectionFor(false)
 
 	pkt := &Packet{Type: PacketData, Timestamp: 1234567890, Payload: []byte("key-id")}
 	wire := pkt.Marshal(psk, outA)
@@ -355,7 +356,7 @@ func TestPacketPQCRoundTrip(t *testing.T) {
 
 	payload := []byte("frame bytes")
 	pkt := &Packet{Type: PacketPQC, Timestamp: 1234567890, Payload: payload}
-	parsed, err := UnmarshalPacket(psk, pkt.Marshal(psk, DirEven), DirEven)
+	parsed, err := UnmarshalPacket(psk, pkt.Marshal(psk, DirPrimary), DirPrimary)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -364,5 +365,17 @@ func TestPacketPQCRoundTrip(t *testing.T) {
 	}
 	if string(parsed.Payload) != string(payload) {
 		t.Errorf("payload = %q, want %q", parsed.Payload, payload)
+	}
+}
+
+func TestWithinSkewRejectsTimestampsWhoseDifferenceOverflows(t *testing.T) {
+	now := time.Now().Unix()
+	for _, ts := range []int64{math.MinInt64, now + math.MinInt64, math.MaxInt64} {
+		if WithinSkew(ts, time.Minute) {
+			t.Fatalf("WithinSkew(%d) accepted a timestamp centuries away", ts)
+		}
+	}
+	if !WithinSkew(now-59, time.Minute) || !WithinSkew(now+59, time.Minute) || WithinSkew(now-61, time.Minute) {
+		t.Fatal("WithinSkew no longer keeps the ±MAX_CLOCK_SKEW window")
 	}
 }

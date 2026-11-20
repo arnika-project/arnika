@@ -25,20 +25,20 @@ const (
 	PacketPQC  PacketType = 'Q' // the PQC frame kind lives inside the payload
 )
 
-// Direction keys the HMAC per sending peer, so a packet reflected back to its sender fails verification.
+// Direction keys the HMAC per sending role, so a packet reflected back to its sender fails verification.
 type Direction string
 
 const (
-	DirEven Direction = "even"
-	DirOdd  Direction = "odd"
+	DirPrimary Direction = "primary"
+	DirBackup  Direction = "backup"
 )
 
-// DirectionFor labels by ARNIKA_ID parity, which the two peers are required to differ in.
-func DirectionFor(arnikaID int) (out, in Direction) {
-	if arnikaID%2 == 0 {
-		return DirEven, DirOdd
+// DirectionFor returns the direction this role signs with and the one it verifies against.
+func DirectionFor(primary bool) (out, in Direction) {
+	if primary {
+		return DirPrimary, DirBackup
 	}
-	return DirOdd, DirEven
+	return DirBackup, DirPrimary
 }
 
 type Packet struct {
@@ -134,12 +134,10 @@ func Decrypt(psk, ciphertext []byte) ([]byte, error) {
 	return result, decErr
 }
 
+// WithinSkew compares bounds rather than the difference, which overflows for a timestamp near now-2^63.
 func WithinSkew(ts int64, max time.Duration) bool {
-	diff := time.Now().Unix() - ts
-	if diff < 0 {
-		diff = -diff
-	}
-	return diff <= int64(max.Seconds())
+	now, m := time.Now().Unix(), int64(max/time.Second)
+	return ts >= now-m && ts <= now+m
 }
 
 func (p *Packet) signedPayload() []byte {

@@ -389,8 +389,8 @@ keytail() {
 
 # A device is the handle everything passes around; dev_id and pub_of map it back
 # to the peer that owns it, so an interface is paired with its peer's public key
-# in one place. tag prints a device the way arnika names itself, dev[ARNIKA_ID],
-# to line a message up against that peer's own log prefix.
+# in one place. tag prints a device with its peer's ID, dev[ID], to line a
+# message up against that peer's own log.
 dev_id() {
     case "$1" in
         "$DEV1") printf '%s' "$ID1" ;;
@@ -515,9 +515,8 @@ PSK="$(openssl rand -base64 32)"
 # what the far end's AllowedIPs accepts as an inner source.
 SRC="100.1.1.1"
 PROBE="100.1.2.3"
-# The two peers, named by their ARNIKA_ID throughout. The IDs double as the
-# peers' UDP ports, and have to differ in parity: only the lowest bit takes part
-# in role election, and the PQC initiator is picked from it too.
+# The two peers, named by an ID throughout. Peer 1 is the primary and PQC
+# initiator; peer 2 is the backup, and ID2 is its UDP listen port.
 ID1=9998
 ID2=9999
 # wg reports an all-zero preshared key as "(none)", and setting it is how a key
@@ -534,7 +533,7 @@ wg_dump() {
     [ "$#" -gt 0 ] || set -- "$DEV1" "$DEV2"
     for dev in "$@"; do
         case "$dev" in "$DEV1") prof=qcicat1 ;; "$DEV2") prof=qcicat2 ;; *) prof=unknown ;; esac
-        info "wg dump $dev (profile $prof, ARNIKA_ID $(dev_id "$dev")):"
+        info "wg dump $dev (profile $prof, peer $(dev_id "$dev")):"
         sudo wg show "$dev" dump | out
     done
 }
@@ -751,10 +750,9 @@ pretest() {
 #
 # The responding peer may still answer a frame or two of its own, since both its
 # frames are already queued when it starts - so it can hold a key the initiator
-# never confirmed. That is why this check reads LOG_A: peer a's ARNIKA_ID is
-# even, which is what makes it the PQC initiator (pqchpke.go), and therefore the
-# end whose decision is deterministic. Swap the IDs' parity and this has to
-# follow.
+# never confirmed. That is why this check reads LOG_A: peer a is the primary,
+# which makes it the PQC initiator, and therefore the end whose decision is
+# deterministic.
 #
 # Both halves are checked - the PSKs, and the line arnika logs about its own
 # decision - because the PSK state alone cannot say the mode reasoned correctly.
@@ -961,18 +959,17 @@ start_pair() {
         MARK_B=0
     fi
 
-    # $1 is this peer's ARNIKA_ID, which doubles as its port; $2 is the other's.
+    # $1 sets the role: SERVER_ADDRESS makes the primary, LISTEN_ADDRESS the backup.
     start_peer() {
         sudo env \
-            LISTEN_ADDRESS="127.0.0.1:$1" SERVER_ADDRESS="127.0.0.1:$2" \
-            ARNIKA_ID="$1" ARNIKA_PSK="$PSK" INTERVAL=7s MODE="$mode" LOG_LEVEL=debug \
-            KMS_URL="http://127.0.0.1:8080/api/v1/keys/$3" \
-            WIREGUARD_INTERFACE="$4" WIREGUARD_PEER_PUBLIC_KEY="$5" \
+            "$1" ARNIKA_PSK="$PSK" INTERVAL=7s MODE="$mode" LOG_LEVEL=debug \
+            KMS_URL="http://127.0.0.1:8080/api/v1/keys/$2" \
+            WIREGUARD_INTERFACE="$3" WIREGUARD_PEER_PUBLIC_KEY="$4" \
             ${extra} \
-            "$WORK/arnika" >> "$6" 2>&1 &
+            "$WORK/arnika" >> "$5" 2>&1 &
     }
-    start_peer "$ID1" "$ID2" CONSA "$DEV1" "$PUB1" "$LOG_A"
-    start_peer "$ID2" "$ID1" CONSB "$DEV2" "$PUB2" "$LOG_B"
+    start_peer "SERVER_ADDRESS=127.0.0.1:$ID2" CONSA "$DEV1" "$PUB1" "$LOG_A"
+    start_peer "LISTEN_ADDRESS=127.0.0.1:$ID2" CONSB "$DEV2" "$PUB2" "$LOG_B"
 }
 
 # run_mode starts a peer pair in one MODE and puts it through the checks.

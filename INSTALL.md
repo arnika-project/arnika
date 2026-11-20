@@ -348,14 +348,12 @@ Run on both Alice and Bob:
 
 - Create an environment file for Arnika:
 
-  **For Alice**:
+  **For Alice** (PRIMARY: she knows Bob's address, so she starts every exchange and opens no port):
 
   ```bash
   sudo tee /opt/arnika/arnika.env > /dev/null << EOF
   INTERVAL="120s"
-  LISTEN_ADDRESS="<ALICE_IP>:9999"
   SERVER_ADDRESS="<BOB_IP>:9999"
-  ARNIKA_ID="9999"
   ARNIKA_PSK="<SHARED_ARNIKA_PSK>"
   # KMS client certificate (KMS connection only - not the peer channel):
   CERTIFICATE="/opt/arnika/kms_certs/arnika-alice.crt"
@@ -372,14 +370,12 @@ Run on both Alice and Bob:
   sudo chmod 600 /opt/arnika/arnika.env
   ```
 
-  **For Bob**:
+  **For Bob** (BACKUP: he only listens and answers, so UDP port 9999 must reach him):
 
   ```bash
   sudo tee /opt/arnika/arnika.env > /dev/null << EOF
   INTERVAL="120s"
   LISTEN_ADDRESS="<BOB_IP>:9999"
-  SERVER_ADDRESS="<ALICE_IP>:9999"
-  ARNIKA_ID="9998"
   ARNIKA_PSK="<SHARED_ARNIKA_PSK>"
   # KMS client certificate (KMS connection only - not the peer channel):
   CERTIFICATE="/opt/arnika/kms_certs/arnika-bob.crt"
@@ -397,19 +393,15 @@ Run on both Alice and Bob:
   ```
 
   > [!IMPORTANT]
-  > Three values must line up between the two peers, or key rotation silently misbehaves:
+  > Three things must line up between the two peers, or key rotation fails:
   >
-  > - **`ARNIKA_PSK` must be identical.** It authenticates and encrypts the peer channel. If it
-  >   is unset, Arnika starts but the channel keys derive from the empty string and offer no
-  >   protection.
-  > - **`ARNIKA_ID` must differ in parity** — one odd, one even (`9999` and `9998` above). Only
-  >   the lowest bit takes part in PRIMARY/BACKUP election, so two even or two odd IDs make both
-  >   peers pick the *same* role every interval. Without an explicit `ARNIKA_ID` each peer
-  >   defaults to its own listen port, which is `9999` on both hosts here — identical, and
-  >   therefore broken.
-  > - **`INTERVAL` must be identical.** Roles are elected per interval number, so different
-  >   interval lengths drift the two peers apart. Earlier releases suggested offsetting Bob's
-  >   interval to avoid flapping; that is obsolete and now harmful.
+  > - **`ARNIKA_PSK` must be identical.** It authenticates and encrypts the peer channel; Arnika
+  >   refuses to start without it.
+  > - **Exactly one peer sets `SERVER_ADDRESS`, the other `LISTEN_ADDRESS`.** The address a peer
+  >   is given decides its role. Two PRIMARYs have nobody to answer them, two BACKUPs nobody to
+  >   start an exchange, and both ends then invalidate the tunnel every interval.
+  > - **`INTERVAL` must be identical.** Rotations and the BACKUP's wait for a key ID follow the
+  >   wall clock in multiples of `INTERVAL`, so different lengths drift the two peers apart.
 
   <!-- -->
 
@@ -715,16 +707,16 @@ tmux attach -t <session>   # kms, arnika, wg or ping
   > [!NOTE]
   > The startup banner redacts `ARNIKA_PSK`, printing only its length.
 
-- Verify that key rotation and role election work:
+- Verify that key rotation works:
 
   ```bash
   journalctl -u arnika -f | grep -E 'role=(primary|backup)'
   ```
 
-  Across consecutive intervals exactly **one** of the two hosts must log `role=primary` at a time,
-  and both must log `msg="PSK configured on WireGuard interface"`. If both hosts log `role=primary`
-  for the same interval, or neither does, check that `ARNIKA_PSK` is identical, `INTERVAL` is
-  identical, and the two `ARNIKA_ID` values differ in parity.
+  Alice must log `role=primary` and `msg="sending the key_id to the peer"`, Bob `role=backup`
+  and `msg="received a key_id from the peer"`, and both must log
+  `msg="PSK configured on WireGuard interface"` every interval. If Bob never receives a key ID,
+  check that `ARNIKA_PSK` and `INTERVAL` are identical and that UDP port 9999 reaches Bob.
 
 - Confirm WireGuard is actually receiving a PSK:
 

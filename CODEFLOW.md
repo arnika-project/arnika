@@ -4,8 +4,9 @@
 
 This document describes the step-by-step code flow of the Arnika key exchange protocol, including a flow diagram and references to the relevant code sections.
 
-The exchange runs over **UDP** between `LISTEN_ADDRESS` and the peer's `SERVER_ADDRESS`
-(`transport/server.go`). Every packet is signed and encrypted with keys derived from the shared secret
+The exchange runs over **UDP** from the PRIMARY to the BACKUP's `LISTEN_ADDRESS`, which the PRIMARY
+knows as its `SERVER_ADDRESS` (`transport/server.go`). The BACKUP answers to the source address of
+each authenticated packet, so only the BACKUP needs to be reachable. Every packet is signed and encrypted with keys derived from the shared secret
 `ARNIKA_PSK`, which therefore must be identical on both peers — see
 [`SECURITY.md`](SECURITY.md#inter-peer-channel-authentication-arnika_psk).
 
@@ -20,10 +21,9 @@ sequenceDiagram
     participant B as Arnika BACKUP
     participant KB as KMS (BACKUP site)
 
-    Note over P,B: 1. Role calculation — both peers compute IsPrimary for this INTERVAL<br/>HMAC-SHA256(ARNIKA_PSK, intervalNumber) XOR ARNIKA_ID, lowest bit
+    Note over P,B: 1. Fixed roles from the configuration<br/>SERVER_ADDRESS set: PRIMARY; LISTEN_ADDRESS set: BACKUP
     P->>KA: 2. GetNewKey
     KA-->>P: 3. key_id + key
-    Note over P: the PSK is built here, before the send, and held uninstalled<br/>a failure on this side takes the 5a decision at once — buildPSK, step 11
     P->>B: 4. DATA(key_id), signed + AES-256-GCM encrypted
     B->>B: 5. HMAC → timestamp → type → copy check → rate limit → decrypt → key_id checks
     Note over P,B: 5a. every path on which the QKD key does not arrive is handed to MODE:<br/>invalidate where QKD is required, else leave the PSK to the PQC timer
@@ -32,8 +32,8 @@ sequenceDiagram
     alt key available
         KB-->>B: 8. key
         B->>B: 9. setPSK = buildPSK + writePSK<br/>the new PSK is now live on the BACKUP
-        B-->>P: 10. ACK(key_id), signed + encrypted — means "installed"
-        P->>P: 11. accept only an ACK that verifies and names this key_id, then writePSK
+        B-->>P: 10. ACK(key_id, PQC round), signed + encrypted, means "installed from this round"
+        P->>P: 11. accept only an ACK that verifies and names this key_id,<br/>then buildPSK from the same PQC round and writePSK
         Note over P,B: both ends switch within one packet of each other,<br/>not a whole KMS request apart
     else KMS error or unknown key_id
         KB-->>B: 8. error
@@ -43,7 +43,7 @@ sequenceDiagram
         Note over P,B: neither end moved to the new key
     end
     opt ACK lost, PRIMARY resends
-        P->>B: 4. DATA(same key_id) after ARNIKA_PEER_TIMEOUT, then after twice that<br/>at most udpClientMaxAttempts = 3 sends per interval
+        P->>B: 4. DATA(same key_id) after ARNIKA_PEER_TIMEOUT, then after twice that<br/>then every 15s until the end of INTERVAL, which keeps a NAT mapping open
         B-->>P: 10. ACK to every sender of the current key_id once it is installed<br/>no second KMS request, only a new key_id is enqueued
     end
     Note over P,B: a BACKUP interval that ends with no key_id at all takes the 5a path too
@@ -53,12 +53,12 @@ sequenceDiagram
 
 ## Step-by-Step Code Flow
 
-### 1. **Role Calculation**
+### 1. **Fixed Roles**
 
-- **Where:** `config/config.go` (`IsPrimary()` method)
-- **What:** Both nodes deterministically calculate their role (PRIMARY or BACKUP) for the current interval as `HMAC-SHA256(ARNIKA_PSK, intervalNumber)` XOR `ARNIKA_ID`, taking the lowest bit.
-- **Why:** Ensures only one node acts as PRIMARY per interval, preventing race conditions.
-- **Requires:** the same `ARNIKA_PSK` and the same `INTERVAL` on both peers, clocks in sync to well under a second, because `intervalNumber` and the interval boundaries come from the wall clock (`intervalAt`) so the two peers cannot drift apart, and `ARNIKA_ID` values of **different parity** — only the lowest bit of the ID enters the calculation, so two even or two odd IDs give both nodes the same role in every interval.
+- **Where:** `config/config.go` (`Parse`, `IsPrimary()`), `main.go` (`runPrimary`, `runBackupWatchdog`)
+- **What:** The role follows from the configuration: the node with `SERVER_ADDRESS` is the PRIMARY, the node with `LISTEN_ADDRESS` the BACKUP, and setting both or neither is a startup error. The PRIMARY runs no listener; the BACKUP runs no client.
+- **Why:** Only one node can start an exchange, so there is nothing to elect and no race between two PRIMARYs. The PRIMARY talks only to the address it is given and the BACKUP only answers to the source of an authenticated packet, so the PRIMARY can sit behind NAT and opens no port.
+- **Requires:** the same `ARNIKA_PSK` and the same `INTERVAL` on both peers, and clocks in sync to well under a second: the PRIMARY rotates and the BACKUP expects a key ID on interval boundaries taken from the wall clock (`intervalAt`), and the PQC fallback below installs on a wall-clock instant too.
 
 ### 2. **PRIMARY Requests Key from KMS**
 
@@ -87,7 +87,7 @@ sequenceDiagram
 ### 5a. **A Failing Key Source Reaches `MODE`**
 
 - **Where:** `main.go` (`shouldSetPSKOnQKDFailure`, `setPSK`)
-- **What:** Every path on which the QKD key does not arrive is handed to `setPSK` with a nil QKD key so `MODE` decides: invalidate the tunnel where QKD is mandatory, carry on from the PQC key where it is optional. That covers the PRIMARY's KMS request failing, an empty `key_id`, a PRIMARY that gets no ACK for its `key_id` (step 11), a failing lookup by `key_id`, and a **BACKUP interval that ends without a `key_id` from the peer** - checked once at the end of the interval, which is why the `peerSentKeyID` flag is taken with an atomic `Swap(false)`: reading and consuming in one step is what keeps a single signal from being counted twice.
+- **What:** Every path on which the QKD key does not arrive is handed to `setPSK` with a nil QKD key so `MODE` decides: invalidate the tunnel where QKD is mandatory, carry on from the PQC key where it is optional. That covers the PRIMARY's KMS request failing, an empty `key_id`, a PRIMARY that gets no ACK for its `key_id` (step 11), a failing lookup by `key_id`, and a **BACKUP interval that ends without a `key_id` from the peer** - checked once at the end of the interval, which is why the `gotKeyID` flag (`runBackupWatchdog`) is taken with an atomic `Swap(false)`: reading and consuming in one step is what keeps a single signal from being counted twice.
 - **Why:** These paths used to return to the interval ticker instead, which left the whole fallback and fail-closed logic in `setPSK` unreachable and the superseded PSK installed. In a QKD-optional mode the local tick deliberately does *not* set a new PSK: a separate backup timer owns the PSK there, on the instant both peers derive from the wall clock (`nextPQCSetPSKAt`), because setting one on a local tick as well put the two peers on different keys. That timer arms itself only after `2 x INTERVAL` without a QKD key and then renews every `PQC_ROUND_INTERVAL` until the KMS returns — two intervals and not one, because a single late or lost key usually reaches only one of the two peers, and switching on it would leave them on different PSKs. This relies on both peers' clocks being synchronized closely enough (see "PQC Key Agreement Round" below).
 
 ### 6. **BACKUP Enqueues the Key ID**
@@ -117,24 +117,25 @@ sequenceDiagram
 ### 10. **BACKUP Sends ACK Packet**
 
 - **Where:** `transport/server.go` (`transport.RunKeyIDWorker`, `KeyIDRequest.Ack`)
-- **What:** The worker sends the ACK **only after** the PSK from step 9 is configured. The ACK carries the key ID, encrypted like the DATA packet. A failed KMS request or PSK write sends no ACK. Only a new key ID is enqueued. Every sender of the current key ID, the PRIMARY's resend or a raced copy, is answered from that outcome: acknowledged once it is installed, ignored if it failed, never a second KMS request.
+- **What:** The worker sends the ACK **only after** the PSK from step 9 is configured. The ACK carries the key ID and the PQC round the BACKUP derived its PSK from (none when it used no PQC key), encrypted like the DATA packet. A failed KMS request or PSK write sends no ACK. Only a new key ID is enqueued. Every sender of the current key ID, the PRIMARY's resend or a raced copy, is answered from that outcome: acknowledged once it is installed, ignored if it failed, never a second KMS request.
 - **Why:** The PRIMARY installs its own PSK only on the ACK, so the two ends switch within one packet of each other instead of the BACKUP's whole KMS request apart. That matters for key writers without their own session handshake, and it keeps a failed lookup on the BACKUP from leaving the PRIMARY on a key the BACKUP does not have. The key ID in the ACK keeps a stale or replayed ACK from confirming a different key.
 
 ### 11. **PRIMARY Verifies ACK and Sets New Key**
 
 - **Where:** `transport/server.go` (`transport.SendKeyID`), `main.go` (`setPSK`)
-- **What:** PRIMARY builds its PSK before sending the DATA packet (`buildPSK`), so a failure on its own side, such as a missing PQC key, invalidates at once as in step 5a. It accepts only an ACK that verifies and names its key ID, and only then writes that PSK (`writePSK`). It skips the interval when the KMS answers with less than `ARNIKA_PEER_TIMEOUT` left, and `SendKeyID` sends nothing once the end of the interval has passed, so the peer never installs a key this side has given up on. It resends the DATA packet after `ARNIKA_PEER_TIMEOUT`, then after twice that, and after the last of `udpClientMaxAttempts` sends waits until the end of the current `INTERVAL`. Without an ACK by then it takes the failure path of step 5a.
-- **Why:** A lost DATA packet is resent quickly, while a BACKUP still waiting for its KMS gets the rest of the interval, without the DATA packet count outgrowing the rate-limit budget.
+- **What:** PRIMARY accepts only an ACK that verifies and names its key ID, and only then builds its PSK (`buildPSK`) from the QKD key and the PQC round the ACK names, and writes it (`writePSK`). It derives from the BACKUP's round rather than its own latest one, so a PQC round published between the two derivations cannot leave the two ends on different PSKs; the PRIMARY holds that round because, as the initiator, it publishes every round before the BACKUP does, and it keeps the previous round next to the latest. Before it sends, it builds a probe PSK from its own latest round and discards it: a failure on its own side, such as a missing PQC key, takes the 5a decision then and sends nothing, so the BACKUP never installs a key the PRIMARY cannot match. It skips the interval when the KMS answers with less than `ARNIKA_PEER_TIMEOUT` left, and `SendKeyID` sends nothing once the end of the interval has passed, so the peer never installs a key this side has given up on. It resends the DATA packet after `ARNIKA_PEER_TIMEOUT`, then after twice that, and after the last of `udpClientMaxAttempts` quick sends every 15s (`natKeepalive`) until the end of the current `INTERVAL`. Without an ACK by then it takes the failure path of step 5a. It sends from an unconnected socket, so a spoofed ICMP error cannot fail a send or end the wait.
+- **Why:** A lost DATA packet is resent quickly, while a BACKUP still waiting for its KMS gets the rest of the interval. The 15s resends keep a NAT mapping in front of the PRIMARY open for the ACK, and `keyIDSendsPerInterval` counts them into the rate-limit budget.
 
 ---
 
 ## Security Mechanisms in Code
 
-- **HMAC-SHA256:** Used for all packet signatures (`Sign`, `Verify`), keyed by `ARNIKA_PSK` with domain separation (`deriveHMACKey`). The domain is the sender's direction: `auth.DirectionFor` gives the even-`ARNIKA_ID` peer `DirEven` to sign with and `DirOdd` to verify against, and the odd peer the reverse. The two directions are therefore keyed differently, so a peer cannot be made to accept its own packet reflected back at it, and swapping the two surfaces as an authentication failure rather than as silent acceptance.
+- **HMAC-SHA256:** Used for all packet signatures (`Sign`, `Verify`), keyed by `ARNIKA_PSK` with domain separation (`deriveHMACKey`). The domain is the sender's role: `auth.DirectionFor` gives the PRIMARY `DirPrimary` to sign with and `DirBackup` to verify against, and the BACKUP the reverse. The two directions are therefore keyed differently, so a peer cannot be made to accept its own packet reflected back at it, and swapping the two surfaces as an authentication failure rather than as silent acceptance.
 - **AES-256-GCM:** Used for encrypting key material (`Encrypt`, `Decrypt`), keyed by `ARNIKA_PSK` (`deriveKey`).
-- **Rate Limiting:** Per-IP sliding window charged only after the HMAC and timestamp checks; copies of an already-processed datagram share one separate budget, `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `transport/budget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, assuming the maximum inbound role allocation for one peer rather than an even split. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers. Unauthenticated traffic costs one HMAC check and never reaches the limiter, nor does a peer's ACK that verifies at this listener, so a spoofed source IP cannot spend the peer's budget; authentication failures are logged at most once per 10s.
-- **Timestamp Validation:** Replay protection over a ±`MAX_CLOCK_SKEW` window, default ±1m.
-- **Key_id Replay:** the listener drops a packet stamped before it started, and a key_id that differs from the newest one but carries an older timestamp, since the PRIMARY sends a newer key_id on a later whole second. Every legitimate send re-encrypts under a fresh GCM nonce, so a repeated HMAC tag is a copy: it is answered but never processed twice. A sender of the current key_id, the real one or a raced copy, gets an ACK once it is installed; a copy of a PQC frame is dropped before the handler. Senders retry a failed write (`WriteConnected`), because a spoofed ICMP error left pending on the connected socket fails the next write.
+- **Rate Limiting:** Per-IP sliding window charged only after the HMAC and timestamp checks; copies of an already-processed datagram share one separate budget, `RATE_LIMIT` packets per `RATE_WINDOW`. The default is calculated, not static: `transport/budget.go` sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL`, whether PQC is enabled, and the transport's own frame and retry counts, since the BACKUP receives every key ID send and every PQC round. A static 30 per minute was below what a healthy pair exchanges at `INTERVAL=5s`, where the budget is 137, so the limiter rejected legitimate frames. An explicit `RATE_LIMIT` remains an operator override and a value below the calculated budget starts with a warning naming both numbers. Unauthenticated traffic costs one HMAC check and never reaches the limiter, nor does a peer's ACK that verifies at this listener, so a spoofed source IP cannot spend the peer's budget; authentication failures are logged at most once per 10s.
+- **Timestamp Validation:** Replay protection over a ±`MAX_CLOCK_SKEW` window, default ±1m, at least 1s; the check compares bounds, so no timestamp can overflow it. The BACKUP also drops DATA stamped before its current wall-clock interval, so a key ID captured before a restart is not taken again after it, even from a PRIMARY whose clock leads.
+- **One PSK writer at a time:** every build-then-write of the PSK on a node holds `pskMu`, and the PQC fallback re-checks whether it is still due under that lock, so a QKD install and a PQC-only install cannot interleave.
+- **Key_id Replay:** the listener drops a packet stamped before it started, and a key_id that differs from the newest one but carries an older timestamp, since the PRIMARY sends a newer key_id on a later whole second. Every legitimate send re-encrypts under a fresh GCM nonce, so a repeated HMAC tag is a copy: it is answered but never processed twice. A sender of the current key_id, the real one or a raced copy, gets an ACK once it is installed; a copy of a PQC frame is dropped before the handler.
 - **Startup validation:** `cfg.ValidateKeySources(qkdCompiled)` runs directly after `Parse`, before any key is due, and rejects a configuration the compiled-in readers cannot serve: `KMS_URL` missing while a QKD reader is active, `KMS_URL` set in a `qkd_none` build outside `PqcOnly`, or a `MODE`/`PQC_ENABLED` pair naming key material this binary cannot produce. `PqcOnly` disables QKD regardless of build tag. Readers are chosen by build tag ([`KEYCONTROL.md`](KEYCONTROL.md)), so without this a mismatch would surface as an invalidated tunnel every single interval instead of one error at startup.
 - **Zeroization:** All sensitive key material is handled inside `runtime/secret.Do` blocks to minimize memory exposure. This requires `GOEXPERIMENT=runtimesecret` at build time. `secret.Do` erases registers, stack and unreachable heap allocations **only on `linux/amd64` and `linux/arm64`**; on every other platform it just calls its function. `main()` probes this at startup (`secret.Enabled()` from inside a `Do` block, since it reports the nesting depth) and logs a warning when the erasure is inert, so a build for an unsupported `GOARCH` cannot silently look hardened. The WireGuard PSK additionally never becomes a Go string on the netlink path: the key writer port takes `[]byte` precisely so that the buffer stays clearable, for the same reason `ARNIKA_PSK` is held as `[]byte` on `config.Config`.
 - **Process hardening:** `hardening.Process()` (`hardening/hardening_linux.go`) runs before the configuration is read, so `ARNIKA_PSK` never exists in an exposed process. It sets `PR_SET_DUMPABLE=0` (no core dump; `/proc/<pid>/{mem,environ,maps}` become root-owned and `ptrace` attach needs `CAP_SYS_PTRACE`), `RLIMIT_CORE=0` (a piped `kernel.core_pattern` ignores the dumpable flag), and `mlockall(MCL_CURRENT|MCL_FUTURE)` to keep key material out of swap. Each step is best effort and failures are logged, not fatal: a container without `CAP_IPC_LOCK` must still rekey its tunnel. `mlockall` needs `CAP_IPC_LOCK` or `LimitMEMLOCK=infinity`, since the limit is charged against locked address space and Go reserves ~1.2 GB of arena; a refused lock is safe because `MCL_FUTURE` only takes effect once `mlockall` succeeds.
@@ -150,7 +151,7 @@ independent of the QKD flow above: `setPSK()` simply consumes whichever key is
 current.
 
 In a binary built with `qkd_none` this exchange is the *only* key source: there
-is no `key_id` to send and no PRIMARY/BACKUP alternation; a `key_id` that arrives anyway, from a peer built with a QKD reader or running a different `MODE`, is drained and logged as a warning rather than left to fill the shared queue. `main()` sets the
+is no `key_id` to send; a `key_id` that arrives anyway, from a peer built with a QKD reader or running a different `MODE`, is drained and logged as a warning rather than left to fill the shared queue. `main()` sets the
 PSK once per round, at the midpoint of the window in which `Run` never
 publishes, which is `nextPQCSetPSKAt`. Both peers derive that instant from the
 wall clock alone, with no message between them to confirm it, so unlike the
@@ -194,14 +195,13 @@ Following properties are worth stating explicitly:
   corrupted message and a silently divergent PSK. Each tag is bound to its
   sender's role, so neither direction can be satisfied by echoing back the tag
   it just received.
-- **The role is decided once per round** from the round index. It is the same
-  `IsPrimary` derivation used for the interval, and both peers compute it from
-  the same PSK, so exactly one of them initiates and the other only answers.
+- **The PRIMARY initiates every round** and the BACKUP only answers, the same
+  fixed roles as for the key ID, so exactly one of them initiates.
 - **The register keeps the highest round, not the last publish.** At startup the
   round for the current index and the round for the next boundary are both due,
-  and one peer initiates each, so two publishes land on both peers in opposite
-  orders. Keeping the last one left them on different keys and two different
-  PSKs; keeping the highest round is order-independent.
+  and the two publishes need not land in the same order on both peers. Keeping
+  the last one could leave them on different keys and two different PSKs;
+  keeping the highest round is order-independent.
 - **Unless the published key is stale, in which case a confirmed lower round
   becomes the new baseline.** Round numbers come from wall time, so a backward
   clock step across a boundary leaves every newly confirmed round below the
@@ -249,7 +249,7 @@ See [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for the full module document.
   See `auth/auth.go` (`deriveKey`, `deriveHMACKey`)
 - **Key Derivation (hybrid QKD+PQC PSK):**
   See `kdf/kdf.go` (`DeriveKey`, HKDF-SHA3-256)
-- **Configuration and role election:**
+- **Configuration and roles:**
   See `config/config.go` (`Parse`, `IsPrimary`) and [`README.md`](README.md#configuration)
 - **Key reader / key writer adapters:**
   See [`KEYCONTROL.md`](KEYCONTROL.md)

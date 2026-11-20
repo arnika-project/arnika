@@ -48,21 +48,25 @@ func startTestServerQueue(t *testing.T, handle PQCHandler, queueDepth int) *test
 
 func startTestServerLimit(t *testing.T, handle PQCHandler, queueDepth, rateLimit int) *testPeer {
 	t.Helper()
+	return startTestServerWith(t, queueDepth, func(c *ServerConfig) { c.PQC, c.RateLimit = handle, rateLimit })
+}
+
+func startTestServerWith(t *testing.T, queueDepth int, set func(*ServerConfig)) *testPeer {
+	t.Helper()
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
-	peerOut, peerIn := auth.DirectionFor(9999)
+	peerOut, peerIn := auth.DirectionFor(false)
 	srvOut, srvIn := peerIn, peerOut
 
 	addr := freeUDPPort(t)
 	result := make(chan KeyIDRequest, queueDepth)
 	done := make(chan bool)
-	go func() {
-		_ = Serve(ServerConfig{
-			Address: addr, PSK: psk, DirOut: srvOut, DirIn: srvIn,
-			KeyIDs: result, Done: done, PQC: handle,
-			RateLimit: rateLimit, RateWindow: time.Minute, MaxClockSkew: time.Minute,
-			Log: slog.New(slog.DiscardHandler),
-		})
-	}()
+	cfg := ServerConfig{
+		Address: addr, PSK: psk, DirOut: srvOut, DirIn: srvIn,
+		KeyIDs: result, Done: done, RateLimit: 10000, RateWindow: time.Minute, MaxClockSkew: time.Minute,
+		Log: slog.New(slog.DiscardHandler),
+	}
+	set(&cfg)
+	go func() { _ = Serve(cfg) }()
 
 	conn, err := net.Dial("udp", addr)
 	if err != nil {
@@ -277,7 +281,7 @@ func TestServerAcksOnlyWhenTheWorkerDoesAndNamesTheKeyID(t *testing.T) {
 		t.Fatal("the key id was acknowledged before the worker installed it")
 	}
 
-	req.Ack()
+	req.Ack("")
 	keyID, acked := p.ackWithin(2 * time.Second)
 	if !acked {
 		t.Fatal("no ACK after the worker acknowledged")
@@ -298,21 +302,21 @@ func TestRunKeyIDWorkerAnswersAResendFromTheFirstOutcome(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var installs, acks atomic.Int64
-			ack := func() { acks.Add(1) }
+			ack := func(string) { acks.Add(1) }
 			queue := make(chan KeyIDRequest, 3)
 			queue <- KeyIDRequest{KeyID: "resent", Ack: ack}
 			queue <- KeyIDRequest{KeyID: "resent", Ack: ack}
-			queue <- KeyIDRequest{KeyID: "end", Ack: func() {}}
+			queue <- KeyIDRequest{KeyID: "end", Ack: func(string) {}}
 			done := make(chan bool)
 			defer close(done)
 			finished := make(chan struct{})
-			go RunKeyIDWorker(done, queue, func(keyID string) bool {
+			go RunKeyIDWorker(done, queue, func(keyID string) (string, bool) {
 				if keyID == "end" {
 					close(finished)
-					return false
+					return "", false
 				}
 				installs.Add(1)
-				return tc.installed
+				return "", tc.installed
 			})
 
 			select {
@@ -333,7 +337,7 @@ func TestRunKeyIDWorkerAnswersAResendFromTheFirstOutcome(t *testing.T) {
 func startFakePeer(t *testing.T, ackFor func(attempt int, keyID string) (ack string, reply bool)) ClientConfig {
 	t.Helper()
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
-	clientOut, clientIn := auth.DirectionFor(9999)
+	clientOut, clientIn := auth.DirectionFor(false)
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -378,14 +382,14 @@ func startFakePeer(t *testing.T, ackFor func(attempt int, keyID string) (ack str
 
 func TestSendKeyIDResendsAfterALostDataPacket(t *testing.T) {
 	c := startFakePeer(t, func(attempt int, keyID string) (string, bool) { return keyID, attempt > 1 })
-	if err := SendKeyID(c); err != nil {
+	if _, err := SendKeyID(c); err != nil {
 		t.Fatalf("SendKeyID: %v", err)
 	}
 }
 
 func TestSendKeyIDIgnoresAnAckForAnotherKeyID(t *testing.T) {
 	c := startFakePeer(t, func(int, string) (string, bool) { return "another-key-id", true })
-	if err := SendKeyID(c); err == nil {
+	if _, err := SendKeyID(c); err == nil {
 		t.Fatal("SendKeyID took an ACK for another key id")
 	}
 }
@@ -397,7 +401,7 @@ func TestSendKeyIDWaitsUntilTheDeadlineWithinTheDataPacketBudget(t *testing.T) {
 		return "", false
 	})
 	start := time.Now()
-	if err := SendKeyID(c); err == nil {
+	if _, err := SendKeyID(c); err == nil {
 		t.Fatal("SendKeyID succeeded without an ACK")
 	}
 	if took := time.Since(start); took < 900*time.Millisecond {
@@ -413,13 +417,13 @@ func TestSendKeyIDWaitsForASlowInstallWithoutReinstalling(t *testing.T) {
 	done := make(chan bool)
 	t.Cleanup(func() { close(done) })
 	var installs atomic.Int64
-	go RunKeyIDWorker(done, p.result, func(string) bool {
+	go RunKeyIDWorker(done, p.result, func(string) (string, bool) {
 		installs.Add(1)
 		time.Sleep(700 * time.Millisecond)
-		return true
+		return "", true
 	})
 
-	err := SendKeyID(ClientConfig{
+	_, err := SendKeyID(ClientConfig{
 		Address: p.conn.RemoteAddr().String(), PSK: p.psk, DirOut: p.peerOut, DirIn: p.peerIn,
 		KeyID: "slow", Timeout: 100 * time.Millisecond, Deadline: time.Now().Add(3 * time.Second),
 		MaxClockSkew: time.Minute, Log: slog.New(slog.DiscardHandler),
@@ -432,19 +436,35 @@ func TestSendKeyIDWaitsForASlowInstallWithoutReinstalling(t *testing.T) {
 	}
 }
 
+func TestSendKeyIDReturnsThePQCRoundTheBackupInstalledFrom(t *testing.T) {
+	p := startTestServerQueue(t, nil, QKDQueueDepth)
+	done := make(chan bool)
+	t.Cleanup(func() { close(done) })
+	go RunKeyIDWorker(done, p.result, func(string) (string, bool) { return "359036774", true })
+
+	round, err := SendKeyID(ClientConfig{
+		Address: p.conn.RemoteAddr().String(), PSK: p.psk, DirOut: p.peerOut, DirIn: p.peerIn,
+		KeyID: "the-key-id", Timeout: 100 * time.Millisecond, Deadline: time.Now().Add(2 * time.Second),
+		MaxClockSkew: time.Minute, Log: slog.New(slog.DiscardHandler),
+	})
+	if err != nil || round != "359036774" {
+		t.Fatalf("SendKeyID = %q, %v; want the backup's round 359036774", round, err)
+	}
+}
+
 func TestRunQKDWorkerProcessesInReceiveOrder(t *testing.T) {
 	const n = 32
 	queue := make(chan KeyIDRequest, n)
 	for i := 0; i < n; i++ {
-		queue <- KeyIDRequest{KeyID: fmt.Sprintf("key-id-%02d", i), Ack: func() {}}
+		queue <- KeyIDRequest{KeyID: fmt.Sprintf("key-id-%02d", i), Ack: func(string) {}}
 	}
 	done := make(chan bool)
 	defer close(done)
 
 	seen := make(chan string, n)
-	go RunKeyIDWorker(done, queue, func(keyID string) bool {
+	go RunKeyIDWorker(done, queue, func(keyID string) (string, bool) {
 		seen <- keyID
-		return true
+		return "", true
 	})
 
 	for i := 0; i < n; i++ {
@@ -471,13 +491,13 @@ func TestRunQKDWorkerStopsOnShutdown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			queue := make(chan KeyIDRequest, 4)
 			for i := 0; i < tc.queued; i++ {
-				queue <- KeyIDRequest{KeyID: fmt.Sprintf("key-id-%d", i), Ack: func() {}}
+				queue <- KeyIDRequest{KeyID: fmt.Sprintf("key-id-%d", i), Ack: func(string) {}}
 			}
 			done := make(chan bool)
 			exited := make(chan struct{})
 			go func() {
 				defer close(exited)
-				RunKeyIDWorker(done, queue, func(string) bool { return false })
+				RunKeyIDWorker(done, queue, func(string) (string, bool) { return "", false })
 			}()
 
 			close(done)
@@ -561,15 +581,27 @@ func TestKeyIDSentBeforeTheServerStartedIsDropped(t *testing.T) {
 	p.wantKeyIDs("fresh")
 }
 
+func TestKeyIDStampedAfterTheStartButInAnEarlierIntervalIsDropped(t *testing.T) {
+	const interval = 2 * time.Second
+	started := time.Now().Unix()
+	p := startTestServerWith(t, 4, func(c *ServerConfig) { c.Interval = interval })
+	next := time.Unix(0, (time.Now().UnixNano()/int64(interval)+1)*int64(interval))
+	time.Sleep(time.Until(next) + 100*time.Millisecond)
+
+	p.write(p.conn, p.dataAt("captured-last-interval", started))
+	p.send(auth.PacketData, []byte("fresh"))
+	p.wantKeyIDs("fresh")
+}
+
 func TestRacedCopiesDoNotTakeTheSendersAck(t *testing.T) {
 	p := startTestServerQueue(t, nil, QKDQueueDepth)
 	done := make(chan bool)
 	defer close(done)
 	var installs atomic.Int64
-	go RunKeyIDWorker(done, p.result, func(string) bool {
+	go RunKeyIDWorker(done, p.result, func(string) (string, bool) {
 		installs.Add(1)
 		time.Sleep(500 * time.Millisecond)
-		return true
+		return "", true
 	})
 
 	racer, err := net.Dial("udp", p.conn.RemoteAddr().String())
@@ -638,78 +670,65 @@ func TestUnauthenticatedJunkDoesNotSpendThePeersBudget(t *testing.T) {
 	}
 }
 
-func refusedThenReplied(t *testing.T, conn *net.UDPConn, reply []byte) {
-	t.Helper()
-	if _, err := conn.Write([]byte{0}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
-	peer, err := net.ListenUDP("udp", conn.RemoteAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = peer.Close() })
-	if _, err := peer.WriteToUDP(reply, conn.LocalAddr().(*net.UDPAddr)); err != nil {
-		t.Fatalf("reply: %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
-}
-
-func TestAwaitAckSurvivesAnICMPError(t *testing.T) {
+func TestSendKeyIDReachesAPeerThatStartsListeningAfterTheFirstSend(t *testing.T) {
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
-	out, in := auth.DirectionFor(1)
-	raddr, err := net.ResolveUDPAddr("udp", freeUDPPort(t))
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	conn, err := net.DialUDP("udp", nil, raddr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+	out, in := auth.DirectionFor(true)
+	addr := freeUDPPort(t)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		laddr, _ := net.ResolveUDPAddr("udp", addr)
+		peer, err := net.ListenUDP("udp", laddr)
+		if err != nil {
+			t.Errorf("listen: %v", err)
+			return
+		}
+		t.Cleanup(func() { _ = peer.Close() })
+		buf := make([]byte, 4096)
+		n, from, err := peer.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		pkt, err := auth.UnmarshalPacket(psk, buf[:n], out)
+		if err != nil {
+			t.Errorf("verify: %v", err)
+			return
+		}
+		keyID, err := auth.Decrypt(psk, pkt.Payload)
+		if err != nil {
+			t.Errorf("decrypt: %v", err)
+			return
+		}
+		enc, err := auth.Encrypt(psk, keyID)
+		if err != nil {
+			t.Errorf("encrypt: %v", err)
+			return
+		}
+		_, _ = peer.WriteToUDP((&auth.Packet{Type: auth.PacketAck, Timestamp: time.Now().Unix(), Payload: enc}).Marshal(psk, in), from)
+	}()
 
-	enc, err := auth.Encrypt(psk, []byte("the-key-id"))
+	_, err := SendKeyID(ClientConfig{
+		Address: addr, PSK: psk, DirOut: out, DirIn: in, KeyID: "the-key-id",
+		Timeout: 100 * time.Millisecond, Deadline: time.Now().Add(time.Second),
+		MaxClockSkew: time.Minute, Log: slog.New(slog.DiscardHandler),
+	})
 	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-	refusedThenReplied(t, conn, (&auth.Packet{Type: auth.PacketAck, Timestamp: time.Now().Unix(), Payload: enc}).Marshal(psk, in))
-
-	c := ClientConfig{PSK: psk, DirOut: out, DirIn: in, KeyID: "the-key-id", MaxClockSkew: time.Minute}
-	if !awaitAck(conn, c, time.Now().Add(time.Second)) {
-		t.Fatal("awaitAck gave up on an ICMP error although the ACK had arrived")
+		t.Fatalf("SendKeyID = %v; a refused first send must not end the exchange", err)
 	}
 }
 
-func TestWriteConnectedSurvivesAPendingICMPError(t *testing.T) {
-	raddr, err := net.ResolveUDPAddr("udp", freeUDPPort(t))
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
+func TestSendKeyIDKeepsResendingWithinTheNATKeepaliveUntilTheDeadline(t *testing.T) {
+	defer func(k time.Duration) { natKeepalive = k }(natKeepalive)
+	natKeepalive = 200 * time.Millisecond
+	var attempts atomic.Int64
+	c := startFakePeer(t, func(int, string) (string, bool) {
+		attempts.Add(1)
+		return "", false
+	})
+	if _, err := SendKeyID(c); err == nil {
+		t.Fatal("SendKeyID succeeded without an ACK")
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := conn.Write([]byte{0}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
-	peer, err := net.ListenUDP("udp", raddr)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = peer.Close() })
-
-	if err := WriteConnected(conn, []byte("frame")); err != nil {
-		t.Fatalf("WriteConnected = %v; a spoofable ICMP error must not fail an authenticated send", err)
-	}
-	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("deadline: %v", err)
-	}
-	buf := make([]byte, 16)
-	n, err := peer.Read(buf)
-	if err != nil || string(buf[:n]) != "frame" {
-		t.Fatalf("peer read %q, %v; want the frame", buf[:n], err)
+	if got := attempts.Load(); got <= udpClientMaxAttempts || got > int64(keyIDSendsPerInterval(time.Second)) {
+		t.Fatalf("DATA packets = %d, want more than %d and at most %d", got, udpClientMaxAttempts, keyIDSendsPerInterval(time.Second))
 	}
 }
 
@@ -733,7 +752,7 @@ func TestSendKeyIDSendsNothingPastItsDeadline(t *testing.T) {
 	var attempts atomic.Int64
 	c := startFakePeer(t, func(_ int, keyID string) (string, bool) { attempts.Add(1); return keyID, true })
 	c.Deadline = time.Now().Add(-time.Millisecond)
-	if err := SendKeyID(c); err == nil {
+	if _, err := SendKeyID(c); err == nil {
 		t.Fatal("SendKeyID succeeded past its deadline")
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -746,9 +765,9 @@ func TestRacedCopiesFromManySourcesDoNotCrowdOutTheSender(t *testing.T) {
 	p := startTestServerQueue(t, nil, QKDQueueDepth)
 	done := make(chan bool)
 	defer close(done)
-	go RunKeyIDWorker(done, p.result, func(string) bool {
+	go RunKeyIDWorker(done, p.result, func(string) (string, bool) {
 		time.Sleep(500 * time.Millisecond)
-		return true
+		return "", true
 	})
 
 	raw := p.dataAt("the-key-id", time.Now().Unix())

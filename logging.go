@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/arnika-project/arnika/config"
 )
 
 var logLevel slog.LevelVar
@@ -29,17 +31,17 @@ func setUpLogging() (warning string) {
 	return warning
 }
 
-func setLogIdentity(arnikaID int) {
+func setLogIdentity(cfg *config.Config) {
 	var w io.Writer = os.Stderr
 	if isTerminal(os.Stderr) {
 		code := "\033[36m"
-		if arnikaID%2 == 0 {
+		if cfg.IsPrimary() {
 			code = "\033[35m"
 		}
 		w = &colorWriter{w: os.Stderr, code: []byte(code)}
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: &logLevel})).With(
-		slog.Int("arnika_id", arnikaID)))
+		slog.String("role", cfg.Role())))
 }
 
 func isTerminal(f *os.File) bool {

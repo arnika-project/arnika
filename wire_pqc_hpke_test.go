@@ -15,56 +15,48 @@ import (
 	"github.com/arnika-project/arnika/transport"
 )
 
-func TestPQCAgreementOverRealSockets(t *testing.T) {
-	psk := []byte("test-psk-at-least-32-bytes-long!!")
-	addrA, addrB := freeUDPPort(t), freeUDPPort(t)
-	const startupRoundOnlyInterval = 5 * time.Minute
-
-	cfgA := &config.Config{
-		ListenAddress: addrA, ServerAddress: addrB, ArnikaID: "2",
-		ArnikaPSK: psk, MaxClockSkew: time.Minute,
-		PQCRoundInterval: startupRoundOnlyInterval, PQCRoundTimeout: 3 * time.Second,
-		PQCMaxKeyAge: 2 * startupRoundOnlyInterval,
+func startPQCPeer(t *testing.T, cfg *config.Config, rateLimit int) *pqchpke.Repository {
+	t.Helper()
+	dirOut, dirIn := auth.DirectionFor(cfg.IsPrimary())
+	send, recv, err := pqcLink(cfg, dirOut, dirIn)
+	if err != nil {
+		t.Fatalf("pqcLink: %v", err)
 	}
-	cfgB := &config.Config{
-		ListenAddress: addrB, ServerAddress: addrA, ArnikaID: "3",
-		ArnikaPSK: psk, MaxClockSkew: time.Minute,
-		PQCRoundInterval: startupRoundOnlyInterval, PQCRoundTimeout: 3 * time.Second,
-		PQCMaxKeyAge: 2 * startupRoundOnlyInterval,
+	repo, err := pqchpke.NewRepository(slog.New(slog.DiscardHandler), send, recv,
+		func(uint32) bool { return cfg.IsPrimary() },
+		cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge)
+	if err != nil {
+		t.Fatalf("NewRepository: %v", err)
 	}
-
-	start := func(cfg *config.Config, initiator bool) *pqchpke.Repository {
-		t.Helper()
-		id := 2
-		if !initiator {
-			id = 3
-		}
-		dirOut, dirIn := auth.DirectionFor(id)
-		send, recv, err := pqcDial(cfg, dirOut, dirIn)
-		if err != nil {
-			t.Fatalf("pqcDial: %v", err)
-		}
-		repo, err := pqchpke.NewRepository(slog.New(slog.DiscardHandler), send, recv,
-			func(uint32) bool { return initiator },
-			cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge)
-		if err != nil {
-			t.Fatalf("NewRepository: %v", err)
-		}
-		result := make(chan transport.KeyIDRequest, 1)
+	if !cfg.IsPrimary() {
 		done := make(chan bool)
+		t.Cleanup(func() { close(done) })
 		go func() {
 			_ = transport.Serve(transport.ServerConfig{
-				Address: cfg.ListenAddress, PSK: psk, DirOut: dirOut, DirIn: dirIn,
-				KeyIDs: result, Done: done, PQC: repo.HandleFrame,
-				RateLimit: 10000, RateWindow: time.Minute, MaxClockSkew: time.Minute,
+				Address: cfg.ListenAddress, PSK: cfg.ArnikaPSK, DirOut: dirOut, DirIn: dirIn,
+				KeyIDs: make(chan transport.KeyIDRequest, transport.QKDQueueDepth), Done: done, PQC: repo.HandleFrame,
+				RateLimit: rateLimit, RateWindow: time.Minute, MaxClockSkew: cfg.MaxClockSkew,
 				Log: slog.New(slog.DiscardHandler),
 			})
 		}()
-		return repo
 	}
+	return repo
+}
 
-	repoA := start(cfgA, true)
-	repoB := start(cfgB, false)
+func TestPQCAgreementOverRealSockets(t *testing.T) {
+	psk := []byte("test-psk-at-least-32-bytes-long!!")
+	addrB := freeUDPPort(t)
+	const startupRoundOnlyInterval = 5 * time.Minute
+	newCfg := func(listen, server string) *config.Config {
+		return &config.Config{
+			ListenAddress: listen, ServerAddress: server,
+			ArnikaPSK: psk, MaxClockSkew: time.Minute,
+			PQCRoundInterval: startupRoundOnlyInterval, PQCRoundTimeout: 3 * time.Second,
+			PQCMaxKeyAge: 2 * startupRoundOnlyInterval,
+		}
+	}
+	repoA := startPQCPeer(t, newCfg("", addrB), 10000)
+	repoB := startPQCPeer(t, newCfg(addrB, ""), 10000)
 	time.Sleep(200 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -92,12 +84,12 @@ func TestPQCAgreementOverRealSockets(t *testing.T) {
 
 func TestPQCRequiredModeKeyNeverGoesStaleAtIndependentCadencesAndTheCalculatedRateLimit(t *testing.T) {
 	psk := []byte("test-psk-at-least-32-bytes-long!!")
-	addrA, addrB := freeUDPPort(t), freeUDPPort(t)
+	addrB := freeUDPPort(t)
 	const roundInterval = time.Second
 
-	newCfg := func(listen, peer, id string) *config.Config {
+	newCfg := func(listen, server string) *config.Config {
 		return &config.Config{
-			ListenAddress: listen, ServerAddress: peer, ArnikaID: id,
+			ListenAddress: listen, ServerAddress: server,
 			ArnikaPSK: psk, MaxClockSkew: time.Minute,
 			Interval:         5 * time.Second,
 			PQCEnabled:       true,
@@ -108,38 +100,9 @@ func TestPQCRequiredModeKeyNeverGoesStaleAtIndependentCadencesAndTheCalculatedRa
 			Mode:             "AtLeastPqcRequired",
 		}
 	}
-	cfgA := newCfg(addrA, addrB, "2")
-	cfgB := newCfg(addrB, addrA, "3")
-
-	limit := transport.RateBudget(cfgA)
-	start := func(cfg *config.Config, id int) *pqchpke.Repository {
-		t.Helper()
-		dirOut, dirIn := auth.DirectionFor(id)
-		send, recv, err := pqcDial(cfg, dirOut, dirIn)
-		if err != nil {
-			t.Fatalf("pqcDial: %v", err)
-		}
-		repo, err := pqchpke.NewRepository(slog.New(slog.DiscardHandler), send, recv,
-			func(round uint32) bool { return cfg.IsPrimary(uint64(round)) },
-			cfg.PQCRoundInterval, cfg.PQCRoundTimeout, cfg.PQCMaxKeyAge)
-		if err != nil {
-			t.Fatalf("NewRepository: %v", err)
-		}
-		result := make(chan transport.KeyIDRequest, transport.QKDQueueDepth)
-		done := make(chan bool)
-		go func() {
-			_ = transport.Serve(transport.ServerConfig{
-				Address: cfg.ListenAddress, PSK: psk, DirOut: dirOut, DirIn: dirIn,
-				KeyIDs: result, Done: done, PQC: repo.HandleFrame,
-				RateLimit: limit, RateWindow: cfg.RateWindow, MaxClockSkew: cfg.MaxClockSkew,
-				Log: slog.New(slog.DiscardHandler),
-			})
-		}()
-		return repo
-	}
-
-	repoA := start(cfgA, 2)
-	repoB := start(cfgB, 3)
+	cfgB := newCfg(addrB, "")
+	repoA := startPQCPeer(t, newCfg("", addrB), transport.RateBudget(cfgB))
+	repoB := startPQCPeer(t, cfgB, transport.RateBudget(cfgB))
 	time.Sleep(200 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -190,7 +153,7 @@ func TestPQCRecvSurvivesAnICMPError(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	peerAddr := peer.LocalAddr().(*net.UDPAddr)
-	dirOut, dirIn := auth.DirectionFor(2)
+	dirOut, dirIn := auth.DirectionFor(true)
 	send, recv, err := pqcDial(&config.Config{ServerAddress: peerAddr.String(), ArnikaPSK: psk, MaxClockSkew: time.Minute}, dirOut, dirIn)
 	if err != nil {
 		t.Fatalf("pqcDial: %v", err)

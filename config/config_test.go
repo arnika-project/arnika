@@ -26,7 +26,6 @@ const testArnikaPSK = "0123456789abcdef0123456789abcdef0123456789ab"
 func TestParse_ArnikaPSKValidation(t *testing.T) {
 	setValidEnv := func(t *testing.T) {
 		t.Helper()
-		t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
 		t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
 		t.Setenv("KMS_URL", "https://example.com")
 		t.Setenv("WIREGUARD_INTERFACE", "wg0")
@@ -74,7 +73,8 @@ func TestRedactSecret(t *testing.T) {
 }
 
 func TestParse(t *testing.T) {
-	for _, mandatoryEnvVar := range []string{"LISTEN_ADDRESS", "SERVER_ADDRESS", "WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY", "ARNIKA_PSK"} {
+	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
+	for _, mandatoryEnvVar := range []string{"WIREGUARD_INTERFACE", "WIREGUARD_PEER_PUBLIC_KEY", "ARNIKA_PSK"} {
 		_, err := Parse()
 		if err == nil {
 			t.Errorf("Expected an error for missing %s", mandatoryEnvVar)
@@ -82,8 +82,6 @@ func TestParse(t *testing.T) {
 		t.Setenv(mandatoryEnvVar, fmt.Sprintf("value_of_%s", mandatoryEnvVar))
 	}
 
-	t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
-	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
 	t.Setenv("KMS_URL", "https://example.com")
 	t.Setenv("WIREGUARD_INTERFACE", "wg0")
 	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
@@ -91,9 +89,7 @@ func TestParse(t *testing.T) {
 	t.Setenv("ARNIKA_PSK", testArnikaPSK)
 
 	expectedConfig := &Config{
-		ListenAddress:          "127.0.0.1:8080",
 		ServerAddress:          "127.0.0.1:8081",
-		ArnikaID:               "8080",
 		ArnikaPSK:              []byte(testArnikaPSK),
 		Certificate:            "",
 		PrivateKey:             "",
@@ -232,25 +228,39 @@ func TestIsPQCOnly(t *testing.T) {
 	}
 }
 
-func TestIsPrimary(t *testing.T) {
-	psk := []byte("shared-secret-key")
-	nodeA := &Config{ArnikaID: "9999", ArnikaPSK: psk}
-	nodeB := &Config{ArnikaID: "9998", ArnikaPSK: psk}
-
-	for i := uint64(0); i < 100; i++ {
-		a := nodeA.IsPrimary(i)
-		b := nodeB.IsPrimary(i)
-		if a == b {
-			t.Fatalf("interval %d: both nodes got the same role (IsPrimary=%v)", i, a)
-		}
+func TestParseDerivesTheRoleFromTheOneAddressSet(t *testing.T) {
+	tests := []struct {
+		name, listen, server string
+		wantErr              bool
+		wantRole             string
+	}{
+		{"only the peer's address makes a primary", "", "10.0.0.2:9998", false, "primary"},
+		{"only a listen address makes a backup", "0.0.0.0:9998", "", false, "backup"},
+		{"both addresses are ambiguous", "0.0.0.0:9998", "10.0.0.2:9998", true, ""},
+		{"no address leaves no role", "", "", true, ""},
 	}
-
-	for i := uint64(0); i < 50; i++ {
-		first := nodeA.IsPrimary(i)
-		second := nodeA.IsPrimary(i)
-		if first != second {
-			t.Fatalf("interval %d: IsPrimary is not deterministic", i)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LISTEN_ADDRESS", tc.listen)
+			t.Setenv("SERVER_ADDRESS", tc.server)
+			t.Setenv("KMS_URL", "https://example.com")
+			t.Setenv("WIREGUARD_INTERFACE", "wg0")
+			t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+			t.Setenv("ARNIKA_PSK", testArnikaPSK)
+			cfg, err := Parse()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Parse accepted LISTEN_ADDRESS=%q SERVER_ADDRESS=%q", tc.listen, tc.server)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := cfg.Role(); got != tc.wantRole {
+				t.Fatalf("Role() = %q, want %q", got, tc.wantRole)
+			}
+		})
 	}
 }
 
@@ -292,7 +302,6 @@ func TestValidateKeySources(t *testing.T) {
 func TestParse_PQCKeyAge(t *testing.T) {
 	setValidEnv := func(t *testing.T, interval, roundInterval, maxKeyAge, roundTimeout string) {
 		t.Helper()
-		t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
 		t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
 		t.Setenv("KMS_URL", "https://example.com")
 		t.Setenv("WIREGUARD_INTERFACE", "wg0")
@@ -361,7 +370,6 @@ func TestParse_PQCKeyAge(t *testing.T) {
 func TestParse_RateLimit(t *testing.T) {
 	setValidEnv := func(t *testing.T) {
 		t.Helper()
-		t.Setenv("LISTEN_ADDRESS", "127.0.0.1:8080")
 		t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
 		t.Setenv("KMS_URL", "https://example.com")
 		t.Setenv("WIREGUARD_INTERFACE", "wg0")
@@ -414,4 +422,47 @@ func TestParse_RateLimit(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestParseRejectsSettingsThatSilentlyDisableAProtection(t *testing.T) {
+	tests := []struct{ name, key, value string }{
+		{"a zero rate window spins the limiter", "RATE_WINDOW", "0s"},
+		{"a negative rate window disables the limit", "RATE_WINDOW", "-1m"},
+		{"a negative clock skew rejects every packet", "MAX_CLOCK_SKEW", "-1s"},
+		{"a sub-second clock skew truncates to zero", "MAX_CLOCK_SKEW", "500ms"},
+		{"a zero KMS timeout never times out", "KMS_HTTP_TIMEOUT", "0s"},
+		{"negative KMS retries never ask the KMS", "KMS_BACKOFF_MAX_RETRIES", "-1"},
+		{"a certificate without its key drops mTLS", "CERTIFICATE", "/etc/arnika/client.crt"},
+		{"a CA without a client certificate drops mTLS", "CA_CERTIFICATE", "/etc/arnika/ca.crt"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
+			t.Setenv("KMS_URL", "https://example.com")
+			t.Setenv("WIREGUARD_INTERFACE", "wg0")
+			t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+			t.Setenv("ARNIKA_PSK", testArnikaPSK)
+			if _, err := Parse(); err != nil {
+				t.Fatalf("the base configuration is rejected: %v", err)
+			}
+			t.Setenv(tc.key, tc.value)
+			if _, err := Parse(); err == nil {
+				t.Fatalf("Parse accepted %s=%s", tc.key, tc.value)
+			}
+		})
+	}
+}
+
+func TestParseAcceptsAllThreeKMSCertificates(t *testing.T) {
+	t.Setenv("SERVER_ADDRESS", "127.0.0.1:8081")
+	t.Setenv("KMS_URL", "https://example.com")
+	t.Setenv("WIREGUARD_INTERFACE", "wg0")
+	t.Setenv("WIREGUARD_PEER_PUBLIC_KEY", "H9adDtDHXhVzSI4QMScbftvQM49wGjmBT1g6dgynsHc=")
+	t.Setenv("ARNIKA_PSK", testArnikaPSK)
+	t.Setenv("CERTIFICATE", "/etc/arnika/client.crt")
+	t.Setenv("PRIVATE_KEY", "/etc/arnika/client.key")
+	t.Setenv("CA_CERTIFICATE", "/etc/arnika/ca.crt")
+	if _, err := Parse(); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
 }

@@ -123,9 +123,10 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 
 * Hexagonal Architecture (Ports & Adapters) provides capability to develop own key-reader and key-writer adapters - see [`KEYCONTROL.md`](KEYCONTROL.md) for details.
 * In-band PQC key agreement (**pqc-hpke**) - Arnika negotiates the PQC key directly with its peer using HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)) with the MLKEM1024-P384 hybrid KEM, carried inside the existing authenticated UDP envelope. No external PQC provider, no PQC key on disk, no additional port, and no third-party dependency - the whole cryptographic path is the Go standard library. A fresh key pair every round gives forward secrecy, and a mandatory key-confirmation step catches ML-KEM implicit rejection before anything is published - see [`docs/pqc-hpke.md`](docs/pqc-hpke.md) for details.
+* Fixed roles from the configuration: the peer that knows the other's address (`SERVER_ADDRESS`) is the PRIMARY and starts every exchange, the other one (`LISTEN_ADDRESS`) is the BACKUP and only answers. The PRIMARY opens no port at all and may sit behind NAT
 * The PRIMARY installs a QKD key only after the peer confirms it installed the same key, so both ends switch within one packet of each other and a failed lookup on one side never leaves the other on a key it does not share
 * symmetric-PSK based (_quantum secure_) mutual authentication of Arnika peers - (HMAC-SHA256 + AES-256-GCM authenticated UDP protocol), with per-direction key separation so a reflected packet fails at its own sender
-* Arnika listening port is undetectable and unscannable, like wireguard
+* Arnika listening port (on the BACKUP) is undetectable and unscannable, like wireguard
 * Per-IP rate limiting of authenticated UDP packets; spoofed junk fails the HMAC check, and copies of an already-processed datagram share one separate budget, so neither can spend a peer's budget. A copy is answered but never processed twice, and a key_id older than the last one accepted, or than the process start, is dropped
 * Memory hardening — key material is explicitly zeroed after use (`runtime/secret`)
 * KMS request retry with exponential backoff for resilience
@@ -300,12 +301,11 @@ the individual backends.
 === Arnika Configuration ===
 Arnika Mode:              QkdAndPqcRequired
 Arnika Interval:          2m0s
-Arnika ID:                9999
+Arnika Role:              primary
 Arnika PSK:               (set, 44 bytes)
-Arnika Listen Address:    127.0.0.1:9999
-Arnika Peer Address:      127.0.0.1:9998
-Arnika Peer Timeout:   500ms
-KMS URL:                  http://localhost:8080/api/v1/keys/CONSA
+Arnika Peer Address:      127.0.0.1:9999
+Arnika Peer Timeout:      500ms
+KMS URL:                  http://localhost:8080/api/v1/keys/CONSB
 KMS HTTP Timeout:         10s
 KMS Backoff Max Retries:  5
 KMS Backoff Base Delay:   100ms
@@ -313,21 +313,29 @@ KMS Retry Interval:       1m0s
 Client Certificate:       (not configured)
 Private Key:              (not configured)
 CA Certificate:           (not configured)
-PQC key provider:        DISABLED
+PQC key agreement:        ENABLED (pqc-hpke)
+PQC round interval:       2m0s
+PQC round timeout:        30s
+PQC max key age:          4m0s (2.0 x round interval)
 WireGuard Interface:      qcicat0
 WireGuard Peer PublicKey: ****************=
-Rate Limit:               30
-Rate Window:              1m0s
 Max Clock Skew:           1m0s
 ============================
-time=2026-01-22T18:04:40.628+01:00 level=INFO msg="requesting a new QKD key" arnika_id=9999 role=primary kms=http://localhost:8080/api/v1/keys/CONSA
-time=2026-01-22T18:04:40.629+01:00 level=INFO msg="UDP server started" arnika_id=9999 address=127.0.0.1:9999
-time=2026-01-22T18:04:40.635+01:00 level=INFO msg="sending the key_id to the peer" arnika_id=9999 role=primary key_id=ffffffff-fe92-4fdc-bef3-c0cdc73ff774 peer=127.0.0.1:9998
-time=2026-01-22T18:04:40.636+01:00 level=INFO msg="PSK configured on WireGuard interface" arnika_id=9999 role=primary iface=qcicat0 peer=****************=
-time=2026-01-22T18:04:43.399+01:00 level=INFO msg="received a key_id from the peer" arnika_id=9999 role=backup key_id=ffffffff-bcec-4858-838e-623c79eabf61 peer=127.0.0.1:58905
-time=2026-01-22T18:04:43.399+01:00 level=INFO msg="requesting the QKD key for the peer's key_id" arnika_id=9999 role=backup key_id=ffffffff-bcec-4858-838e-623c79eabf61 kms=http://localhost:8080/api/v1/keys/CONSA
-time=2026-01-22T18:04:43.399+01:00 level=INFO msg="PSK configured on WireGuard interface" arnika_id=9999 role=backup iface=qcicat0 peer=****************=
-time=2026-01-22T18:04:55.399+01:00 level=INFO msg="received a key_id from the peer" arnika_id=9999 role=backup key_id=ffffffff-8a32-4540-9b78-7d4e1afebb5f peer=127.0.0.1:58927
+time=2026-11-20T15:11:12.464+01:00 level=INFO msg="requesting a new QKD key" role=primary kms=http://localhost:8080/api/v1/keys/CONSB
+time=2026-11-20T15:11:12.466+01:00 level=INFO msg="serving this interval" role=primary interval=359036774
+time=2026-11-20T15:11:12.573+01:00 level=INFO msg="round agreed a fresh PQC key" role=primary component=pqc-hpke round=359036774 as=initiator
+time=2026-11-20T15:11:13.001+01:00 level=INFO msg="HKDF derivation completed for the QKD+PQC key" role=primary
+time=2026-11-20T15:11:13.001+01:00 level=INFO msg="sending the key_id to the peer" role=primary key_id=ffffffff-97f0-4522-a54f-f56abbb4a579 peer=127.0.0.1:9999
+```
+
+The backup, started with `LISTEN_ADDRESS`, prints `Arnika Role: backup`, its listen address and
+the rate limit instead of the peer address, and logs the other half of each exchange:
+
+```shell
+time=2026-11-20T15:11:12.154+01:00 level=INFO msg="UDP server started" role=backup address=127.0.0.1:9999
+time=2026-11-20T15:11:12.573+01:00 level=INFO msg="round agreed a fresh PQC key" role=backup component=pqc-hpke round=359036774 as=responder
+time=2026-11-20T15:11:13.001+01:00 level=INFO msg="received a key_id from the peer" role=backup key_id=ffffffff-97f0-4522-a54f-f56abbb4a579 peer=127.0.0.1:60303
+time=2026-11-20T15:11:13.001+01:00 level=INFO msg="requesting the QKD key for the peer's key_id" role=backup key_id=ffffffff-97f0-4522-a54f-f56abbb4a579 kms=http://localhost:8080/api/v1/keys/CONSA
 ```
 
 > [!NOTE]
@@ -383,14 +391,12 @@ tools/kms
 
 The QKD KMS simulator is now accessible at `http://127.0.0.1:8080`.
 
-## Start Arnika #1
+## Start Arnika #1 (backup)
 
 ```bash
 http_proxy=http://127.0.0.1:8080 \
 no_proxy=127.0.0.1 \
 LISTEN_ADDRESS=127.0.0.1:9999 \
-SERVER_ADDRESS=127.0.0.1:9998 \
-ARNIKA_ID=9999 \
 ARNIKA_PSK="<same shared secret on both peers>" \
 INTERVAL=120s \
 KMS_URL="http://localhost:8080/api/v1/keys/CONSA" \
@@ -399,14 +405,12 @@ WIREGUARD_PEER_PUBLIC_KEY="****************=" \
 build/arnika
 ```
 
-## Start Arnika #2
+## Start Arnika #2 (primary)
 
 ```bash
 http_proxy=http://127.0.0.1:8080 \
 no_proxy=127.0.0.1 \
-LISTEN_ADDRESS=127.0.0.1:9998 \
 SERVER_ADDRESS=127.0.0.1:9999 \
-ARNIKA_ID=9998 \
 ARNIKA_PSK="<same shared secret on both peers>" \
 INTERVAL=120s \
 KMS_URL="http://localhost:8080/api/v1/keys/CONSB" \
@@ -421,19 +425,18 @@ Arnika must be configured via environment variables. Defaults below are the valu
 [`config/config.go`](config/config.go); variables marked ✅ have no default and Arnika refuses to
 start without them.
 
-## Peer identity and inter-peer channel
+## Peer roles and inter-peer channel
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `LISTEN_ADDRESS` | ✅ | — | `host:port` Arnika listens on for the peer channel (UDP), e.g. `127.0.0.1:9999` |
-| `SERVER_ADDRESS` | ✅ | — | `host:port` of the remote Arnika peer — its `LISTEN_ADDRESS` |
+| `SERVER_ADDRESS` | one of the two | none | Set **only on the PRIMARY**: `host:port` of the BACKUP, its `LISTEN_ADDRESS`. Setting it makes this node the PRIMARY, which fetches each QKD key (`enc_keys`), sends the key ID, initiates every PQC round and opens no port |
+| `LISTEN_ADDRESS` | one of the two | none | Set **only on the BACKUP**: `host:port` it listens on for the peer channel (UDP), e.g. `0.0.0.0:9999`. Setting it makes this node the BACKUP, which resolves each key ID (`dec_keys`), ACKs it and answers every PQC round. Setting both or neither is a startup error |
 | `ARNIKA_PSK` | ✅ | — | Shared secret authenticating and encrypting the peer channel, minimum 32 bytes. **Must be identical on both peers** — see the warning below |
-| `ARNIKA_ID` | ➖ | port from `LISTEN_ADDRESS` | Identifier (max 5 digits) used in logs and in PRIMARY/BACKUP election. The two peers' values **must differ in parity** — one odd, one even |
-| `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | Wait before the first resend of the key ID, doubled for each further resend. The PRIMARY waits for the peer's ACK, which confirms the peer installed the key, until the end of the current `INTERVAL` |
+| `ARNIKA_PEER_TIMEOUT` | ➖ | `500ms` | PRIMARY only. Wait before the first resend of the key ID, doubled for each further resend; after the third send the PRIMARY resends every 15s, which keeps a NAT mapping in front of it open. The PRIMARY waits for the peer's ACK, which confirms the peer installed the key, until the end of the current `INTERVAL` |
 | `INTERVAL` | ➖ | `10s` | Interval between key rotations, aligned to the wall clock (multiples of `INTERVAL` since the Unix epoch), so peer clocks must agree to well under a second. **Must be the same on both peers**; align with the WireGuard rekey interval (`120s`) |
-| `RATE_LIMIT` | ➖ | calculated | Max authenticated packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
-| `RATE_WINDOW` | ➖ | `1m` | Window for the per-IP rate limit |
-| `MAX_CLOCK_SKEW` | ➖ | `1m` | Accepted timestamp deviation (replay protection). Requires clocks in sync between peers |
+| `RATE_LIMIT` | ➖ | calculated | BACKUP only. Max authenticated packets per source IP per `RATE_WINDOW`. Unset, Arnika sizes it from `RATE_WINDOW`, `INTERVAL`, `PQC_ROUND_INTERVAL` and the protocol's own frame and retry counts (137 at `INTERVAL=5s` with PQC on and a one-minute window). Setting it is an operator override, and a value below the calculated budget starts with a warning naming both numbers |
+| `RATE_WINDOW` | ➖ | `1m` | Window for the per-IP rate limit. Must be positive |
+| `MAX_CLOCK_SKEW` | ➖ | `1m` | Accepted timestamp deviation (replay protection), at least `1s` because timestamps are whole seconds. Requires clocks in sync between peers |
 | `LOG_LEVEL` | ➖ | `info` | `debug`, `info`, `warn` or `error`. Read before the rest of the configuration, because process hardening logs first. `debug` includes one line per rejected datagram, which flood traffic can drive: raise it only while diagnosing |
 
 > [!WARNING]
@@ -443,13 +446,19 @@ start without them.
 > `LISTEN_ADDRESS`. Generate it with `openssl rand -base64 32`, distribute it out of band, and
 > set the same value on both peers. A chosen passphrase is not acceptable.
 
+> [!NOTE]
+> Only the BACKUP needs to be reachable: the PRIMARY starts every exchange and the BACKUP answers
+> to the source address of each authenticated packet, so the PRIMARY may sit behind NAT. Arnika
+> keeps its own NAT mapping open while it waits for an ACK; the WireGuard tunnel behind that NAT
+> still needs `PersistentKeepalive` on the PRIMARY's side.
+
 ## Key reader — QKD / KMS (ETSI GS QKD 014)
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `KMS_URL` | Conditional | — | Required when QKD is active. KMS endpoint for this peer's SAE, e.g. `https://kms.example:8443/api/v1/keys/CONSA`. Ignored in `MODE=PqcOnly`; in `qkd_none` builds it must be unset unless that mode is used |
-| `KMS_HTTP_TIMEOUT` | ➖ | `10s` | HTTP timeout for KMS requests |
-| `KMS_BACKOFF_MAX_RETRIES` | ➖ | `5` | Retry attempts per failed KMS request |
+| `KMS_HTTP_TIMEOUT` | ➖ | `10s` | HTTP timeout for one KMS request attempt. Must be positive. A request including all its retries is also capped at `INTERVAL` |
+| `KMS_BACKOFF_MAX_RETRIES` | ➖ | `5` | Retry attempts per failed KMS request. Must not be negative; `0` means a single attempt |
 | `KMS_BACKOFF_BASE_DELAY` | ➖ | `100ms` | First backoff delay; grows exponentially per retry |
 | `KMS_RETRY_INTERVAL` | ➖ | `INTERVAL / 2` | Wait before the PRIMARY asks the KMS again after a failed request, within the same `INTERVAL` |
 | `CERTIFICATE` | ➖* | _(none)_ | Client certificate presented to the **KMS** |
@@ -457,11 +466,11 @@ start without them.
 | `CA_CERTIFICATE` | ➖* | _(none)_ | CA bundle used to verify the **KMS** certificate |
 
 > [!NOTE]
-> \* These three are **all-or-nothing**: client-certificate authentication is enabled only when
-> all three are set. If any one of them is empty, all three are ignored, and the KMS connection
-> falls back to a plain HTTPS client that validates the server against the system root store
-> (TLS 1.2 minimum). When all three are set, `CA_CERTIFICATE` _replaces_ the system roots, so the
-> KMS certificate must be issued by that CA. Unreadable or invalid files abort startup.
+> \* These three are **all-or-nothing**: set all three for client-certificate authentication, or
+> none of them for a plain HTTPS client that validates the KMS against the system root store
+> (TLS 1.2 minimum). Setting only some of them is a startup error. When all three are set,
+> `CA_CERTIFICATE` _replaces_ the system roots, so the KMS certificate must be issued by that CA.
+> Unreadable files, or a `CA_CERTIFICATE` without a PEM certificate, abort startup.
 >
 > They apply to the KMS connection **only** — the inter-peer channel is not TLS and does not use
 > them; it is protected by `ARNIKA_PSK`.
