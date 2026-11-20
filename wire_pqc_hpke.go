@@ -44,7 +44,7 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 			Timestamp: time.Now().Unix(),
 			Payload:   encrypted,
 		}
-		if _, err := conn.Write(pkt.Marshal(psk, dirOut)); err != nil {
+		if err := transport.WriteConnected(conn, pkt.Marshal(psk, dirOut)); err != nil {
 			return fmt.Errorf("failed to send PQC frame: %w", err)
 		}
 		return nil

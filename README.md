@@ -126,7 +126,7 @@ QKD/PQC operation on **Layer 3** offers several notable advantages:
 * The PRIMARY installs a QKD key only after the peer confirms it installed the same key, so both ends switch within one packet of each other and a failed lookup on one side never leaves the other on a key it does not share
 * symmetric-PSK based (_quantum secure_) mutual authentication of Arnika peers - (HMAC-SHA256 + AES-256-GCM authenticated UDP protocol), with per-direction key separation so a reflected packet fails at its own sender
 * Arnika listening port is undetectable and unscannable, like wireguard
-* Per-IP rate limiting of authenticated UDP packets plus a replay cache; spoofed junk fails the HMAC check and cannot spend a peer's budget
+* Per-IP rate limiting of authenticated UDP packets; spoofed junk fails the HMAC check and cannot spend a peer's budget, and a replayed key_id older than the last one accepted, or than the process start, is dropped
 * Memory hardening — key material is explicitly zeroed after use (`runtime/secret`)
 * KMS request retry with exponential backoff for resilience
 

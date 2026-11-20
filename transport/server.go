@@ -78,7 +78,9 @@ func Serve(c ServerConfig) error {
 	limiter := newRateLimiter(c.RateLimit, c.RateWindow)
 	queueFullWarn := logThrottle{interval: qkdQueueWarnEvery}
 	authFailWarn := logThrottle{interval: authFailWarnEvery}
-	seen := map[[32]byte]int64{} // HMAC tag -> timestamp; only authenticated packets enter, so legitimate traffic bounds it
+	started := time.Now().Unix() // nothing captured before a restart is accepted after it
+	var lastKeyID string
+	var lastKeyTS int64 // newest authenticated DATA timestamp; the peer's clock, so a local clock step cannot lower it
 
 	go func() {
 		<-quit
@@ -122,24 +124,10 @@ func Serve(c ServerConfig) error {
 			continue
 		}
 
-		if !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) {
+		if !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) || pkt.Timestamp < started {
 			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "timestamp")
 			continue
 		}
-
-		// Every legitimate send re-encrypts under a fresh GCM nonce, so a repeated tag is always a replay.
-		tag := [32]byte(pkt.Signature)
-		if _, dup := seen[tag]; dup {
-			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "replay")
-			continue
-		}
-		cutoff := time.Now().Unix() - int64(c.MaxClockSkew.Seconds())
-		for t, ts := range seen {
-			if ts < cutoff { // WithinSkew rejects these already
-				delete(seen, t)
-			}
-		}
-		seen[tag] = pkt.Timestamp
 
 		// Charged after authentication: the source IP is forgeable, so junk must not spend the peer's budget.
 		if !limiter.Allow(remoteAddr.IP.String()) {
@@ -157,6 +145,18 @@ func Serve(c ServerConfig) error {
 			}
 
 			keyID := string(decrypted)
+			// A newer key_id is first sent on a later whole second than any send of the one before it (main.go waits for
+			// the next tick), so an older timestamp on a different key_id is a replay. A copy of the current key_id passes
+			// on purpose: the worker only re-ACKs it, to that copy's sender, so a raced copy cannot take the real sender's ACK.
+			if keyID != lastKeyID {
+				if pkt.Timestamp < lastKeyTS {
+					backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "stale key_id")
+					continue
+				}
+				lastKeyID = keyID
+			}
+			lastKeyTS = max(lastKeyTS, pkt.Timestamp)
+
 			select { // never block: a KMS outage in the worker would stall every PQC frame on this loop
 			case c.KeyIDs <- KeyIDRequest{KeyID: keyID, Ack: func() {
 				_ = send(auth.PacketAck, []byte(keyID), remoteAddr)
@@ -230,8 +230,7 @@ func SendKeyID(c ClientConfig) error {
 			Timestamp: time.Now().Unix(),
 			Payload:   encrypted,
 		}
-		_, err = conn.Write(dataPkt.Marshal(c.PSK, c.DirOut))
-		if err != nil {
+		if err := WriteConnected(conn, dataPkt.Marshal(c.PSK, c.DirOut)); err != nil {
 			return fmt.Errorf("failed to write DATA packet: %w", err)
 		}
 
@@ -249,6 +248,17 @@ func SendKeyID(c ClientConfig) error {
 		wait *= 2
 	}
 	return fmt.Errorf("no ACK by %s", c.Deadline.Format(time.TimeOnly))
+}
+
+// WriteConnected writes b to a connected UDP socket. A failed write consumes a pending ICMP error, which anyone can
+// spoof, so the write is retried; a real local error recurs and is returned. The authenticated reply decides the exchange.
+func WriteConnected(conn *net.UDPConn, b []byte) (err error) {
+	for range 3 {
+		if _, err = conn.Write(b); err == nil || errors.Is(err, net.ErrClosed) {
+			return err
+		}
+	}
+	return err
 }
 
 func awaitAck(conn *net.UDPConn, c ClientConfig, until time.Time) bool {
