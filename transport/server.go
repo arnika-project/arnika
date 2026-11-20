@@ -77,8 +77,8 @@ func Serve(c ServerConfig) error {
 
 	limiter := newRateLimiter(c.RateLimit, c.RateWindow)
 	queueFullWarn := logThrottle{interval: qkdQueueWarnEvery}
-	authFailWarn := logThrottle{interval: authFailWarnEvery} // unauthenticated junk must not flood the log
-	seen := map[[32]byte]int64{}                             // HMAC tag -> timestamp; only authenticated packets enter, so legitimate traffic bounds it
+	authFailWarn := logThrottle{interval: authFailWarnEvery}
+	seen := map[[32]byte]int64{} // HMAC tag -> timestamp; only authenticated packets enter, so legitimate traffic bounds it
 
 	go func() {
 		<-quit

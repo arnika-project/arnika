@@ -233,8 +233,9 @@ AES-256-GCM, using two keys derived from that secret with domain separation (`au
   A human-chosen passphrase does not carry the entropy the security claim assumes. Distribute it
   out of band and rotate it on both peers together.
 - **The startup banner redacts it**, printing `(set, N bytes)` rather than the value.
-- **Supporting controls on the same channel**: per-IP rate limiting (`RATE_LIMIT`, `RATE_WINDOW`,
-  default 30/min) and timestamp replay protection (`MAX_CLOCK_SKEW`, default `1m`). Lowering
+- **Supporting controls on the same channel**: per-IP rate limiting of authenticated packets
+  (`RATE_LIMIT`, `RATE_WINDOW`, calculated by default), timestamp replay protection
+  (`MAX_CLOCK_SKEW`, default `1m`) and a cache of recent HMAC tags that drops replayed packets. Lowering
   `MAX_CLOCK_SKEW` reduces the replay window but requires closer clock synchronisation between
   peers.
 

@@ -521,7 +521,7 @@ func TestReplayedPacketIsDropped(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 	}
-	p.send(auth.PacketData, []byte("captured")) // a legitimate resend re-encrypts, so it is not a replay
+	p.send(auth.PacketData, []byte("captured"))
 
 	for i := range 2 {
 		select {
@@ -555,10 +555,9 @@ func TestUnauthenticatedJunkDoesNotSpendThePeersBudget(t *testing.T) {
 	}
 }
 
-// refusedThenReplied leaves an ICMP port-unreachable error pending on conn and then queues reply from the address conn is connected to.
 func refusedThenReplied(t *testing.T, conn *net.UDPConn, reply []byte) {
 	t.Helper()
-	if _, err := conn.Write([]byte{0}); err != nil { // nothing listens yet, so this draws the ICMP error
+	if _, err := conn.Write([]byte{0}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)

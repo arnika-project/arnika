@@ -205,7 +205,7 @@ func TestPQCRecvSurvivesAnICMPError(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	_ = peer.Close()
-	if err := send([]byte("refused")); err != nil { // nothing listens now, so this draws the ICMP error
+	if err := send([]byte("refused")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
