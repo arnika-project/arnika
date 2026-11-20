@@ -712,3 +712,58 @@ func TestWriteConnectedSurvivesAPendingICMPError(t *testing.T) {
 		t.Fatalf("peer read %q, %v; want the frame", buf[:n], err)
 	}
 }
+
+func TestPeerAcksDoNotSpendThePeersBudget(t *testing.T) {
+	p := startTestServerLimit(t, nil, 1, 3)
+	for range 10 {
+		p.send(auth.PacketAck, []byte("key-0"))
+	}
+	p.send(auth.PacketData, []byte("key-1"))
+	p.wantKeyIDs("key-1")
+}
+
+func TestEmptyKeyIDIsDroppedWithoutStoppingTheListener(t *testing.T) {
+	p := startTestServerQueue(t, nil, 4)
+	p.send(auth.PacketData, nil)
+	p.send(auth.PacketData, []byte("the-key-id"))
+	p.wantKeyIDs("the-key-id")
+}
+
+func TestSendKeyIDSendsNothingPastItsDeadline(t *testing.T) {
+	var attempts atomic.Int64
+	c := startFakePeer(t, func(_ int, keyID string) (string, bool) { attempts.Add(1); return keyID, true })
+	c.Deadline = time.Now().Add(-time.Millisecond)
+	if err := SendKeyID(c); err == nil {
+		t.Fatal("SendKeyID succeeded past its deadline")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := attempts.Load(); got != 0 {
+		t.Fatalf("DATA packets = %d, want 0: the peer must not install a key_id the sender gave up on", got)
+	}
+}
+
+func TestRacedCopiesFromManySourcesDoNotCrowdOutTheSender(t *testing.T) {
+	p := startTestServerQueue(t, nil, QKDQueueDepth)
+	done := make(chan bool)
+	defer close(done)
+	go RunKeyIDWorker(done, p.result, func(string) bool {
+		time.Sleep(500 * time.Millisecond)
+		return true
+	})
+
+	raw := p.dataAt("the-key-id", time.Now().Unix())
+	for range 9 {
+		racer, err := net.Dial("udp", p.conn.RemoteAddr().String())
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = racer.Close() })
+		p.write(racer, raw)
+	}
+	time.Sleep(50 * time.Millisecond)
+	p.write(p.conn, raw)
+
+	if got, ok := p.ackWithin(2 * time.Second); !ok || got != "the-key-id" {
+		t.Fatalf("ACK = %q, %v; the real sender must get its ACK", got, ok)
+	}
+}

@@ -309,6 +309,12 @@ func main() {
 								if shouldSetPSKOnQKDFailure(cfg) {
 									setPSK(keyWriter, pqc, nil, cfg, primaryLog)
 								}
+							} else if time.Until(intervalEnd) < cfg.ArnikaPeerTimeout {
+								// too late for the peer to install and ACK: sending would leave only the peer on the new key
+								primaryLog.Error("the KMS answered too late in the interval, skipping it", "key_id", key.ID)
+								if shouldSetPSKOnQKDFailure(cfg) {
+									setPSK(keyWriter, pqc, nil, cfg, primaryLog)
+								}
 							} else {
 								psk := buildPSK(keyWriter, pqc, key.Key, cfg, primaryLog)
 								primaryLog.Info("sending the key_id to the peer", "key_id", key.ID, "peer", cfg.ServerAddress)
