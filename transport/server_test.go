@@ -715,7 +715,7 @@ func TestWriteConnectedSurvivesAPendingICMPError(t *testing.T) {
 
 func TestPeerAcksDoNotSpendThePeersBudget(t *testing.T) {
 	p := startTestServerLimit(t, nil, 1, 3)
-	for range 10 { // ACKs the peer minted for copies, forwarded from its IP: each verifies here with a fresh tag
+	for range 10 {
 		p.send(auth.PacketAck, []byte("key-0"))
 	}
 	p.send(auth.PacketData, []byte("key-1"))
@@ -747,12 +747,12 @@ func TestRacedCopiesFromManySourcesDoNotCrowdOutTheSender(t *testing.T) {
 	done := make(chan bool)
 	defer close(done)
 	go RunKeyIDWorker(done, p.result, func(string) bool {
-		time.Sleep(500 * time.Millisecond) // a slow KMS fetch: copies arrive while the install runs
+		time.Sleep(500 * time.Millisecond)
 		return true
 	})
 
 	raw := p.dataAt("the-key-id", time.Now().Unix())
-	for range 9 { // one racer wins "fresh", eight more filled the old cap of copies
+	for range 9 {
 		racer, err := net.Dial("udp", p.conn.RemoteAddr().String())
 		if err != nil {
 			t.Fatalf("dial: %v", err)
