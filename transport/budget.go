@@ -31,7 +31,7 @@ func RateBudget(cfg *config.Config) int {
 	return n
 }
 
-// EffectiveRateLimit honours an explicit RATE_LIMIT even below the budget, since tightening flood protection is the operator's call, and warns.
+// EffectiveRateLimit honours an explicit RATE_LIMIT even below the budget, since tightening the per-peer packet budget is the operator's call, and warns.
 func EffectiveRateLimit(cfg *config.Config) (limit, budget int, warning string) {
 	budget = RateBudget(cfg)
 	if cfg.RateLimit == 0 {

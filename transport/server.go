@@ -2,6 +2,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,6 +18,8 @@ import (
 const QKDQueueDepth = 8
 
 const qkdQueueWarnEvery = 10 * time.Second
+
+const authFailWarnEvery = 10 * time.Second
 
 // PQCHandler must not block: it runs on the UDP read loop that also carries the QKD key ids.
 type PQCHandler func(frame []byte, reply func(frame []byte) error) error
@@ -74,6 +77,8 @@ func Serve(c ServerConfig) error {
 
 	limiter := newRateLimiter(c.RateLimit, c.RateWindow)
 	queueFullWarn := logThrottle{interval: qkdQueueWarnEvery}
+	authFailWarn := logThrottle{interval: authFailWarnEvery}
+	seen := map[[32]byte]int64{} // HMAC tag -> timestamp; only authenticated packets enter, so legitimate traffic bounds it
 
 	go func() {
 		<-quit
@@ -109,21 +114,36 @@ func Serve(c ServerConfig) error {
 			}
 		}
 
-		clientIP := remoteAddr.IP.String()
-
-		if !limiter.Allow(clientIP) {
-			backupLog.Debug("rate limited", "peer", remoteAddr)
-			continue
-		}
-
 		pkt, err := auth.UnmarshalPacket(c.PSK, buf[:n], c.DirIn)
 		if err != nil {
-			backupLog.Warn("packet rejected", "peer", remoteAddr, "reason", "authentication")
+			if authFailWarn.allow() {
+				backupLog.Warn("packet rejected", "peer", remoteAddr, "reason", "authentication")
+			}
 			continue
 		}
 
 		if !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) {
 			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "timestamp")
+			continue
+		}
+
+		// Every legitimate send re-encrypts under a fresh GCM nonce, so a repeated tag is always a replay.
+		tag := [32]byte(pkt.Signature)
+		if _, dup := seen[tag]; dup {
+			backupLog.Debug("packet rejected", "peer", remoteAddr, "reason", "replay")
+			continue
+		}
+		cutoff := time.Now().Unix() - int64(c.MaxClockSkew.Seconds())
+		for t, ts := range seen {
+			if ts < cutoff { // WithinSkew rejects these already
+				delete(seen, t)
+			}
+		}
+		seen[tag] = pkt.Timestamp
+
+		// Charged after authentication: the source IP is forgeable, so junk must not spend the peer's budget.
+		if !limiter.Allow(remoteAddr.IP.String()) {
+			backupLog.Debug("rate limited", "peer", remoteAddr)
 			continue
 		}
 
@@ -239,7 +259,10 @@ func awaitAck(conn *net.UDPConn, c ClientConfig, until time.Time) bool {
 	for {
 		n, err := conn.Read(buf)
 		if err != nil {
-			return false
+			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, net.ErrClosed) {
+				return false
+			}
+			continue // an unauthenticated ICMP error (ECONNREFUSED) must not end the wait for the authenticated ACK
 		}
 		pkt, err := auth.UnmarshalPacket(c.PSK, buf[:n], c.DirIn)
 		if err != nil || pkt.Type != auth.PacketAck || !auth.WithinSkew(pkt.Timestamp, c.MaxClockSkew) {

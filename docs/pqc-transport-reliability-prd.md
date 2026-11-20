@@ -104,7 +104,6 @@ when wall time reaches the previous round again or when the process restarts.
 
 - Changing the HPKE ciphersuite, frame format, or key-confirmation algorithm.
 - Moving PQC traffic to a separate port or transport.
-- Removing pre-authentication flood protection.
 - Aligning every QKD rotation with a PQC publication boundary.
 - Solving the existing case where a publication lands between the two peers'
   reads of the current PQC key.
@@ -183,9 +182,11 @@ when wall time reaches the previous round again or when the process restarts.
    - the active QKD and PQC intervals.
 7. The effective limit MUST be printed in startup configuration output.
 8. The limiter MUST remain per source IP and bounded in memory.
-9. Invalid or unauthenticated traffic MUST remain subject to pre-authentication
-   flood protection. A higher protocol-aware budget MUST NOT create an
-   unlimited authenticated or unauthenticated path.
+9. The limiter MUST count only packets that pass HMAC and timestamp checks,
+   because the source IP is forgeable: unauthenticated traffic costs one HMAC
+   check, MUST NOT spend a peer's budget, and MUST NOT produce unthrottled
+   log output. A higher protocol-aware budget MUST NOT create an unlimited
+   authenticated path.
 10. Frame counts and retry counts used by the budget calculation MUST come from
     shared protocol constants or helpers so they cannot drift from transport
     behavior.

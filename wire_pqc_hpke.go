@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/arnika-project/arnika/auth"
@@ -56,7 +58,10 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 			}
 			n, err := conn.Read(buf)
 			if err != nil {
-				return nil, err
+				if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, net.ErrClosed) {
+					return nil, err
+				}
+				continue // an unauthenticated ICMP error (ECONNREFUSED) must not end the wait for the authenticated reply
 			}
 			pkt, err := auth.UnmarshalPacket(psk, buf[:n], dirIn)
 			if err != nil || pkt.Type != auth.PacketPQC {
