@@ -12,14 +12,13 @@ import (
 
 // newSKIPTestRepo builds a SKIPRepository for testing using the standard constructor.
 func newSKIPTestRepo(baseURL string, maxRetries int) *SKIPRepository {
-	auth := &KMSAuth{}
 	return NewSKIPRepository(
 		baseURL,
 		"test-system",
 		2*time.Second,
 		maxRetries,
 		time.Millisecond,
-		auth,
+		nil,
 	)
 }
 
@@ -84,8 +83,7 @@ func TestSKIPRepository_GetKeyByID_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	keyIDPtr := &validkeyIDHex
-	keyBytes, err := newSKIPTestRepo(srv.URL, 0).GetKeyByID(keyIDPtr)
+	keyBytes, err := newSKIPTestRepo(srv.URL, 0).GetKeyByID(validkeyIDHex)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,28 +142,19 @@ func TestSKIPRepository_MalformedOrShortKey(t *testing.T) {
 	})
 }
 
-// TestSKIPRepository_keyIDValidation checks that empty, nil, or invalid hex keyIDs are rejected early.
+// TestSKIPRepository_keyIDValidation checks that empty or invalid hex keyIDs are rejected early.
 func TestSKIPRepository_keyIDValidation(t *testing.T) {
 	repo := newSKIPTestRepo("http://localhost", 0)
 
-	t.Run("NilkeyID", func(t *testing.T) {
-		_, err := repo.GetKeyByID(nil)
-		if err == nil {
-			t.Fatal("expected error for nil keyID, got nil")
-		}
-	})
-
 	t.Run("EmptykeyID", func(t *testing.T) {
-		emptyID := ""
-		_, err := repo.GetKeyByID(&emptyID)
+		_, err := repo.GetKeyByID("")
 		if err == nil {
 			t.Fatal("expected error for empty keyID, got nil")
 		}
 	})
 
 	t.Run("InvalidHexkeyID", func(t *testing.T) {
-		invalidID := "not-hex-!!spec"
-		_, err := repo.GetKeyByID(&invalidID)
+		_, err := repo.GetKeyByID("not-hex-!!spec")
 		if err == nil {
 			t.Fatal("expected error for non-hex keyID, got nil")
 		}

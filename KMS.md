@@ -27,24 +27,24 @@ DEBUG=true ./build/kms
 ### Endpoint & Method Matrix (Table 2)
 
 | # | Method | URL | Access Method | Supported |
-|---|--------|-----|---------------|-----------|
+| --- | -------- | ----- | --------------- | ----------- |
 | 1 | Get status | `/api/v1/keys/{slave_SAE_ID}/status` | GET | **Yes** |
 | 2 | Get key | `/api/v1/keys/{slave_SAE_ID}/enc_keys` | POST (or GET) | **Yes** |
 | 3 | Get key with key IDs | `/api/v1/keys/{master_SAE_ID}/dec_keys` | POST (or GET) | **Yes** |
 
 ### Registered SAE Paths
 
-| SAE ID | enc_keys | dec_keys | status |
-|--------|----------|----------|--------|
-| CONSA | `/api/v1/keys/CONSA/enc_keys` | `/api/v1/keys/CONSA/dec_keys` | `/api/v1/keys/CONSA/status` |
-| CONSB | `/api/v1/keys/CONSB/enc_keys` | `/api/v1/keys/CONSB/dec_keys` | `/api/v1/keys/CONSB/status` |
+| SAE ID | enc_keys                      | dec_keys                      | status                      |
+| ------ | ----------------------------- | ----------------------------- | --------------------------- |
+| CONSA  | `/api/v1/keys/CONSA/enc_keys` | `/api/v1/keys/CONSA/dec_keys` | `/api/v1/keys/CONSA/status` |
+| CONSB  | `/api/v1/keys/CONSB/enc_keys` | `/api/v1/keys/CONSB/dec_keys` | `/api/v1/keys/CONSB/status` |
 
 ---
 
 ### Status Response (Section 6.1, Table 9)
 
 | Field | Type | Value | Compliant |
-|-------|------|-------|-----------|
+| ------- | ------ | ------- | ----------- |
 | `source_KME_ID` | string | SAE ID from path | Yes |
 | `target_KME_ID` | string | Paired SAE ID | Yes |
 | `master_SAE_ID` | string | SAE ID from path | Yes |
@@ -61,7 +61,7 @@ DEBUG=true ./build/kms
 ### Key Container Response (Section 6.3, Table 11)
 
 | Field | Type | Present | Compliant |
-|-------|------|---------|-----------|
+| ------- | ------ | --------- | ----------- |
 | `keys` | array | Yes (always 1 element) | Yes |
 | `key_ID` | string (UUID) | Yes | Yes |
 | `key` | string (base64) | Yes | Yes |
@@ -71,17 +71,17 @@ DEBUG=true ./build/kms
 
 ### Error Response (Section 6.5, Table 13)
 
-| Field | Type | Present | Compliant |
-|-------|------|---------|-----------|
-| `message` | string | Yes | Yes |
-| `details` | array | Omitted (optional) | Yes |
+| Field     | Type   | Present            | Compliant |
+| --------- | ------ | ------------------ | --------- |
+| `message` | string | Yes                | Yes       |
+| `details` | array  | Omitted (optional) | Yes       |
 
 Content-Type for errors is `application/json`.
 
 ### Key Request Parameters (Section 6.2, Table 10)
 
 | Parameter | Supported | Notes |
-|-----------|-----------|-------|
+| ----------- | ----------- | ------- |
 | `number` | Yes | Only `1` accepted; other values return 400 |
 | `size` | Yes | Only `256` accepted; other values return 400 |
 | `additional_slave_SAE_IDs` | No | `max_SAE_ID_count=0` advertised in status |
@@ -91,7 +91,7 @@ Content-Type for errors is `application/json`.
 ### HTTP Status Codes
 
 | Code | When |
-|------|------|
+| ------ | ------ |
 | 200 | Successful key operation or status query |
 | 400 | Bad request (invalid params, unsupported number/size, missing key_ID) |
 | 404 | Key not found (dec_keys with unknown key_ID) |
@@ -102,7 +102,7 @@ Content-Type for errors is `application/json`.
 ## Known Simulator Limitations
 
 | Feature | ETSI-014 Spec | Simulator Behavior |
-|---------|---------------|--------------------|
+| --------- | --------------- | -------------------- |
 | Multiple keys per request | Supported via `number` param | Only `number=1` supported |
 | Variable key sizes | Supported via `size` param | Only `size=256` supported |
 | Key multicast | Optional (`additional_slave_SAE_IDs`) | Not supported (`max_SAE_ID_count=0`) |
@@ -128,6 +128,7 @@ curl -sS http://127.0.0.1:8080/api/v1/keys/CONSA/status
 ```
 
 Response (`200`):
+
 ```json
 {
   "source_KME_ID": "CONSA",
@@ -152,6 +153,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/keys/CONSA/status \
 ```
 
 Response (`405`):
+
 ```json
 {"message":"Method not allowed"}
 ```
@@ -165,6 +167,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys \
 ```
 
 Response (`200`):
+
 ```json
 {
   "keys": [
@@ -208,6 +211,7 @@ curl -sS 'http://127.0.0.1:8080/api/v1/keys/CONSA/enc_keys?number=2&size=256'
 ```
 
 Response (`400`):
+
 ```json
 {"message":"unsupported number: 2"}
 ```
@@ -227,6 +231,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/keys/CONSA/dec_keys \
 ```
 
 Response (`200`):
+
 ```json
 {
   "keys": [
@@ -253,6 +258,7 @@ curl -sS "http://127.0.0.1:8080/api/v1/keys/CONSA/dec_keys?key_ID=00000000-0000-
 ```
 
 Response (`404`):
+
 ```json
 {"message":"key not found"}
 ```
@@ -261,9 +267,9 @@ Response (`404`):
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DEBUG` | `false` | Set to `true` to enable request/response debug logging |
+| Variable | Default | Description                                                      |
+| -------- | ------- | ---------------------------------------------------------------- |
+| `DEBUG`  | `false` | Set to `true` to enable request/response debug logging           |
 | `LISTEN` | `:8080` | Listen address in `host:port` format (e.g. `192.168.3.151:8080`) |
 
 When `DEBUG=true`, the simulator logs full request details (method, path, query, headers, body) and full response details (status, content type, body) under the `[DEBUG]` prefix.
@@ -291,7 +297,7 @@ kill %1
 ### Test Cases (ref: ETSI GS QKD 014 V1.1.1)
 
 | # | Method | Endpoint | Description | Spec | Expect |
-|---|--------|----------|-------------|------|--------|
+| --- | -------- | ---------- | ------------- | ------ | -------- |
 | 01 | POST | /status | Reject POST on status endpoint (GET only) | §5.2 | 405 |
 | 02 | GET | /status | Retrieve KMS status | §5.2, §6.1 | 200 |
 | 03 | POST | /enc\_keys | Request key with empty JSON body `{}`, defaults apply | §6.2 | 200 |

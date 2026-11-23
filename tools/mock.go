@@ -25,7 +25,7 @@ const DEBUG = "[DEBUG]"
 
 type KeyStore struct {
 	mu   sync.RWMutex
-	keys map[string]string // key_ID -> key
+	keys map[string]string
 }
 
 type KeyResponse struct {
@@ -75,6 +75,7 @@ var keyStore = &KeyStore{
 var randomizer = rand.New(rand.NewSource(time.Now().UnixNano()))
 var debugEnabled = isDebugEnabled()
 var listenAddr = getListenAddr()
+var frozenSAEs = getFrozenSAEs()
 
 const (
 	defaultKeyNumber          = 1
@@ -90,13 +91,14 @@ const (
 )
 
 func main() {
-	// Register handlers for both CONSA and CONSB
-	http.HandleFunc("/api/v1/keys/CONSA/enc_keys", handleEncKeys)
-	http.HandleFunc("/api/v1/keys/CONSA/dec_keys", handleDecKeys)
-	http.HandleFunc("/api/v1/keys/CONSA/status", handleStatus)
-	http.HandleFunc("/api/v1/keys/CONSB/enc_keys", handleEncKeys)
-	http.HandleFunc("/api/v1/keys/CONSB/dec_keys", handleDecKeys)
-	http.HandleFunc("/api/v1/keys/CONSB/status", handleStatus)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // lab runs interleave this log with the peers', seconds cannot order it
+
+	http.HandleFunc("/api/v1/keys/CONSA/enc_keys", freezable("CONSA", handleEncKeys))
+	http.HandleFunc("/api/v1/keys/CONSA/dec_keys", freezable("CONSA", handleDecKeys))
+	http.HandleFunc("/api/v1/keys/CONSA/status", freezable("CONSA", handleStatus))
+	http.HandleFunc("/api/v1/keys/CONSB/enc_keys", freezable("CONSB", handleEncKeys))
+	http.HandleFunc("/api/v1/keys/CONSB/dec_keys", freezable("CONSB", handleDecKeys))
+	http.HandleFunc("/api/v1/keys/CONSB/status", freezable("CONSB", handleStatus))
 	log.Printf("======== QKD KMS Simulator ========")
 	log.Printf("[CONF] listen address=%s (set LISTEN=host:port to override)", listenAddr)
 	log.Printf("[CONF] supported key size=%d", defaultKeySize)
@@ -109,6 +111,7 @@ func main() {
 	log.Printf("[CONF]  /api/v1/keys/CONSB/dec_keys")
 	log.Printf("[CONF]  /api/v1/keys/CONSB/status")
 	log.Printf("[CONF] debug logging enabled=%t (set DEBUG=true to enable)", debugEnabled)
+	log.Printf("[CONF] frozen SAE=%s (set FREEZE=CONSA|CONSB|both to never reply)", freezeSummary())
 	log.Printf("===================================")
 
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
@@ -116,7 +119,21 @@ func main() {
 	}
 }
 
-// handleEncKeys generates a new key and returns it
+func freezable(sae string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !frozenSAEs[sae] {
+			next(w, r)
+			return
+		}
+
+		rawBody, _ := readAndRestoreBody(r)
+		debugLogRequest(r, rawBody)
+		log.Printf("[FREEZE] [---] %s %s from %s", r.Method, r.URL.Path+getQueryParameters(r), r.RemoteAddr)
+
+		<-r.Context().Done()
+	}
+}
+
 func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 	rawBody, err := readAndRestoreBody(r)
 	if err != nil {
@@ -154,27 +171,22 @@ func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// create an RFC4122-compatible UUID whose first 4 bytes are 0xff
-	u := uuid.New()          // type uuid.UUID == [16]byte
-	for i := 0; i < 4; i++ { // set first 4 bytes -> first 8 hex chars "ffffffff"
+	u := uuid.New()
+	for i := 0; i < 4; i++ {
 		u[i] = 0xff
 	}
-	// ensure RFC4122 v4 version and variant bits are correct
-	u[6] = (u[6] & 0x0f) | 0x40 // set version = 4
-	u[8] = (u[8] & 0x3f) | 0x80 // set variant = RFC4122 (10xx)
+	u[6] = (u[6] & 0x0f) | 0x40
+	u[8] = (u[8] & 0x3f) | 0x80
 
-	keyID := u.String() // e.g. "ffffffff-xxxx-4xxx-8xxx-xxxxxxxxxxxx"
+	keyID := u.String()
 
-	// Generate key material as SHA256 hash of the UUID
 	hash := sha256.Sum256([]byte(keyID))
 	keyMaterial := base64.StdEncoding.EncodeToString(hash[:])
 
-	// Store the key
 	keyStore.mu.Lock()
 	keyStore.keys[keyID] = keyMaterial
 	keyStore.mu.Unlock()
 
-	// Return the key
 	response := KeyResponse{
 		Keys: []Key{
 			{
@@ -191,7 +203,6 @@ func handleEncKeys(w http.ResponseWriter, r *http.Request) {
 	log.Printf(LOG, "[INFO]", http.StatusOK, r.Method, r.URL.Path, r.RemoteAddr)
 }
 
-// handleDecKeys retrieves a previously generated key by ID
 func handleDecKeys(w http.ResponseWriter, r *http.Request) {
 	rawBody, err := readAndRestoreBody(r)
 	if err != nil {
@@ -215,7 +226,6 @@ func handleDecKeys(w http.ResponseWriter, r *http.Request) {
 
 	keyID := keyIDs[0]
 
-	// Retrieve the key
 	keyStore.mu.RLock()
 	keyMaterial, exists := keyStore.keys[keyID]
 	keyStore.mu.RUnlock()
@@ -226,7 +236,6 @@ func handleDecKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return the key
 	response := KeyResponse{
 		Keys: []Key{
 			{
@@ -392,7 +401,6 @@ func boundedDummyCount(masterSAEID, slaveSAEID, field string) int {
 	_ = statusRandomRangeExponent
 	v := localRandomizer.Intn(maxStatusKeyCount-minStatusKeyCount+1) + minStatusKeyCount
 
-	// Slight process-local variation while keeping strict bounds.
 	offset := randomizer.Intn(11) - 5
 	v += offset
 
@@ -451,6 +459,35 @@ func debugLogResponse(status int, contentType string, body []byte) {
 func isDebugEnabled() bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv("DEBUG")))
 	return value == "true"
+}
+
+func getFrozenSAEs() map[string]bool {
+	frozen := map[string]bool{}
+	for _, value := range strings.Split(os.Getenv("FREEZE"), ",") {
+		switch strings.ToUpper(strings.TrimSpace(value)) {
+		case "CONSA":
+			frozen["CONSA"] = true
+		case "CONSB":
+			frozen["CONSB"] = true
+		case "BOTH", "ALL":
+			frozen["CONSA"] = true
+			frozen["CONSB"] = true
+		}
+	}
+	return frozen
+}
+
+func freezeSummary() string {
+	switch {
+	case frozenSAEs["CONSA"] && frozenSAEs["CONSB"]:
+		return "CONSA,CONSB"
+	case frozenSAEs["CONSA"]:
+		return "CONSA"
+	case frozenSAEs["CONSB"]:
+		return "CONSB"
+	default:
+		return "none"
+	}
 }
 
 func getListenAddr() string {

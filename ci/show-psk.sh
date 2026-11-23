@@ -4,11 +4,10 @@ set -e
 echo "====== Arnika local Test - show PSK ======"
 
 wg_show_os_aware() {
-    local profile="$1"          # e.g. qcicat1
-    local field="${2-}"         # optional: "latest-handshakes" | "transfer" | "dump" | "preshared-keys"
+    local profile="$1"
+    local field="${2-}"
 
     if [[ $OSTYPE == darwin* ]]; then
-        # macOS: map profile -> real interface name from .name file
         local iface
         iface="$(sudo cat "/var/run/wireguard/${profile}.name")" || return 1
         if [[ -n "$field" ]]; then
@@ -21,7 +20,6 @@ wg_show_os_aware() {
             sudo wg show "$iface"
         fi
     else
-        # Linux/other: use profile name directly
         if [[ -n "$field" ]]; then
             sudo wg show "$profile" "$field"
         else
@@ -29,13 +27,6 @@ wg_show_os_aware() {
         fi
     fi
 }
-
-# Usage: wg show { <interface> | all | interfaces } [public-key | private-key | listen-port | fwmark | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | dump]
-
-# wg_show_os_aware qcicat1
-# echo
-# wg_show_os_aware qcicat2
-# echo
 
 wg_show_os_aware qcicat1 preshared-keys
 echo

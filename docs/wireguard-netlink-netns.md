@@ -9,18 +9,18 @@ This is the single document for the `wireguard-netlink-netns` module. For the ge
 ## At a Glance
 
 | | |
-|---|---|
+| --- | --- |
 | **Module name** | `wireguard-netlink-netns` |
 | **Kind** | Key writer (sink) |
 | **Build tag** | `wireguard_netlink_netns` |
-| **Adapter** | [`repositories/wireguard-netlink-netns.go`](../repositories/wireguard-netlink-netns.go) |
+| **Adapter** | [`repositories/wgnetlink/netns.go`](../repositories/wgnetlink/netns.go) |
 | **Tests** | _no unit tests_, only integration tests in `ci/namespaces` ran by the CI |
-| **Wiring** | [`wireguardnetlinknetns.go`](../wireguardnetlinknetns.go) |
+| **Wiring** | [`wire_wireguard_netlink_netns.go`](../wire_wireguard_netlink_netns.go) |
 | **Target** | A **local** WireGuard interface in a network namespace |
 | **Transport** | `wgctrl` over netlink inside the namespace |
 | **Dependencies** | `golang.zx2c4.com/wireguard/wgctrl`, `github.com/containernetworking/plugins/pkg/ns` |
 | **Privileges** | `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` — it reconfigures a network device inside a namespace |
-| **Platform** | Linux only
+| **Platform** | Linux only |
 
 ---
 
@@ -39,7 +39,7 @@ Same as [`wireguard-netlink`](wireguard-netlink.md), but the WireGuard interface
 ## Part 2 — Configuration Reference
 
 | Env var | Required | Description |
-|---|:---:|---|
+| --- | :---: | --- |
 | `WIREGUARD_INTERFACE` | yes | Name of the WireGuard interface inside the namespace |
 | `WIREGUARD_PEER_PUBLIC_KEY` | yes | Public key of the peer whose PSK is rotated |
 | `WIREGUARD_NETNS_PATH` | yes | Path to the network namespace (e.g., `/var/run/netns/myns`) |
@@ -53,6 +53,7 @@ GOEXPERIMENT=runtimesecret go build -tags wireguard_netlink_netns .
 ```
 
 Via the Makefile:
+
 ```bash
 make build BUILD_TAGS=wireguard_netlink_netns
 ```
