@@ -2,6 +2,7 @@
 package kms
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -53,10 +54,11 @@ type Repository struct {
 	baseURL          string
 	maxRetries       int
 	backoffBaseDelay time.Duration
+	bound            time.Duration // caps one request including its retries; zero leaves it uncapped
 	conn             *http.Client
 }
 
-func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, auth *Auth) *Repository {
+func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBaseDelay, bound time.Duration, auth *Auth) *Repository {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{ // never InsecureSkipVerify, see GHSA-rc6v-5rmx-w5mv
 			MinVersion: tls.VersionTLS12,
@@ -76,13 +78,17 @@ func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBas
 			os.Exit(1)
 		}
 		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			slog.Error("the KMS CA certificate holds no PEM certificate", "cacert", *auth.cacert)
+			os.Exit(1)
+		}
 		tr.TLSClientConfig.RootCAs = caCertPool
 	}
 	return &Repository{
 		baseURL:          url,
 		maxRetries:       maxRetries,
 		backoffBaseDelay: backoffBaseDelay,
+		bound:            bound,
 		conn: &http.Client{
 			Timeout:   timeout,
 			Transport: tr,
@@ -109,8 +115,18 @@ func (r *Repository) kmsRequest(path string) (id string, key []byte, err error) 
 	var res *http.Response
 	var lastStatus int
 
-	for attempt := 0; attempt <= r.maxRetries; attempt++ {
-		res, err = r.conn.Get(r.baseURL + path)
+	ctx := context.Background()
+	if r.bound > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.bound)
+		defer cancel()
+	}
+	for attempt := 0; attempt <= r.maxRetries && ctx.Err() == nil; attempt++ {
+		var req *http.Request
+		if req, err = http.NewRequestWithContext(ctx, http.MethodGet, r.baseURL+path, nil); err != nil {
+			return "", nil, err
+		}
+		res, err = r.conn.Do(req)
 		if err == nil && res.StatusCode == http.StatusOK {
 			break
 		}
@@ -127,8 +143,14 @@ func (r *Repository) kmsRequest(path string) (id string, key []byte, err error) 
 			} else {
 				slog.Warn("KMS request failed, retrying", "attempt", attempt+1, "retry_in", delay)
 			}
-			time.Sleep(delay)
+			select {
+			case <-ctx.Done():
+			case <-time.After(delay):
+			}
 		}
+	}
+	if res == nil && ctx.Err() != nil { // the cause may carry the request path, which names the key_ID
+		return "", nil, fmt.Errorf("%w: no answer within %s", ErrUnavailable, r.bound)
 	}
 	if err != nil {
 		return "", nil, err

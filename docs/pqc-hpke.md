@@ -63,7 +63,7 @@ initiator -> responder   tag_I         1 frame,  123 bytes
    of the reply.
 
 The exchange is the same shape `transport.SendKeyID` uses for the QKD key id: send a
-request, read the reply off the dialled socket, retry the whole message on
+request, read the reply off its own socket, retry the whole message on
 timeout. The initiator owns the schedule, the retries and the timeout; the
 responder has none of the three, because the initiator's first message is what
 starts its side of the round.
@@ -154,16 +154,16 @@ different one.
   one. The index is clock-derived, so looping while the boundary is still ahead
   names the same round again, and a round that finished in milliseconds would be
   re-run until the boundary passed. `TestPQCRunServesEachRoundOnce` pins this.
-- **A failed write costs a retry, not the round.** At startup the peer's
-  listener can be milliseconds behind, and the kernel reports the gap as ICMP
-  port-unreachable on the next send. The initiator retries a failed write three
-  times at 50 ms spacing. The responder does not: it answers the source address
-  of a datagram it just received, so that port is bound by definition, and a
-  sleep on its path would block the UDP read loop.
-- **The role is decided once per round** from the round index, using the same
-  derivation that elects PRIMARY/BACKUP for an interval. Both peers compute it
-  from the same PSK, so exactly one of them initiates; the other only answers.
-  Deriving it mid-round would flip initiator and responder in flight.
+- **A failed write costs a retry, not the round.** The initiator retries a
+  failed local write three times at 50 ms spacing. Its socket is unconnected, so
+  an ICMP port-unreachable from a listener that is still milliseconds behind at
+  startup never surfaces as a write error; those frames are simply lost and the
+  round times out. The responder does not retry: it answers the source address
+  of a datagram it just received, and a sleep on its path would block the UDP
+  read loop.
+- **The PRIMARY is always the initiator** and the BACKUP always the responder,
+  the same fixed roles that decide who sends the key ID, so exactly one of them
+  initiates and a role can never flip in flight.
 - Only the initiator of a round does anything on the schedule. A node that is
   not the initiator sleeps: it needs no timer, because the peer's first message
   drives it.
@@ -177,15 +177,13 @@ different one.
   `TestPQCRetriedPubKeyIsAnsweredFromTheStoredReply` pins this.
 
 > [!IMPORTANT]
-> **Scheduling does not align the two peers' reads.** Arnika's rekey instant is
-> independent of the round boundary, so if a publish lands between the two
-> peers' `setPSK` calls, one derives the PSK from round _N_ and the other from
-> _N−1_, and the tunnel drops until the next rekey. The probability is the read
-> gap divided by the interval — a few tens of milliseconds over
-> `PQC_ROUND_INTERVAL` — and it does not depend on where in the interval the
-> publish sits, so no schedule can remove it. Closing it needs the peers to
-> agree on _which_ round's key a given rekey uses. That is an open design
-> question, not a settled part of this module.
+> **A QKD rekey agrees on the round.** The BACKUP names the PQC round it derived
+> its PSK from in the ACK, and the PRIMARY derives from that same round
+> (`Repository.KeyForRound`, which holds the latest round and the one before
+> it). A publish that lands between the two derivations therefore cannot split
+> the two ends. The PQC-only installs (`nextPQCSetPSKAt`) still read each
+> side's latest round on their own, at the middle of the part of the round in
+> which nothing publishes, so they rely on synchronized clocks instead.
 
 ## How the Module Is Constructed
 
@@ -210,8 +208,8 @@ new type byte is observable on the wire.
 The responder answers on the **listening** socket, back to the source address,
 exactly as the QKD ACK does — a reply goes out only after the rate limit, the
 HMAC and the timestamp have passed, so eliciting one requires `ARNIKA_PSK` and
-this is not a reflection primitive. That reply lands on the initiator's dialled
-socket, which is what makes the exchange synchronous and removes the inbound
+this is not a reflection primitive. That reply lands on the initiator's own
+unconnected socket, also through a NAT in front of the PRIMARY, which is what makes the exchange synchronous and removes the inbound
 channel, the reassembly-by-round bookkeeping and the ack state machine the
 earlier asynchronous version needed. `HandleFrame` runs on the UDP read loop, so
 neither it nor `reply` may block: `TestPQCFloodDoesNotStallQKDPath` fails if
@@ -219,13 +217,13 @@ either ever does.
 
 ## Part 1 — Prepare the Host
 
-**There is no new port to open.** PQC frames use the port Arnika already binds
-for `LISTEN_ADDRESS`. Outbound frames go to `SERVER_ADDRESS` from a dialled
-socket with an ephemeral source port, which adds no listener.
+**There is no new port to open.** PQC frames use the port the BACKUP already
+binds for `LISTEN_ADDRESS`. The PRIMARY sends to its `SERVER_ADDRESS` from an
+unconnected socket with an ephemeral source port, which adds no listener.
 
 Requirements:
 
-- Both peers reachable on their existing Arnika ports, in both directions.
+- The BACKUP reachable on its Arnika port; the PRIMARY may sit behind NAT.
 - `ARNIKA_PSK` set, identical on both peers, at least 32 bytes:
 
   ```bash
@@ -248,7 +246,7 @@ Requirements:
 | `PQC_ROUND_TIMEOUT` | ➖ | `INTERVAL / 4` | Per-round deadline. **Must be shorter than `PQC_ROUND_INTERVAL`**, or rounds would overlap; this is rejected at startup |
 
 These must be **identical on both peers**: `PQC_ENABLED`, `PQC_ROUND_INTERVAL`
-and `MODE`. `INTERVAL` must already match for role election to work.
+and `MODE`. `INTERVAL` must already match for the key ID rotation.
 
 `PQC_MAX_KEY_AGE` derives from `PQC_ROUND_INTERVAL` and not from `INTERVAL`: the
 key ages against the round cadence, so with `INTERVAL=10s` and
@@ -306,12 +304,10 @@ answer, and rounds will simply fail.
 
 ## Part 4 — Run
 
-Two peers, hybrid mode. Alice:
+Two peers, hybrid mode. Alice, the PRIMARY:
 
 ```bash
-LISTEN_ADDRESS=10.0.0.1:9999 \
 SERVER_ADDRESS=10.0.0.2:9999 \
-ARNIKA_ID=9999 \
 ARNIKA_PSK="<same 32+ byte secret on both peers>" \
 INTERVAL=120s \
 MODE=QkdAndPqcRequired \
@@ -322,8 +318,8 @@ WIREGUARD_PEER_PUBLIC_KEY="<bob's public key>" \
 arnika
 ```
 
-Bob is the same with the addresses swapped, `ARNIKA_ID=9998` (the two IDs must
-differ in parity), and its own `KMS_URL`.
+Bob, the BACKUP, is the same with `LISTEN_ADDRESS=10.0.0.2:9999` instead of
+`SERVER_ADDRESS`, his own `KMS_URL` and Alice's public key.
 
 The startup banner reports the agreement settings:
 
@@ -337,8 +333,8 @@ PQC max key age:          4m0s
 A successful round logs:
 
 ```text
-[INFO] PQC-HPKE[9999] [OK] round 13845672 agreed a fresh PQC key (initiator)
-[INFO] PRIMARY[9999] [OK] HKDF derivation completed for QKD+PQC key
+level=INFO msg="round agreed a fresh PQC key" role=primary component=pqc-hpke round=359036774 as=initiator
+level=INFO msg="HKDF derivation completed for the QKD+PQC key" role=primary
 ```
 
 Confirm the PSK rotates on the interface:
@@ -398,7 +394,7 @@ GOEXPERIMENT=runtimesecret go test ./repositories/ -fuzz FuzzDecodeFrame -fuzzti
 | `TestPQCNextRoundAgreesAcrossPeers` | Peers 62 ms apart still target the same round |
 | **`TestPQCRunServesEachRoundOnce`** | **The scheduler never starts the same round twice** |
 | `TestPQCRoundSurvivesTransientSendFailure` | Two failed writes cost retries, not the round |
-| `TestPQCAgreementOverRealSockets` _(root package)_ | The full wiring over two real UDP sockets: the reply reaches the initiator's dialled socket |
+| `TestPQCAgreementOverRealSockets` _(root package)_ | The full wiring over two real UDP sockets: the reply reaches the PRIMARY's unconnected socket |
 
 ## Security Notes
 

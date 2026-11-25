@@ -115,12 +115,12 @@ of a result. A blank line goes in wherever the output changes kind:
   ─── cycle 1/3 ─────────────────────────────────
 
     │ kms| 2026/09/08 10:00:01 [DEBUG] [REQ] method=POST path=/api/v1/keys/CONSA/enc_keys
-    │ a1| time=2026-09-08T10:00:01.001+02:00 level=INFO msg="sending the key_id to the peer" arnika_id=9998 role=primary key_id=ffffffff-…
-    │ a2| time=2026-09-08T10:00:01.001+02:00 level=INFO msg="received a key_id from the peer" arnika_id=9999 role=backup key_id=ffffffff-…
-    │ a1| time=2026-09-08T10:00:02.002+02:00 level=INFO msg="round agreed a fresh PQC key" arnika_id=9998 component=pqc-hpke round=357756369 as=initiator
+    │ a1| time=2026-09-08T10:00:01.001+02:00 level=INFO msg="sending the key_id to the peer" role=primary key_id=ffffffff-…
+    │ a2| time=2026-09-08T10:00:01.001+02:00 level=INFO msg="received a key_id from the peer" role=backup key_id=ffffffff-…
+    │ a1| time=2026-09-08T10:00:02.002+02:00 level=INFO msg="round agreed a fresh PQC key" role=primary component=pqc-hpke round=357756369 as=initiator
 
     PASS  cycle 1/3: rotated, both ends match (key …fjz6mmI4=)
-          wg dump utun23 (profile qcicat1, ARNIKA_ID 9998):
+          wg dump utun23 (profile qcicat1, peer 9998):
           …
 
   ─── cycle 2/3 ─────────────────────────────────
@@ -129,8 +129,8 @@ of a result. A blank line goes in wherever the output changes kind:
 Each rotation cycle is fenced off that way: **cycle heading → the cycle's log
 lines → the cycle's result → the next cycle.** Log lines sit at `│`, the run's
 own output at `PASS`/`FAIL` and the indent below them, and the two are never
-adjacent without a blank line between. `a1` is `ARNIKA_ID` 9998 on qcicat1,
-`a2` is 9999 on qcicat2.
+adjacent without a blank line between. `a1` is peer 9998 on qcicat1, the primary,
+`a2` is peer 9999 on qcicat2, the backup.
 
 The simulator needs `DEBUG=true` for its request and response logging, and
 `run.sh` sets it. Arnika's own `[DEBUG]` lines — rejected packets, ACK
@@ -226,21 +226,19 @@ The exit status is the number of failed checks plus any harness errors, so
 
 Two conventions run through it:
 
-- **`utun23[9998]`** — a device with the `ARNIKA_ID` of the peer that owns it,
-  matching the `arnika_id=9998` / `arnika_id=9999` attribute in that peer's own log,
-  so a line from the harness can be lined up against the peer that produced it.
-  `qcicat1` is `ARNIKA_ID` 9998, `qcicat2` is 9999; the IDs double as the peers'
-  UDP ports, and have to differ in parity because only the lowest bit takes part
-  in the PRIMARY/BACKUP election.
+- **`utun23[9998]`**: a device with the ID of the peer that owns it, so a line
+  from the harness can be lined up against the peer that produced it. `qcicat1`
+  is 9998, the primary (`role=primary` in its log), `qcicat2` is 9999, the
+  backup, which listens on UDP port 9999.
 - **`…fjz6mmI4=`** — a preshared key by its last 9 characters (see the note
   above).
 
 `wg show … dump` is printed for the devices a check actually concerns, each
-under a heading naming the device, its profile and its `ARNIKA_ID`, because the
+under a heading naming the device, its profile and its peer ID, because the
 dump itself carries no name:
 
 ```text
-          wg dump utun23 (profile qcicat1, ARNIKA_ID 9998):
+          wg dump utun23 (profile qcicat1, peer 9998):
           PRIVKEY= PUBKEY= 41194 off
           PEERKEY= (none) 127.0.0.1:41195 100.1.2.2/32,100.1.2.3/32 1788813930 92 180 10
 ```
@@ -568,7 +566,7 @@ How each source is taken away:
   nothing to return. `1ns` and not `1ms` because an attempt over loopback can
   finish inside a millisecond. The responding peer can still answer a frame or
   two of its own — both its frames are already queued when it starts — so the
-  check reads peer a's log, whose even `ARNIKA_ID` makes it the initiator and
+  check reads peer a's log: it is the primary, which makes it the initiator and
   the end whose decision is deterministic.
 
 Each check asserts **both** halves: the PSK state above, *and* the line Arnika
@@ -658,9 +656,8 @@ sudo wg-quick down ./qcicat2.conf
 
 ## Notes
 
-- **`ARNIKA_ID` values must differ in parity.** Only the lowest bit takes part
-  in PRIMARY/BACKUP election, so two odd or two even IDs make both ends choose
-  the same role and nothing progresses. `run.sh` uses 9998 and 9999.
+- **The role follows from the address set.** Peer a gets only `SERVER_ADDRESS`
+  and is the primary, peer b gets only `LISTEN_ADDRESS` and is the backup.
 - **`100.1.2.3` is a probe address, not a peer.** It exists only so there is
   something inside `qcicat1.conf`'s `AllowedIPs` that this host does not own —
   see [How the tunnel is checked](#how-the-tunnel-is-checked).

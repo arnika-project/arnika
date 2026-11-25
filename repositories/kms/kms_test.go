@@ -178,3 +178,24 @@ func TestTheErrorLeaksNeitherBodyNorPath(t *testing.T) {
 		}
 	}
 }
+
+func TestKMSRequestGivesUpWithinItsBoundWhateverTheRetriesAllow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	repo := newTestRepo(srv.URL, 5)
+	repo.bound = 200 * time.Millisecond
+
+	start := time.Now()
+	_, _, err := repo.kmsRequest("/dec_keys?key_ID=SECRET-KEY-ID")
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("kmsRequest took %s against a hung KMS, want about its 200ms bound", took)
+	}
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if strings.Contains(err.Error(), "SECRET-KEY-ID") {
+		t.Fatalf("the request path reached the error: %v", err)
+	}
+}

@@ -2,12 +2,9 @@
 package config
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
-	"net"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -17,9 +14,8 @@ const minArnikaPSKLen = 32
 
 // Config contains the configuration values for the arnika service.
 type Config struct {
-	ListenAddress          string        // LISTEN_ADDRESS, Address to listen on for incoming connections
-	ServerAddress          string        // SERVER_ADDRESS, Address of the arnika server
-	ArnikaID               string        // ARNIKA_ID, up to 5-digit identifier (defaults to port number from ListenAddress)
+	ListenAddress          string        // LISTEN_ADDRESS, set only on the backup, which listens for the primary
+	ServerAddress          string        // SERVER_ADDRESS, set only on the primary: the backup's LISTEN_ADDRESS
 	ArnikaPSK              []byte        // ARNIKA_PSK, PSK to authenticate with the other peer
 	Certificate            string        // CERTIFICATE, Path to the client certificate file
 	PrivateKey             string        // PRIVATE_KEY, Path to the client key file
@@ -86,28 +82,31 @@ func (c *Config) IsQKDRequired() bool {
 	return c.Mode == "QkdAndPqcRequired" || c.Mode == "AtLeastQkdRequired"
 }
 
-// IsPrimary gives peers opposite roles per interval only if their ARNIKA_IDs differ in parity.
-func (c *Config) IsPrimary(intervalNum uint64) bool {
-	mac := hmac.New(sha256.New, c.ArnikaPSK)
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], intervalNum)
-	mac.Write(buf[:])
-	h := mac.Sum(nil)
+// IsPrimary reports whether this node knows its peer's address, which makes it the one that starts every exchange.
+func (c *Config) IsPrimary() bool {
+	return c.ServerAddress != ""
+}
 
-	id, _ := strconv.Atoi(c.ArnikaID)
-	xored := h[0] ^ byte(id)
-	return xored&1 == 0
+// Role names this node's fixed role for logs and the startup banner.
+func (c *Config) Role() string {
+	if c.IsPrimary() {
+		return "primary"
+	}
+	return "backup"
 }
 
 func (c *Config) PrintStartupConfig() {
 	fmt.Println("=== Arnika Configuration ===")
 	fmt.Printf("Arnika Mode:              %s\n", c.Mode)
 	fmt.Printf("Arnika Interval:          %s\n", c.Interval)
-	fmt.Printf("Arnika ID:                %s\n", c.ArnikaID)
+	fmt.Printf("Arnika Role:              %s\n", c.Role())
 	fmt.Printf("Arnika PSK:               %s\n", redactSecret(c.ArnikaPSK))
-	fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
-	fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
-	fmt.Printf("Arnika Peer Timeout:			%s\n", c.ArnikaPeerTimeout)
+	if c.IsPrimary() {
+		fmt.Printf("Arnika Peer Address:      %s\n", c.ServerAddress)
+		fmt.Printf("Arnika Peer Timeout:      %s\n", c.ArnikaPeerTimeout)
+	} else {
+		fmt.Printf("Arnika Listen Address:    %s\n", c.ListenAddress)
+	}
 	if c.IsPQCOnly() {
 		fmt.Println("QKD key reader:           DISABLED BY MODE (PqcOnly; KMS_URL ignored)")
 	} else if c.KMSURL != "" {
@@ -147,8 +146,10 @@ func (c *Config) PrintStartupConfig() {
 
 	fmt.Printf("WireGuard Interface:      %s\n", c.WireGuardInterface)
 	fmt.Printf("WireGuard Peer PublicKey: %s\n", c.WireguardPeerPublicKey)
-	fmt.Printf("Rate Limit:               %d\n", c.RateLimit)
-	fmt.Printf("Rate Window:              %s\n", c.RateWindow)
+	if !c.IsPrimary() {
+		fmt.Printf("Rate Limit:               %d\n", c.RateLimit)
+		fmt.Printf("Rate Window:              %s\n", c.RateWindow)
+	}
 	fmt.Printf("Max Clock Skew:           %s\n", c.MaxClockSkew)
 	fmt.Println("============================")
 }
@@ -168,37 +169,24 @@ func (c *Config) ZeroSecrets() {
 func Parse() (*Config, error) {
 	config := &Config{}
 	var err error
-	config.ListenAddress, err = getEnv("LISTEN_ADDRESS")
-	if err != nil {
-		return nil, err
-	}
-	config.ServerAddress, err = getEnv("SERVER_ADDRESS")
-	if err != nil {
-		return nil, err
-	}
-	arnikaIDEnv := os.Getenv("ARNIKA_ID")
-	if arnikaIDEnv != "" {
-		if len(arnikaIDEnv) > 5 {
-			return nil, fmt.Errorf("[ERROR] ARNIKA_ID must be smaller than 6 digits, got: %s", arnikaIDEnv)
-		}
-		if _, err := strconv.Atoi(arnikaIDEnv); err != nil {
-			return nil, fmt.Errorf("[ERROR] ARNIKA_ID must be a valid number: %w", err)
-		}
-		config.ArnikaID = arnikaIDEnv
-	} else {
-		_, port, err := net.SplitHostPort(config.ListenAddress)
-		if err != nil {
-			return nil, fmt.Errorf("[ERROR] failed to extract port from LISTEN_ADDRESS: %w", err)
-		}
-		config.ArnikaID = port
+	config.ListenAddress = os.Getenv("LISTEN_ADDRESS")
+	config.ServerAddress = os.Getenv("SERVER_ADDRESS")
+	if (config.ListenAddress == "") == (config.ServerAddress == "") {
+		return nil, fmt.Errorf("[ERROR] set exactly one of SERVER_ADDRESS (on the primary, the backup's address) and LISTEN_ADDRESS (on the backup)")
 	}
 	config.Certificate = getEnvOrDefault("CERTIFICATE", "")
 	config.PrivateKey = getEnvOrDefault("PRIVATE_KEY", "")
 	config.CACertificate = getEnvOrDefault("CA_CERTIFICATE", "")
+	if certs := []string{config.Certificate, config.PrivateKey, config.CACertificate}; slices.Contains(certs, "") && slices.ContainsFunc(certs, func(v string) bool { return v != "" }) {
+		return nil, fmt.Errorf("[ERROR] set all of CERTIFICATE, PRIVATE_KEY and CA_CERTIFICATE for KMS client-certificate authentication, or none of them")
+	}
 	config.KMSURL = getEnvOrDefault("KMS_URL", "")
 	kmsHTTPTimeout, err := time.ParseDuration(getEnvOrDefault("KMS_HTTP_TIMEOUT", "10s"))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_HTTP_TIMEOUT: %w", err)
+	}
+	if kmsHTTPTimeout <= 0 { // zero would disable the HTTP client timeout, so a hung KMS stalls rotation
+		return nil, fmt.Errorf("[ERROR] KMS_HTTP_TIMEOUT must be positive, got %s", kmsHTTPTimeout)
 	}
 	config.KMSHTTPTimeout = kmsHTTPTimeout
 	interval, err := time.ParseDuration(getEnvOrDefault("INTERVAL", "10s"))
@@ -256,6 +244,9 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_BACKOFF_MAX_RETRIES: %w", err)
 	}
+	if config.KMSBackoffMaxRetries < 0 { // the request loop would never reach the KMS and report it as unavailable
+		return nil, fmt.Errorf("[ERROR] KMS_BACKOFF_MAX_RETRIES must not be negative, got %d", config.KMSBackoffMaxRetries)
+	}
 	kmsBackoffBaseDelay, err := time.ParseDuration(getEnvOrDefault("KMS_BACKOFF_BASE_DELAY", "100ms"))
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse KMS_BACKOFF_BASE_DELAY: %w", err)
@@ -298,10 +289,16 @@ func Parse() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse RATE_WINDOW: %w", err)
 	}
+	if config.RateWindow <= 0 {
+		return nil, fmt.Errorf("[ERROR] RATE_WINDOW must be positive, got %s", config.RateWindow)
+	}
 	maxClockSkewStr := getEnvOrDefault("MAX_CLOCK_SKEW", "1m")
 	maxClockSkew, err := time.ParseDuration(maxClockSkewStr)
 	if err != nil {
 		return nil, fmt.Errorf("[ERROR] failed to parse MAX_CLOCK_SKEW: %w", err)
+	}
+	if maxClockSkew < time.Second { // timestamps are whole seconds, so less would accept almost nothing
+		return nil, fmt.Errorf("[ERROR] MAX_CLOCK_SKEW must be at least 1s, got %s", maxClockSkew)
 	}
 	config.MaxClockSkew = maxClockSkew
 	return config, nil

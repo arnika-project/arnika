@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
+	"strconv"
 	"time"
 
 	"github.com/arnika-project/arnika/auth"
@@ -17,7 +17,7 @@ import (
 	"github.com/arnika-project/arnika/transport"
 )
 
-// pqcDial gives the initiator its own socket connected to SERVER_ADDRESS, so the responder's reply arrives here and not on the listener.
+// pqcDial gives the primary an unconnected socket: it reports no spoofable ICMP errors, and the backup's reply to its source address also finds it behind NAT.
 func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 	send func(frame []byte) error,
 	recv func(deadline time.Time) ([]byte, error),
@@ -27,9 +27,9 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve peer address %s: %w", cfg.ServerAddress, err)
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
+	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to dial peer %s: %w", cfg.ServerAddress, err)
+		return nil, nil, fmt.Errorf("failed to open a UDP socket for peer %s: %w", cfg.ServerAddress, err)
 	}
 	psk := cfg.ArnikaPSK
 	maxClockSkew := cfg.MaxClockSkew
@@ -44,7 +44,7 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 			Timestamp: time.Now().Unix(),
 			Payload:   encrypted,
 		}
-		if err := transport.WriteConnected(conn, pkt.Marshal(psk, dirOut)); err != nil {
+		if _, err := conn.WriteToUDP(pkt.Marshal(psk, dirOut), raddr); err != nil {
 			return fmt.Errorf("failed to send PQC frame: %w", err)
 		}
 		return nil
@@ -56,12 +56,9 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 			if err := conn.SetReadDeadline(deadline); err != nil {
 				return nil, err
 			}
-			n, err := conn.Read(buf)
+			n, _, err := conn.ReadFromUDP(buf)
 			if err != nil {
-				if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, net.ErrClosed) {
-					return nil, err
-				}
-				continue // an unauthenticated ICMP error (ECONNREFUSED) must not end the wait for the authenticated reply
+				return nil, err
 			}
 			pkt, err := auth.UnmarshalPacket(psk, buf[:n], dirIn)
 			if err != nil || pkt.Type != auth.PacketPQC {
@@ -80,17 +77,27 @@ func pqcDial(cfg *config.Config, dirOut, dirIn auth.Direction) (
 	return send, recv, nil
 }
 
+// pqcLink gives the primary, which initiates every round, its socket to the backup; the backup only answers through Serve's reply.
+func pqcLink(cfg *config.Config, dirOut, dirIn auth.Direction) (
+	send func(frame []byte) error,
+	recv func(deadline time.Time) ([]byte, error),
+	err error,
+) {
+	if cfg.IsPrimary() {
+		return pqcDial(cfg, dirOut, dirIn)
+	}
+	errBackup := errors.New("the backup never starts a PQC round")
+	return func([]byte) error { return errBackup }, func(time.Time) ([]byte, error) { return nil, errBackup }, nil
+}
+
 func getPQCService(cfg *config.Config, logger *slog.Logger, dirOut, dirIn auth.Direction) (
 	*services.KeyReaderService, func(context.Context), transport.PQCHandler, error,
 ) {
-	send, recv, err := pqcDial(cfg, dirOut, dirIn)
+	send, recv, err := pqcLink(cfg, dirOut, dirIn)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-
-	isInitiator := func(round uint32) bool {
-		return cfg.IsPrimary(uint64(round))
-	}
+	isInitiator := func(uint32) bool { return cfg.IsPrimary() }
 
 	pqcRepo, err := pqchpke.NewRepository(
 		logger, send, recv, isInitiator,
@@ -103,10 +110,21 @@ func getPQCService(cfg *config.Config, logger *slog.Logger, dirOut, dirIn auth.D
 	return services.NewKeyReaderService(pqcReader{pqcRepo}), pqcRepo.Run, pqcRepo.HandleFrame, nil
 }
 
-// pqcReader lacks GetKeyByID on purpose: that is how services.KeyReaderService learns there is no key id to resolve.
+// pqcReader names each key by its round, so the backup can tell the primary which round its PSK was derived from.
 type pqcReader struct{ repo *pqchpke.Repository }
 
 func (r pqcReader) GetNewKey() (string, []byte, error) {
-	key, err := r.repo.GetNewKey()
-	return "", key, err
+	round, key, err := r.repo.Latest()
+	if err != nil {
+		return "", nil, err
+	}
+	return strconv.FormatUint(uint64(round), 10), key, nil
+}
+
+func (r pqcReader) GetKeyByID(id string) ([]byte, error) {
+	round, err := strconv.ParseUint(id, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("pqc-hpke: %q names no round: %w", id, err)
+	}
+	return r.repo.KeyForRound(uint32(round))
 }

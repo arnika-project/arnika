@@ -18,9 +18,7 @@ wg set wg0 peer $(cat /etc/arnika/node-b.pub) allowed-ips 172.16.0.2/32 endpoint
 ip link set wg0 up
 
 echo "Starting Arnika on node-a (MASTER)..."
-LISTEN_ADDRESS=10.0.0.1:9998 \
 SERVER_ADDRESS=10.0.0.2:9998 \
-ARNIKA_ID=9998 \
 INTERVAL=5s \
 KMS_URL="http://192.168.100.1:8080/api/v1/keys/CONSB" \
 WIREGUARD_INTERFACE=wg0 \

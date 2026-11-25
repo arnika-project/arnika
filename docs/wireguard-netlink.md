@@ -216,7 +216,7 @@ every build — there is no netlink-specific block to configure, and no
 `MIKROTIK_*`-style variables apply.
 
 The usual Arnika settings (`KMS_URL`, `CERTIFICATE`, `PRIVATE_KEY`,
-`CA_CERTIFICATE`, `LISTEN_ADDRESS`, `SERVER_ADDRESS`, `ARNIKA_ID`, `INTERVAL`,
+`CA_CERTIFICATE`, `SERVER_ADDRESS` or `LISTEN_ADDRESS`, `INTERVAL`,
 `MODE`, `PQC_ENABLED`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
 
 ---

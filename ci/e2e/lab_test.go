@@ -330,14 +330,18 @@ func (l *lab) startPeer(t *testing.T, n *node, transportPSK, extra string) {
 	if l.mode.qkdNone {
 		kmsEnv = ""
 	}
+	addrEnv := fmt.Sprintf("LISTEN_ADDRESS=0.0.0.0:%s", n.id)
+	if n == l.a {
+		addrEnv = fmt.Sprintf("SERVER_ADDRESS=%s:%s", n.peer.name, n.peer.id)
+	}
 	n.exec(t, `nohup env \
-		LISTEN_ADDRESS=0.0.0.0:%s SERVER_ADDRESS=%s:%s ARNIKA_ID=%s \
+		%s \
 		INTERVAL=%s MODE=%s LOG_LEVEL=debug ARNIKA_PSK=%q \
 		%s \
 		WIREGUARD_INTERFACE=wg0 WIREGUARD_PEER_PUBLIC_KEY=%q \
 		%s \
 		arnika >> /tmp/arnika.log 2>&1 &`,
-		n.id, n.peer.name, n.peer.id, n.id,
+		addrEnv,
 		interval, l.mode.name, transportPSK, kmsEnv, n.peer.pub, extra)
 }
 
@@ -885,15 +889,16 @@ func (l *lab) noKMSRequestsCheck(t *testing.T) {
 }
 
 var expectedTrouble = map[string]string{
-	"KMS request failed, retrying":                                     "the KMS was frozen, then stopped",
-	"failed to retrieve a QKD key":                                     "the PRIMARY's fetch, with the KMS gone",
-	"failed to retrieve the QKD key for the peer's key_id":             "the BACKUP's fetch, with the KMS gone",
-	"no QKD key received":                                              "the mode requires QKD and it was gone",
-	"no QKD key, falling back to the PQC key":                          "QKD gone, and optional to the mode",
-	"no QKD key, installing a PQC-only PSK":                            "QKD gone for two intervals, PQC carries on",
-	"failed to retrieve the PQC key":                                   "PQC_ROUND_TIMEOUT=1ns, and PQC required",
-	"no PQC key, falling back to the QKD key":                          "PQC_ROUND_TIMEOUT=1ns, PQC optional",
-	"round failed":                                                     "a PQC round hit its deadline or lost its peer",
+	"KMS request failed, retrying":                           "the KMS was frozen, then stopped",
+	"failed to retrieve a QKD key":                           "the PRIMARY's fetch, with the KMS gone",
+	"the KMS answered too late in the interval, skipping it": "the PRIMARY's retry, with the KMS back late in the interval",
+	"failed to retrieve the QKD key for the peer's key_id":   "the BACKUP's fetch, with the KMS gone",
+	"no QKD key received":                                    "the mode requires QKD and it was gone",
+	"no QKD key, falling back to the PQC key":                "QKD gone, and optional to the mode",
+	"no QKD key, installing a PQC-only PSK":                  "QKD gone for two intervals, PQC carries on",
+	"failed to retrieve the PQC key":                         "PQC_ROUND_TIMEOUT=1ns, and PQC required",
+	"no PQC key, falling back to the QKD key":                "PQC_ROUND_TIMEOUT=1ns, PQC optional",
+	"round failed": "a PQC round hit its deadline or lost its peer",
 	"configuring a random PSK to invalidate the WireGuard session":     "the invalidation the line above asked for",
 	"no key_id from the peer":                                          "a peer stopped mid-interval by a fault phase",
 	"packet rejected":                                                  "a peer with the wrong ARNIKA_PSK, as that phase asked for",

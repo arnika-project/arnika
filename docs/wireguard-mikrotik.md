@@ -306,7 +306,7 @@ effect: with `MIKROTIK_TLS_INSECURE=true` the CA file is not consulted. TLS 1.2
 is the enforced minimum either way.
 
 The usual Arnika settings (`KMS_URL`, `CERTIFICATE`, `PRIVATE_KEY`,
-`CA_CERTIFICATE`, `LISTEN_ADDRESS`, `SERVER_ADDRESS`, `ARNIKA_ID`, `INTERVAL`,
+`CA_CERTIFICATE`, `SERVER_ADDRESS` or `LISTEN_ADDRESS`, `INTERVAL`,
 `MODE`, `PQC_ENABLED`, …) apply unchanged — see [`INSTALL.md`](../INSTALL.md).
 [Part 4, Step 4](#step-4--environment-and-certificate-mount) shows a complete
 working set in RouterOS form.
@@ -488,9 +488,8 @@ A veth shows `I` (inactive) until a container runs on it — expected.
 /container/envs/add list=arnikaenv key=PRIVATE_KEY    value="/arnika-certs/client.key"
 
 # --- peer coordination and rotation ---
+# the BACKUP sets only LISTEN_ADDRESS, the PRIMARY only SERVER_ADDRESS
 /container/envs/add list=arnikaenv key=LISTEN_ADDRESS value="0.0.0.0:9000"
-/container/envs/add list=arnikaenv key=SERVER_ADDRESS value="<PEER_ARNIKA_IP>:9000"
-/container/envs/add list=arnikaenv key=ARNIKA_ID      value="2"
 /container/envs/add list=arnikaenv key=INTERVAL       value="60s"
 /container/envs/add list=arnikaenv key=MODE           value="AtLeastQkdRequired"
 
@@ -504,8 +503,7 @@ When two Arnika instances form a pair, these differ per node:
 
 | Env var | Meaning |
 | --- | --- |
-| `SERVER_ADDRESS` | The **peer** Arnika's `LISTEN_ADDRESS` |
-| `ARNIKA_ID` | Decides which side is PRIMARY for a given interval. Set it explicitly on both nodes, and give the two values **different parity** — one odd, one even. Only the lowest bit is used, so two odd or two even IDs make both nodes pick the same role in every interval |
+| `LISTEN_ADDRESS` / `SERVER_ADDRESS` | Decides the role. The BACKUP sets only `LISTEN_ADDRESS`, the address it listens on; the PRIMARY sets only `SERVER_ADDRESS`, the BACKUP's `LISTEN_ADDRESS` as reachable from the PRIMARY. Exactly one node is the PRIMARY |
 | `WIREGUARD_PEER_PUBLIC_KEY` | The **other** router's public key |
 | `MIKROTIK_URL` | Each node points at its **own** router |
 
@@ -514,7 +512,7 @@ And these must be **identical** on both nodes:
 | Env var | Meaning |
 | --- | --- |
 | `ARNIKA_PSK` | Shared secret authenticating and encrypting the peer channel. Must be set — with it unset the channel keys derive from the empty string and provide no protection |
-| `INTERVAL` | Roles are elected per interval number, so differing intervals drift the two nodes apart |
+| `INTERVAL` | The PRIMARY rotates and the BACKUP expects a key ID on wall-clock interval boundaries, so differing intervals drift the two nodes apart |
 | `MODE` | Both sides must agree on which key sources are mandatory |
 
 ### Step 5 — Create and start
