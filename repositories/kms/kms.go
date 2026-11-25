@@ -56,28 +56,40 @@ type Repository struct {
 	conn             *http.Client
 }
 
-func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, auth *Auth) *Repository {
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{ // never InsecureSkipVerify, see GHSA-rc6v-5rmx-w5mv
-			MinVersion: tls.VersionTLS12,
-		},
-		Proxy: http.ProxyFromEnvironment,
+// TLSConfig returns the client TLS configuration implied by the auth settings.
+// A nil or empty Auth yields a configuration that still verifies the server
+// against the system root store.
+func (a *Auth) TLSConfig() (*tls.Config, error) {
+	cfg := &tls.Config{ // never InsecureSkipVerify, see GHSA-rc6v-5rmx-w5mv
+		MinVersion: tls.VersionTLS12,
 	}
-	if auth.IsClientCertAuth() {
-		clientCert, err := tls.LoadX509KeyPair(*auth.cert, *auth.key)
-		if err != nil {
-			slog.Error("failed to load the KMS client certificate", "cert", *auth.cert, "key", *auth.key, "err", err)
-			os.Exit(1)
-		}
-		tr.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
-		caCert, err := os.ReadFile(*auth.cacert)
-		if err != nil {
-			slog.Error("failed to read the KMS CA certificate", "cacert", *auth.cacert, "err", err)
-			os.Exit(1)
-		}
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
-		tr.TLSClientConfig.RootCAs = caCertPool
+	if !a.IsClientCertAuth() {
+		return cfg, nil
+	}
+	clientCert, err := tls.LoadX509KeyPair(*a.cert, *a.key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load the client certificate %q: %w", *a.cert, err)
+	}
+	caCert, err := os.ReadFile(*a.cacert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the CA certificate %q: %w", *a.cacert, err)
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+	cfg.Certificates = []tls.Certificate{clientCert}
+	cfg.RootCAs = caCertPool
+	return cfg, nil
+}
+
+func NewRepository(url string, timeout time.Duration, maxRetries int, backoffBaseDelay time.Duration, auth *Auth) *Repository {
+	tlsConfig, err := auth.TLSConfig()
+	if err != nil {
+		slog.Error("failed to configure the KMS TLS client", "err", err)
+		os.Exit(1)
+	}
+	tr := &http.Transport{
+		TLSClientConfig: tlsConfig,
+		Proxy:           http.ProxyFromEnvironment,
 	}
 	return &Repository{
 		baseURL:          url,

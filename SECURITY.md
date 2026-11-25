@@ -341,6 +341,15 @@ with its cleartext message-type byte. The PQC agreement adds one new type value 
 of larger datagrams once per interval. Claims about this port should say _unscannable_, not
 _unfingerprintable_.
 
+### SKIP Protocol (`KMS_PROTOCOL=skip`)
+
+When configured to use the alternative SKIP protocol (`KMS_PROTOCOL=skip`), Arnika relies on `SKIP_REMOTE_SYSTEM_ID` to correctly target the remote peer's identifier on the KMS endpoint.
+
+- **Remote System ID Validation**: Both peers must correctly configure `SKIP_REMOTE_SYSTEM_ID` to match the expected remote system ID. A mismatch leads to key retrieval failures or incorrect key mapping.
+- **Transport Security**: The `KMS_URL` endpoint must enforce TLS validation (using proper `CA_CERTIFICATE` or system roots) to prevent man-in-the-middle attacks, identical to the standard ETSI014 protocol adapter.
+- **Input Sanitization**: All incoming identifiers and key material values handled via the SKIP adapter are strictly validated and hex-encoded.
+
+
 ---
 
 ## Secure Deployment Checklist
@@ -380,6 +389,7 @@ _unfingerprintable_.
 - [ ] `ARNIKA_PSK` is at least 32 bytes of CSPRNG output (Arnika refuses to start otherwise)
 - [ ] Process is isolated with `ProtectSystem=strict`, `PrivateTmp=true`, and
   `NoNewPrivileges=true` in the systemd unit
+- [ ] When using `KMS_PROTOCOL=skip`, `SKIP_REMOTE_SYSTEM_ID` is correctly configured and matches the expected peer identifier
 
 ### Example Minimal systemd Hardening Snippet
 
